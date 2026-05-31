@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (2026-06-01)
+# Deploy Status — opc_uname (updated 2026-05-31 21:17 by opc2_uname)
 
 ## Architecture
 ```
@@ -8,10 +8,10 @@ CC → 40001(proxy, format conversion + 401 resilience retry) → 41001(LiteLLM 
 
 ## Containers (all healthy)
 - cc_postgres :5432
-- glm5.1_uni41001 :41001 (77 deployments: 11 variants × 7 keys, rpm=1)
-- dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys, rpm=1)
-- auth_to_api_40001 :40001 (proxy, ~1000 lines, format conversion + 401 resilience retry)
-- auth_to_api_40002 :40002 (Codex proxy, framework only)
+- glm5.1_uni41001 :41001 (66 deployments: 11 variants × 6 keys, KEY5 revoked)
+- dsv4p_uni42001 :42001 (66 deployments: 11 variants × 6 keys, KEY5 revoked)
+- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + 401 resilience retry)
+- auth_to_api_40002 :40002 (Codex proxy, same codebase)
 
 ## Router Settings (updated 2026-06-01)
 - num_retries: 3
@@ -59,7 +59,26 @@ Fixes applied (三层防御):
 - opc2_uname docker-compose env `LITELLM_URL_GLM51=http://host:4000` (no path) → proxy forwarded to bare host → 405 Method Not Allowed
 - Fixed: `_ensure_url_path()` helper auto-appends `/v1/chat/completions` if env var lacks path
 
-## Test Results (2026-06-01)
-- opc_uname: glm5.1 OK, dsv4p OK
-- opc2_uname: glm5.1 5/5 OK, dsv4p OK
-- Both machines fully synced with new configs
+### MODEL_MAP Not Applied to Forwarded Requests (fixed 2026-05-31)
+- **Root cause of `400 Invalid model name model=claude-opus-4-7` error**
+- MODEL_MAP defined mappings (claude-opus-4-7→glm5.1 etc.) but was never applied to the model name sent to LiteLLM
+- Two forwarding paths both bypassed MODEL_MAP:
+  1. `/v1/messages`: `anth_to_openai(anth_body)` took raw model name from request body → LiteLLM received `claude-opus-4-7` instead of `glm5.1`
+  2. `/chat/completions`: MODEL_MAP used for upstream routing but raw body forwarded unchanged → same model name issue
+- Proxy logs confirmed: `model=claude-opus-4-8→claude-opus-4-8` (no mapping applied)
+- After fix: `model=claude-opus-4-8→glm5.1` (mapping correctly applied)
+- 4×400 errors observed in error_detail logs at 19:37-19:42 (before fix deployment)
+
+### _stream_to_anth delta UnboundLocalError (fixed 2026-05-31)
+- Line 820 referenced `delta.get()` before line 826 defined `delta = chunk_data.get(...)`
+- Caused streaming requests to crash with 502 "cannot access local variable 'delta' where it is not associated with a value"
+- 2×502 crashes observed in logs at 19:29:00 and 19:29:10
+- Fix: moved delta/finish_reason definitions before first usage
+
+## Test Results (2026-05-31, opc2_uname proxy rebuilt)
+- claude-opus-4-7 → glm5.1: ✅ 200
+- claude-opus-4-8 → glm5.1: ✅ 200
+- claude-sonnet-4-6 → glm5.1: ✅ 200 (intermittent 500 from ModelScope choices=None, non-proxy bug)
+- dsv4p → dsv4p: ✅ 200
+- delta crash: ✅ no more UnboundLocalError after rebuild
+- 400 Invalid model: ✅ no more after MODEL_MAP fix deployment
