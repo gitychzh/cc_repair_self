@@ -1,0 +1,634 @@
+# 41001 LiteLLM Config — GLM-5.1 only (11 variants × 7 keys = 77 deployments, rpm=1)
+# IMMUTABLE: 11 variant IDs and rpm=1 MUST NOT be changed
+# Each variant has independent 200/id/day quota on ModelScope
+
+model_list:
+  # ─── variant 1: zhipuai/glm-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v1
+      model: openai/zhipuai/glm-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: &glm_allowed
+        - max_tokens
+        - max_completion_tokens
+        - reasoning_effort
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v1
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 2: ZHipuAI/GlM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v2
+      model: openai/ZHipuAI/GlM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v2
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 3: ZhIpuAI/GLm-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v3
+      model: openai/ZhIpuAI/GLm-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v3
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 4: ZhiPuAI/gLM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v4
+      model: openai/ZhiPuAI/gLM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v4
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 5: ZhipUAI/GlM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v5
+      model: openai/ZhipUAI/GlM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v5
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 6: ZhipuAi/GLM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v6
+      model: openai/ZhipuAi/GLM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v6
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 7: ZhipuaI/GLm-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v7
+      model: openai/ZhipuaI/GLm-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v7
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 8: zhipuAI/gLM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v8
+      model: openai/zhipuAI/gLM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v8
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 9: ZHIPUAI/GLM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v9
+      model: openai/ZHIPUAI/GLM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v9
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 10: zhipuai/GLM-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v10
+      model: openai/zhipuai/GLM-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v10
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 11: ZhiPUAI/glm-5.1 ───
+  - model_name: glm5.1
+    litellm_params: &glm51_v11
+      model: openai/ZhiPUAI/glm-5.1
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 180
+      allowed_openai_params: *glm_allowed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: glm5.1
+    litellm_params:
+      <<: *glm51_v11
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+litellm_settings:
+  drop_params: false
+  json_logs: true
+  request_timeout: 600
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+router_settings:
+  num_retries: 5
+  cooldown_time: 15
+  routing_strategy: simple-shuffle
+  enable_pre_call_checks: true
+  allowed_fails_policy:
+    BadRequestErrorAllowedFails: 0
+    RateLimitErrorAllowedFails: 3
+    TimeoutErrorAllowedFails: 3

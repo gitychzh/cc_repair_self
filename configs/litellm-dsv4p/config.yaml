@@ -1,0 +1,607 @@
+# 41002 LiteLLM Config — DSv4P only (11 variants × 7 keys = 77 deployments, rpm=1)
+# IMMUTABLE: 11 variant IDs and rpm=1 MUST NOT be changed
+# Each variant has independent 200/id/day quota on ModelScope
+
+model_list:
+  # ─── variant 1: deepseek-ai/deepseek-v4-pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v1
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 2: deepseek-ai/Deepseek-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v2
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 3: deepseek-ai/DeepSeek-v4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v3
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 4: deepseek-ai/DeepSeek-v4-pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v4
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 5: deepseek-ai/DeepSeek-V4-PrO ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v5
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 6: deepseek-ai/DeepSeek-V4-PRo ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v6
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 7: deepseek-ai/DeepSeeK-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v7
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 8: deepseek-ai/DeepSeEk-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v8
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 9: deepseek-ai/DeepSEek-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v9
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 10: deepseek-ai/DeePSeek-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v10
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  # ─── variant 11: deepseek-ai/DeEpSeek-V4-Pro ───
+  - model_name: dsv4p
+    litellm_params: &dsv4p_v11
+      model: openai/deepseek-ai/DeEpSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY2
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY3
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY6
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY7
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+litellm_settings:
+  drop_params: false
+  json_logs: true
+  request_timeout: 600
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+router_settings:
+  num_retries: 5
+  cooldown_time: 15
+  routing_strategy: simple-shuffle
+  enable_pre_call_checks: true
+  allowed_fails_policy:
+    BadRequestErrorAllowedFails: 0
+    RateLimitErrorAllowedFails: 3
+    TimeoutErrorAllowedFails: 3

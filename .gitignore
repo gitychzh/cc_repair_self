@@ -1,0 +1,19 @@
+# Logs and temp files
+*.log
+
+# Round artifacts (generated, not needed)
+round_*
+optimizer_*
+progress.json
+
+# Secrets
+configs/.env
+
+# Python cache
+__pycache__/
+
+# OS files
+.DS_Store
+
+# Allow analysis data
+!logs/round_*_analysis.json

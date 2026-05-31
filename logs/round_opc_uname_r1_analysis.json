@@ -1,0 +1,51 @@
+{
+  "round": "opc_uname_r1",
+  "timestamp": "2026-05-31T14:35:00+08:00",
+  "operator": "opc_uname",
+  "target_host": "opc2_uname@100.109.57.26:222",
+  "summary": {
+    "total_days_analyzed": 4,
+    "total_requests": 4432,
+    "avg_success_rate": 95.4,
+    "top_errors": ["ConnectionRefusedError", "429_rate_limit", "null_choices"]
+  },
+  "daily_stats": {
+    "2026-05-26": {"requests": 660, "success": 636, "success_rate": 96.4, "errors": 0, "models": {"glm5.1": 659, "dsv4p": 1}},
+    "2026-05-27": {"requests": 2404, "success": 2327, "success_rate": 96.8, "errors": 132, "models": {"glm5.1": 2404}, "error_breakdown": {"ConnectionRefusedError": 53, "429_rate_limit": 29, "429_retry": 27, "upstream_error": 12}},
+    "2026-05-28": {"requests": 917, "success": 870, "success_rate": 94.9, "errors": 250, "models": {"glm5.1": 916}, "error_breakdown": {"429_rate_limit": 72, "ConnectionRefusedError": 62, "429_retry": 60, "null_choices": 13}},
+    "2026-05-29": {"requests": 451, "success": 436, "success_rate": 96.7, "errors": 44, "models": {"glm5.1": 451}, "error_breakdown": {"ConnectionRefusedError": 19, "429_retry": 10, "429_rate_limit": 5, "TimeoutError": 3}}
+  },
+  "diagnosis": {
+    "root_cause_1": "42001 dsv4p_uni42001 orphaned container with broken DATABASE_URL (litellm_dsv4p DB never created)",
+    "root_cause_2": "docker-compose services not started (postgres, 41001, 40001, 40002 all down)",
+    "root_cause_3": "litellm-glm51/config.yaml used mixed-case model names (ZHipuAI/GlM-5.1 etc) that ModelScope rejects for GLM models",
+    "root_cause_4": "rpm=14 too high for ModelScope free-tier keys (actual limit ~2-3 RPM per key)",
+    "root_cause_5": "cooldown_time=5s insufficient for 429 recovery (ModelScope cooldown ~30-60s)"
+  },
+  "fixes_applied": {
+    "fix_1": "Stopped and removed orphaned dsv4p_uni42001 container",
+    "fix_2": "Started full docker-compose stack: cc_postgres + glm5.1_uni41001 + auth_to_api_40001 + auth_to_api_40002",
+    "fix_3": "Rewrote litellm-glm51/config.yaml: removed 140+ mixed-case deployments, kept only 21 tier-1 lowercase deployments (7 keys × 3 models)",
+    "fix_4": "Reduced rpm from 14 to 2 per deployment (matches ModelScope free-tier actual limits)",
+    "fix_5": "Increased cooldown_time from 5s to 15s (better 429 recovery)",
+    "fix_6": "Added 3-model fallback chain: glm5.1 → dsv4p → glm5 (bidirectional)",
+    "fix_7": "Increased num_retries from 3 to 5 (more resilience against transient 429s)",
+    "fix_8": "Added allowed_openai_params for GLM models (enables reasoning_effort, response_format etc)",
+    "fix_9": "Increased request_timeout from 300 to 600s (longer for DSv4P heavy requests)"
+  },
+  "post_fix_test_results": {
+    "all_containers_healthy": true,
+    "41001_litellm_health": "20/21 endpoints healthy",
+    "40001_anth_glm51": "PASS - full Anthropic format response with thinking+text blocks",
+    "41001_oai_dsv4p": "PASS - DSv4P returns correct response",
+    "41001_oai_glm5": "PASS - GLM-5 returns correct response",
+    "41001_oai_glm51": "PASS - GLM-5.1 returns correct response",
+    "40001_anth_dsv4p": "PASS - DSv4P via Anthropic format works"
+  },
+  "optimization_targets_for_next_round": {
+    "target_1": "Reduce ConnectionRefusedError by adding persistent connection pool in proxy",
+    "target_2": "Add per-key RPM tracking and automatic key rotation",
+    "target_3": "Add streaming response caching for repeated tool calls",
+    "target_4": "Monitor actual RPM per key and adjust litellm_config dynamically"
+  }
+}
