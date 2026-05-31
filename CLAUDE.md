@@ -25,7 +25,7 @@ Claude Code → :40001 proxy (格式转换 + metrics + input safety)
 | **rpm=1 per deployment** | 每个deployment限速1 RPM，7key×11variant=77 RPM/model。**绝对禁止修改** |
 | frontend model_name | `glm5.1`, `dsv4p` — proxy/LiteLLM使用这两个名字 |
 | Docker container names | `glm5.1_uni41001`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
-| port assignments | 41001=glm5.1, 42001=dsv4p (admin directive, 41002 removed) |
+| port assignments | 41001=glm5.1, 42001=dsv4p |
 
 ### 11 Variant Model IDs（禁止增删改）
 
@@ -67,7 +67,7 @@ configs/
   postgres/init-db.sh       # PostgreSQL初始化脚本
   proxy/
     Dockerfile              # proxy容器构建
-    proxy.py                # 格式转换代理（~950行：格式转换+metrics+input safety，无retry）
+    proxy.py                # 格式转换代理（784行，仅格式转换）
   DEPLOY_STATUS.md          # 当前部署状态
 scripts/
   backup_config.sh          # 配置备份

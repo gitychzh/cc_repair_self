@@ -33,11 +33,11 @@
   "post_fix_test_results": {
     "all_containers_healthy": true,
     "41001_litellm": "healthy (77 deployments: 11 variants × 7 keys)",
-    "41002_litellm": "healthy (77 deployments: 11 variants × 7 keys)",
+    "42001_litellm": "healthy (77 deployments: 11 variants × 7 keys)",
     "40001_anth_glm51": "PASS - Anthropic format with thinking+text blocks",
     "40001_anth_dsv4p": "PASS - Anthropic format with thinking+text blocks",
     "41001_oai_glm51": "PASS - OpenAI format",
-    "41002_oai_dsv4p": "PASS - OpenAI format",
+    "42001_oai_dsv4p": "PASS - OpenAI format",
     "remote_claude_cli": "PASS - v2.1.158 working"
   },
   "optimization_targets_for_next_round": {

@@ -2,11 +2,11 @@
 # proxy.py (40001/40002) — format conversion + metrics logging + input safety
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry
 #
-# Admin directive: 41001=glm5.1, 42001=dsv4p (unified), 41002 removed
+# Port assignments: 41001=glm5.1, 42001=dsv4p
 
 services:
   cc_postgres:
-    image: postgres:14-alpine
+    image: postgres:16-alpine
     container_name: cc_postgres
     restart: unless-stopped
     environment:
@@ -39,7 +39,7 @@ services:
       start_period: 30s
 
   glm5.1_uni41001:
-    image: ghcr.io/berriai/litellm:v1.83.14-stable.patch.1
+    image: litellm/litellm:v1.85.1
     container_name: glm5.1_uni41001
     restart: unless-stopped
     environment:
@@ -86,7 +86,7 @@ services:
       - "4000"
 
   dsv4p_uni42001:
-    image: ghcr.io/berriai/litellm:v1.83.14-stable.patch.1
+    image: litellm/litellm:v1.85.1
     container_name: dsv4p_uni42001
     restart: unless-stopped
     environment:
@@ -139,10 +139,8 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000/v1/chat/completions
-      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51: http://glm5.1_uni41001:4000/v1/models
-      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
+      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000
+      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
@@ -164,10 +162,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
           cpus: "0.5"
         reservations:
-          memory: 128M
+          memory: 256M
           cpus: "0.1"
     healthcheck:
       test:
@@ -185,10 +183,8 @@ services:
     container_name: auth_to_api_40002
     restart: unless-stopped
     environment:
-      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000/v1/chat/completions
-      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51: http://glm5.1_uni41001:4000/v1/models
-      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
+      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000
+      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
@@ -210,10 +206,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
           cpus: "0.5"
         reservations:
-          memory: 128M
+          memory: 256M
           cpus: "0.1"
     healthcheck:
       test:

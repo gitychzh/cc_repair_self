@@ -3,7 +3,7 @@
 # Each variant has independent 200/id/day quota on ModelScope
 #
 # opc2_uname_r1 changes (data-driven):
-#   - Port 41002→42001 (admin directive: 41001=glm5.1, 42001=dsv4p)
+#   - Port 41002→42001 (41002 was input error, corrected to 42001: 41001=glm5.1, 42001=dsv4p)
 #   - timeout: 120→300 per deployment (remote had 120, too short)
 #   - request_timeout: 600→300 (matches remote validated)
 #   - lowest_latency_buffer: 0.0→0.1 (0.0 always picks fastest, 0.1 allows load balancing)

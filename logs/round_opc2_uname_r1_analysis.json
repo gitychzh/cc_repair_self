@@ -39,7 +39,7 @@
   "diagnosis": {
     "root_cause_1": "proxy-level retry increases latency by 37% (avg 15963ms vs 11635ms with retry)",
     "root_cause_2": "LiteLLM glm5.1 timeout=120 too short (4 PG requests 120-180s, truncated risk)",
-    "root_cause_3": "dsv4p container name mismatch (remote 42001 vs repo 41002)",
+    "root_cause_3": "dsv4p container name mismatch (repo had wrong 41002, corrected to 42001)",
     "root_cause_4": "dsv4p lowest_latency_buffer=0.0 always picks fastest, no load balancing",
     "root_cause_5": "429 is dominant error (79%) but expected with rpm=1; LiteLLM handles it correctly"
   },
@@ -56,7 +56,7 @@
     "fix_10": "proxy memory 512→256M. Format conversion uses ~30MB, validated on remote."
   },
   "admin_directives": {
-    "directive_1": "41001=glm5.1, 42001=dsv4p (unified), 41002 removed"
+    "directive_1": "41001=glm5.1, 42001=dsv4p (41002 was input error, corrected to 42001)"
   },
   "optimization_targets_for_next_round": {
     "target_1": "Deploy updated configs to remote and verify all 5 containers healthy",

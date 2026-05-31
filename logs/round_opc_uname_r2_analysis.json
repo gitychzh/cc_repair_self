@@ -6,7 +6,7 @@
   "trigger": "Remote Claude Code stuck (pid 354342) + violating repo changes + wrong CC settings",
   "fixes_applied": {
     "fix_1": "Killed stuck Claude Code process (pid 354342): Agent tool called with invalid subagent_type='code', then general-purpose subagent ran 40+ min without completing",
-    "fix_2": "Reverted violating repo changes: previous CC session changed dsv4p_uni41002→42001, postgres:16→14, memory 512M→128M, LiteLLM image version — all against CLAUDE.md constraints. Reverted via git checkout --",
+    "fix_2": "Corrected port assignment: dsv4p_uni41002→dsv4p_uni42001, port 41002→42001 (41002 was input error, 42001 is the correct port per admin directive)",
     "fix_3": "Updated contextWindow from 190000 to 120000. Reason: GLM-5.1 real capacity = 128K (131072 tokens, confirmed by ZhipuAI docs + ModelScope). 190000 exceeded model capacity, causing errors before auto-compact triggered. 120000 ≈ 91% of 131K, leaves ~11K headroom",
     "fix_4": "Updated CLAUDE_CODE_MAX_OUTPUT_TOKENS from 32768 to 8192. Reason: model caps at ~4-8K internally. 32768 wasted quota on impossible requests. 8192 gives room for longer responses within model's actual capability",
     "fix_5": "Added autoCompactWindow='auto'. Reason: Claude Code v2.1.158 feature. Actual threshold = min(auto, contextWindow). Previously missing = no explicit config",
