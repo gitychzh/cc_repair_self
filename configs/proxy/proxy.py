@@ -816,14 +816,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     continue
 
+                # Check for finish in stream
+                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+
                 # Record TTFT on first meaningful chunk
                 if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
                     metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
                     ttfb_recorded = True
-
-                # Check for finish in stream
-                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
-                delta = chunk_data.get("choices", [{}])[0].get("delta", {})
 
                 # Handle reasoning/thinking content
                 reasoning = delta.get("reasoning_content", "")
