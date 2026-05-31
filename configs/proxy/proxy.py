@@ -103,8 +103,6 @@ _log_lock = threading.Lock()
 _metrics_lock = threading.Lock()
 _error_detail_lock = threading.Lock()
 
-_log_lock = threading.Lock()
-
 def _log(level, msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:10]
     line = f"[{ts}] [{level}] {msg}"
@@ -685,194 +683,211 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         message_start_sent = False
+        message_delta_sent = False
         ttfb_recorded = False
         buffer = ""
         next_block_idx = 0
         # Track active content blocks by type to emit content_block_stop at transitions
         active_block_type = None  # "thinking", "text", or "tool_use"
 
-        while True:
-            chunk = resp.read(1)
-            if not chunk:
-                break
-            buffer += chunk.decode("utf-8", errors="replace")
+        def _emit_message_start(msg_id=None):
+            """Helper to emit message_start event."""
+            nonlocal message_start_sent
+            self._send_sse("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id or f"msg_{uuid.uuid4().hex[:24]}",
+                    "type": "message", "role": "assistant",
+                    "model": request_model, "content": [],
+                    "stop_reason": None, "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                              "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 0},
+                },
+            })
+            message_start_sent = True
 
-            while "\n\n" in buffer:
-                event_str, buffer = buffer.split("\n\n", 1)
-                lines = event_str.split("\n")
-                event_type = None
-                data_str = ""
-                for line in lines:
-                    if line.startswith("event:"):
-                        event_type = line[6:].strip()
-                    elif line.startswith("data:"):
-                        data_str = line[5:].strip()
+        def _emit_graceful_end(stop_reason="end_turn", output_tokens=0):
+            """Close any active blocks, emit message_delta + message_stop."""
+            nonlocal message_start_sent, message_delta_sent, active_block_type
+            if active_block_type is not None:
+                self._send_sse("content_block_stop",
+                               {"type": "content_block_stop", "index": next_block_idx - 1})
+                active_block_type = None
+            if not message_start_sent:
+                _emit_message_start()
+            if not message_delta_sent:
+                self._send_sse("message_delta", {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                    "usage": {"output_tokens": output_tokens},
+                })
+                message_delta_sent = True
+            self._send_sse("message_stop", {"type": "message_stop"})
+            metrics["status"] = 200
+            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+            _log_metrics(metrics)
+            try:
+                conn.close()
+            except Exception:
+                pass
 
-                if not data_str or data_str == "[DONE]":
-                    # Close any active content block
-                    if active_block_type is not None:
-                        self._send_sse("content_block_stop",
-                                       {"type": "content_block_stop", "index": next_block_idx - 1})
-                        active_block_type = None
-                    # Emit message_start if not yet sent (empty stream edge case)
+        try:
+            while True:
+                # Read larger chunks for better throughput (was byte-by-byte)
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                buffer += chunk.decode("utf-8", errors="replace")
+
+                while "\n\n" in buffer:
+                    event_str, buffer = buffer.split("\n\n", 1)
+                    lines = event_str.split("\n")
+                    event_type = None
+                    data_str = ""
+                    for line in lines:
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data_str = line[5:].strip()
+
+                    if not data_str or data_str == "[DONE]":
+                        # Stream complete — close gracefully
+                        _emit_graceful_end()
+                        return
+
+                    # LiteLLM sends data without event: line — only skip if explicitly not "chunk"
+                    if event_type and event_type != "chunk":
+                        continue
+
+                    try:
+                        chunk_data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        # Log malformed chunks instead of silently skipping
+                        _log("WARN", f"malformed SSE chunk: {data_str[:200]}")
+                        continue
+
+                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                    finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
+
+                    # Emit message_start on first real content
                     if not message_start_sent:
-                        self._send_sse("message_start", {
-                            "type": "message_start",
-                            "message": {
-                                "id": f"msg_{uuid.uuid4().hex[:24]}",
-                                "type": "message", "role": "assistant",
-                                "model": request_model, "content": [],
-                                "stop_reason": None, "stop_sequence": None,
-                                "usage": {"input_tokens": 0, "output_tokens": 0,
-                                          "cache_creation_input_tokens": 0,
-                                          "cache_read_input_tokens": 0},
-                            },
+                        _emit_message_start(chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"))
+
+                    # Record TTFB on first meaningful delta
+                    if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
+                        metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
+                        ttfb_recorded = True
+
+                    # ── Reasoning/thinking content ──
+                    reasoning = delta.get("reasoning_content")
+                    if reasoning:
+                        if active_block_type != "thinking":
+                            # Close previous block if any
+                            if active_block_type is not None:
+                                self._send_sse("content_block_stop",
+                                               {"type": "content_block_stop", "index": next_block_idx - 1})
+                            self._send_sse("content_block_start", {
+                                "type": "content_block_start", "index": next_block_idx,
+                                "content_block": {"type": "thinking", "thinking": "",
+                                                  "signature": os.environ.get("THINKING_SIGNATURE", "")},
+                            })
+                            next_block_idx += 1
+                            active_block_type = "thinking"
+                        self._send_sse("content_block_delta", {
+                            "type": "content_block_delta", "index": next_block_idx - 1,
+                            "delta": {"type": "thinking_delta", "thinking": reasoning},
                         })
-                    # Finalize metrics and log
-                    metrics["status"] = 200
-                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                    _log_metrics(metrics)
-                    # Send message_stop
-                    self._send_sse("message_stop", {"type": "message_stop"})
-                    conn.close()
-                    return
 
-                if event_type != "chunk":
-                    continue
-
-                try:
-                    chunk_data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
-
-                # Emit message_start on first real content
-                if not message_start_sent:
-                    self._send_sse("message_start", {
-                        "type": "message_start",
-                        "message": {
-                            "id": chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
-                            "type": "message", "role": "assistant",
-                            "model": request_model, "content": [],
-                            "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0,
-                                      "cache_creation_input_tokens": 0,
-                                      "cache_read_input_tokens": 0},
-                        },
-                    })
-                    message_start_sent = True
-
-                # Record TTFT on first meaningful delta
-                if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
-                    metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
-                    ttfb_recorded = True
-
-                # ── Reasoning/thinking content ──
-                reasoning = delta.get("reasoning_content")
-                if reasoning:
-                    if active_block_type != "thinking":
+                    # ── Text content ──
+                    text_delta = delta.get("content")
+                    # Skip empty content strings (model sends content="" alongside reasoning)
+                    if text_delta and active_block_type != "text":
                         # Close previous block if any
                         if active_block_type is not None:
                             self._send_sse("content_block_stop",
                                            {"type": "content_block_stop", "index": next_block_idx - 1})
                         self._send_sse("content_block_start", {
                             "type": "content_block_start", "index": next_block_idx,
-                            "content_block": {"type": "thinking", "thinking": ""},
+                            "content_block": {"type": "text", "text": ""},
                         })
                         next_block_idx += 1
-                        active_block_type = "thinking"
-                    self._send_sse("content_block_delta", {
-                        "type": "content_block_delta", "index": next_block_idx - 1,
-                        "delta": {"type": "thinking_delta", "thinking": reasoning},
-                    })
-
-                # ── Text content ──
-                text_delta = delta.get("content")
-                # Skip empty content strings (model sends content="" alongside reasoning)
-                if text_delta and active_block_type != "text":
-                    # Close previous block if any
-                    if active_block_type is not None:
-                        self._send_sse("content_block_stop",
-                                       {"type": "content_block_stop", "index": next_block_idx - 1})
-                    self._send_sse("content_block_start", {
-                        "type": "content_block_start", "index": next_block_idx,
-                        "content_block": {"type": "text", "text": ""},
-                    })
-                    next_block_idx += 1
-                    active_block_type = "text"
-                if text_delta:
-                    self._send_sse("content_block_delta", {
-                        "type": "content_block_delta", "index": next_block_idx - 1,
-                        "delta": {"type": "text_delta", "text": text_delta},
-                    })
-
-                # ── Tool calls ──
-                tool_calls = delta.get("tool_calls", [])
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    if tc.get("id"):
-                        # New tool call — close previous block, start new tool_use block
-                        if active_block_type is not None:
-                            self._send_sse("content_block_stop",
-                                           {"type": "content_block_stop", "index": next_block_idx - 1})
-                        self._send_sse("content_block_start", {
-                            "type": "content_block_start", "index": next_block_idx,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tc["id"],
-                                "name": fn.get("name", ""),
-                                "input": {},
-                            },
+                        active_block_type = "text"
+                    if text_delta:
+                        self._send_sse("content_block_delta", {
+                            "type": "content_block_delta", "index": next_block_idx - 1,
+                            "delta": {"type": "text_delta", "text": text_delta},
                         })
-                        next_block_idx += 1
-                        active_block_type = "tool_use"
-                        # The first tool call chunk may include partial arguments
-                        # (e.g., "{") — must emit input_json_delta for them
-                        if fn.get("arguments"):
+
+                    # ── Tool calls ──
+                    tool_calls = delta.get("tool_calls", [])
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        if tc.get("id"):
+                            # New tool call — close previous block, start new tool_use block
+                            if active_block_type is not None:
+                                self._send_sse("content_block_stop",
+                                               {"type": "content_block_stop", "index": next_block_idx - 1})
+                            self._send_sse("content_block_start", {
+                                "type": "content_block_start", "index": next_block_idx,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": tc["id"],
+                                    "name": fn.get("name", ""),
+                                    "input": {},
+                                },
+                            })
+                            next_block_idx += 1
+                            active_block_type = "tool_use"
+                            # The first tool call chunk may include partial arguments
+                            # (e.g., "{") — must emit input_json_delta for them
+                            if fn.get("arguments"):
+                                self._send_sse("content_block_delta", {
+                                    "type": "content_block_delta", "index": next_block_idx - 1,
+                                    "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]},
+                                })
+                        elif fn.get("arguments") and active_block_type == "tool_use":
                             self._send_sse("content_block_delta", {
                                 "type": "content_block_delta", "index": next_block_idx - 1,
                                 "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]},
                             })
-                    elif fn.get("arguments") and active_block_type == "tool_use":
-                        self._send_sse("content_block_delta", {
-                            "type": "content_block_delta", "index": next_block_idx - 1,
-                            "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]},
+
+                    # ── Finish ──
+                    if finish_reason:
+                        # Close the last active content block
+                        if active_block_type is not None:
+                            self._send_sse("content_block_stop",
+                                           {"type": "content_block_stop", "index": next_block_idx - 1})
+                            active_block_type = None
+                        stop_reason = "end_turn"
+                        if finish_reason == "length":
+                            stop_reason = "max_tokens"
+                        elif finish_reason == "tool_calls":
+                            stop_reason = "tool_use"
+                        metrics["finish_reason"] = finish_reason
+                        chunk_usage = chunk_data.get("usage", {})
+                        metrics["output_tokens"] = chunk_usage.get("completion_tokens", 0) or metrics.get("output_tokens", 0)
+                        metrics["input_tokens"] = chunk_usage.get("prompt_tokens", 0) or metrics.get("input_tokens", 0)
+                        self._send_sse("message_delta", {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                            "usage": {"output_tokens": chunk_usage.get("completion_tokens", 0) or 0},
                         })
+                        message_delta_sent = True
 
-                # ── Finish ──
-                if finish_reason:
-                    # Close the last active content block
-                    if active_block_type is not None:
-                        self._send_sse("content_block_stop",
-                                       {"type": "content_block_stop", "index": next_block_idx - 1})
-                        active_block_type = None
-                    stop_reason = "end_turn"
-                    if finish_reason == "length":
-                        stop_reason = "max_tokens"
-                    elif finish_reason == "tool_calls":
-                        stop_reason = "tool_use"
-                    metrics["finish_reason"] = finish_reason
-                    chunk_usage = chunk_data.get("usage", {})
-                    metrics["output_tokens"] = chunk_usage.get("completion_tokens", 0) or metrics.get("output_tokens", 0)
-                    metrics["input_tokens"] = chunk_usage.get("prompt_tokens", 0) or metrics.get("input_tokens", 0)
-                    self._send_sse("message_delta", {
-                        "type": "message_delta",
-                        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                        "usage": {"output_tokens": chunk_usage.get("completion_tokens", 0) or 0},
-                    })
+        except (http.client.RemoteDisconnected, socket.timeout, ConnectionResetError,
+                OSError, http.client.IncompleteRead) as e:
+            _log("ERR", f"stream connection error: {e}")
+            # Close gracefully so CC receives proper message_stop
+            _emit_graceful_end()
+            return
+        except Exception as e:
+            _log("ERR", f"stream unexpected error: {e}")
+            _emit_graceful_end()
+            return
 
-        # Stream ended without [DONE] — close gracefully
-        if active_block_type is not None:
-            self._send_sse("content_block_stop",
-                           {"type": "content_block_stop", "index": next_block_idx - 1})
-        if message_start_sent:
-            self._send_sse("message_stop", {"type": "message_stop"})
-        metrics["status"] = 200
-        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-        _log_metrics(metrics)
-        conn.close()
+        # Stream ended without [DONE] — close gracefully with message_delta
+        _emit_graceful_end()
 
     # ─── Passthrough for OpenAI format requests ───
     def _passthrough_openai(self):
