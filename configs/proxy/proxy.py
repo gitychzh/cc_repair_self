@@ -317,9 +317,15 @@ def anth_to_openai(body, target_model=None):
     oai_body = {
         "model": model,
         "messages": oai_messages,
-        "max_tokens": body.get("max_tokens", 4096),
         "stream": body.get("stream", False),
     }
+    # Anthropic uses max_tokens for output limit; newer versions also accept max_completion_tokens
+    # OpenAI uses max_completion_tokens (new) or max_tokens (legacy) for output limit
+    # Prefer max_completion_tokens if set, fall back to max_tokens
+    output_tokens = body.get("max_completion_tokens") or body.get("max_tokens", 4096)
+    if output_tokens:
+        oai_body["max_tokens"] = output_tokens
+        oai_body["max_completion_tokens"] = output_tokens
     if body.get("temperature"):
         oai_body["temperature"] = body["temperature"]
     if body.get("top_p"):
