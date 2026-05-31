@@ -737,8 +737,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     conn.close()
                     return
 
-                if event_type != "chunk":
-                    continue
+                if event_type and event_type != "chunk":
+                    continue  # Skip non-data SSE events (LiteLLM sends data without event: line)
 
                 try:
                     chunk_data = json.loads(data_str)
