@@ -67,7 +67,12 @@ configs/
   postgres/init-db.sh       # PostgreSQL初始化脚本
   proxy/
     Dockerfile              # proxy容器构建
-    proxy.py                # 格式转换代理（784行，仅格式转换）
+    proxy.py                # 格式转换代理（仅格式转换）
+  claude/
+    settings-opc_uname.json  # opc_uname CC settings → ~/.claude/settings.json
+    settings-opc2_uname.json # opc2_uname CC settings → ~/.claude/settings.json
+    statusline-command-opc_uname.sh  # opc_uname statusline → ~/.claude/statusline-command.sh
+    statusline-command.sh            # opc2_uname statusline → ~/.claude/statusline-command.sh
   DEPLOY_STATUS.md          # 当前部署状态
 scripts/
   backup_config.sh          # 配置备份
