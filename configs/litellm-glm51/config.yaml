@@ -622,6 +622,7 @@ litellm_settings:
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
+  background_health_checks: false
 
 router_settings:
   num_retries: 3

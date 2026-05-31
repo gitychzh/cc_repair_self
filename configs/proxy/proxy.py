@@ -47,15 +47,24 @@ MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "600"))
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.5"))
 
+def _ensure_url_path(url: str, path: str) -> str:
+    """If env var provides only host or host/v1, append the required full path."""
+    stripped = url.rstrip("/")
+    if stripped.endswith(path):
+        return url
+    if stripped.endswith("/v1"):
+        return stripped + path.replace("/v1", "", 1)
+    return stripped + path
+
 # Per-model upstream routing — chat_url and models_url
 MODEL_UPSTREAMS = {
     "glm5.1": {
-        "chat_url": os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_uni41001:4000/v1/chat/completions"),
-        "models_url": os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_uni41001:4000/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_uni41001:4000/v1/models"), "/v1/models"),
     },
     "dsv4p": {
-        "chat_url": os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"),
-        "models_url": os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
@@ -624,23 +633,94 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     error_json = json.loads(error_body)
                 except Exception:
                     error_json = {"error": error_body.decode("utf-8", errors="replace")}
-                _log("ERR", f"upstream {resp.status}: {json.dumps(error_json)[:200]}")
+                conn.close()
+
+                # Resilience retry for 401/403 AuthenticationError:
+                # LiteLLM marks KEY5 deployments as cooldown after 401, but if too many
+                # deployments are also marked unhealthy (from health check side effects),
+                # LiteLLM's own num_retries may exhaust all healthy options and return 401.
+                # Re-sending the same request once forces LiteLLM to re-route (KEY5 now in
+                # cooldown → different deployment selected). This is NOT "proxy retry of the
+                # same deployment" — it's a re-routing opportunity after cooldown kicks in.
+                should_resilience_retry = (
+                    resp.status in (401, 403)
+                    and "AuthenticationError" in json.dumps(error_json)
+                    and metrics.get("_resilience_retry_count", 0) < 1
+                )
+                if should_resilience_retry:
+                    metrics["_resilience_retry_count"] = metrics.get("_resilience_retry_count", 0) + 1
+                    _log("RESILIENCE", f"401/403 AuthError → retry #{metrics['_resilience_retry_count']} (KEY5 cooldown should force different deployment)")
+                    _log_error_detail({
+                        "request_id": request_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "error_subcategory": "401_resilience_retry_triggered",
+                        "upstream_status": resp.status,
+                        "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:1000],
+                    })
+                    try:
+                        conn2 = self._make_upstream_conn(parsed_upstream)
+                        conn2.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
+                        resp2 = conn2.getresponse()
+                        if resp2.status < 400:
+                            # Retry succeeded — stream or read the good response
+                            if is_stream:
+                                self._stream_to_anth(resp2, request_model, mapped_model, conn2, metrics, t_start)
+                                metrics["status"] = 200
+                                metrics["resilience_retry_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                _log_metrics(metrics)
+                                return
+                            else:
+                                ttfb_start2 = time.time()
+                                resp_body2 = resp2.read()
+                                oai_response2 = json.loads(resp_body2)
+                                anth_response2 = openai_to_anth(oai_response2, request_model)
+                                metrics["status"] = 200
+                                metrics["resilience_retry_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                metrics["ttfb_ms"] = int((ttfb_start2 - t_start) * 1000)
+                                usage2 = oai_response2.get("usage", {})
+                                metrics["input_tokens"] = usage2.get("prompt_tokens", 0)
+                                metrics["output_tokens"] = usage2.get("completion_tokens", 0)
+                                choices2 = oai_response2.get("choices", [])
+                                if choices2:
+                                    metrics["finish_reason"] = choices2[0].get("finish_reason")
+                                _log_metrics(metrics)
+                                self._send_json(200, anth_response2)
+                                conn2.close()
+                                return
+                        # Retry also failed — fall through to error reporting
+                        error_body2 = resp2.read()
+                        try:
+                            error_json2 = json.loads(error_body2)
+                        except Exception:
+                            error_json2 = {"error": error_body2.decode("utf-8", errors="replace")}
+                        conn2.close()
+                        # Use the retry error (more recent) for reporting
+                        error_json = error_json2
+                        resp_status_final = resp2.status
+                        _log("ERR", f"resilience retry also failed: {resp2.status} {json.dumps(error_json2)[:200]}")
+                    except Exception as e2:
+                        _log("ERR", f"resilience retry connection error: {e2}")
+                        resp_status_final = resp.status
+                else:
+                    resp_status_final = resp.status
+
+                _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
                 # Log error detail for analysis
                 _log_error_detail({
                     "request_id": request_id,
                     "timestamp": datetime.datetime.now().isoformat(),
-                    "error_subcategory": f"{resp.status}_upstream_error",
-                    "upstream_status": resp.status,
-                    "upstream_headers": dict(resp.getheaders()),
-                    "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:3000],
+                    "error_subcategory": f"{resp_status_final}_upstream_error",
+                    "upstream_status": resp_status_final,
+                    "upstream_error_body_full": json.dumps(error_json)[:3000],
                 })
-                metrics["status"] = resp.status
+                metrics["status"] = resp_status_final
                 metrics["error_type"] = "UpstreamError"
                 metrics["error_message"] = json.dumps(error_json)[:200]
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                 _log_metrics(metrics)
-                self._send_json(resp.status, self._convert_error(error_json, request_model))
-                conn.close()
+                self._send_json(resp_status_final, self._convert_error(error_json, request_model))
                 return
 
             if is_stream:
@@ -930,8 +1010,8 @@ class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
 def main():
     server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
-    _log("START", f"GLM-5.1 gateway: {LITELLM_URL_GLM51}")
-    _log("START", f"DSv4P gateway: {LITELLM_URL_DSV4P}")
+    _log("START", f"GLM-5.1 gateway: {MODEL_UPSTREAMS['glm5.1']['chat_url']}")
+    _log("START", f"DSv4P gateway: {MODEL_UPSTREAMS['dsv4p']['chat_url']}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
