@@ -1,0 +1,67 @@
+{
+  "round": "opc2_uname_r1",
+  "timestamp": "2026-05-31T12:49:40.752425",
+  "operator": "opc2_uname",
+  "target_host": "opc_uname@100.120.104.114:222",
+  "summary": {
+    "total_days_analyzed": 4,
+    "total_requests": 2874,
+    "avg_success_rate": 97.4,
+    "top_errors": [
+      "429_rate_limit (453/573=79%)",
+      "ConnectionRefusedError (108, only 5/30)",
+      "null_choices (12)"
+    ]
+  },
+  "daily_stats": {
+    "2026-05-28": {
+      "requests": 869,
+      "success_rate": 97.0,
+      "429": 72
+    },
+    "2026-05-29": {
+      "requests": 622,
+      "success_rate": 98.5,
+      "429": 95
+    },
+    "2026-05-30": {
+      "requests": 393,
+      "success_rate": 90.6,
+      "502": 36,
+      "429": 33
+    },
+    "2026-05-31": {
+      "requests": 990,
+      "success_rate": 98.1,
+      "429": 253
+    }
+  },
+  "diagnosis": {
+    "root_cause_1": "proxy-level retry increases latency by 37% (avg 15963ms vs 11635ms with retry)",
+    "root_cause_2": "LiteLLM glm5.1 timeout=120 too short (4 PG requests 120-180s, truncated risk)",
+    "root_cause_3": "dsv4p container name mismatch (remote 42001 vs repo 41002)",
+    "root_cause_4": "dsv4p lowest_latency_buffer=0.0 always picks fastest, no load balancing",
+    "root_cause_5": "429 is dominant error (79%) but expected with rpm=1; LiteLLM handles it correctly"
+  },
+  "fixes_applied": {
+    "fix_1": "Removed proxy-level retry (PROXY_MAX_RETRIES=2→0). Data: +37% latency penalty. LiteLLM handles retry internally.",
+    "fix_2": "Unified dsv4p port 41002→42001 (admin directive). Container name dsv4p_uni42001.",
+    "fix_3": "LiteLLM glm5.1 timeout 120→180. PG data: 4 requests >120s <180s would be truncated.",
+    "fix_4": "LiteLLM request_timeout 600→300. Matches remote validated value.",
+    "fix_5": "dsv4p lowest_latency_buffer 0.0→0.1. Enables load balancing across deployments.",
+    "fix_6": "Added metrics logging to proxy.py (metrics.{date}.jsonl). Essential for data-driven optimization.",
+    "fix_7": "Added error_detail logging to proxy.py (error_detail.{date}.jsonl). For root-cause analysis.",
+    "fix_8": "Added input token safety check. Prevents wasting 429 quota on over-limit requests.",
+    "fix_9": "MAX_TOOL_DESC 800→2000, MAX_SCHEMA_DESC 300→600. Remote validated.",
+    "fix_10": "proxy memory 512→256M. Format conversion uses ~30MB, validated on remote."
+  },
+  "admin_directives": {
+    "directive_1": "41001=glm5.1, 42001=dsv4p (unified), 41002 removed"
+  },
+  "optimization_targets_for_next_round": {
+    "target_1": "Deploy updated configs to remote and verify all 5 containers healthy",
+    "target_2": "Compare latency before/after removing proxy-level retry",
+    "target_3": "Validate input token safety check prevents InputTooLong errors",
+    "target_4": "Monitor dsv4p lowest_latency_buffer=0.1 effect on deployment distribution"
+  }
+}

@@ -42,6 +42,12 @@ CC → 40001(proxy, format conversion only) → 41001(LiteLLM glm5.1) → ModelS
 - Example display: `glm5.1 | 10222/200000 tokens (5% used)`
 - Uses jq to parse JSON from Claude Code stdin (model.display_name, context_window stats)
 
+### Reverted Violating Changes from opc2_uname R1
+- dsv4p_uni42001→dsv4p_uni41002 (CLAUDE.md: container names immutable)
+- postgres:14→postgres:16-alpine (no data supporting downgrade)
+- memory 128M→512M (no data supporting reduction)
+- proxy retry removal claimed "+37% latency" — reverted: proxy.py stays format-conversion only, LiteLLM handles retry
+- MODEL_INPUT_TOKEN_SAFETY_GLM51: 190000 removed (wrong: exceeds GLM-5.1 real 128K capacity)
 ### Documentation Sources
 - GLM-5.1 context window: 128K (131072 tokens) — ZhipuAI open.bigmodel.cn API docs, ModelScope model card
 - autoCompactWindow/statusLine: reverse-engineered from Claude Code v2.1.158 binary

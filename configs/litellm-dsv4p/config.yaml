@@ -1,6 +1,13 @@
-# 41002 LiteLLM Config — DSv4P only (11 variants × 7 keys = 77 deployments, rpm=1)
+# 42001 LiteLLM Config — DSv4P only (11 variants × 7 keys = 77 deployments, rpm=1)
 # IMMUTABLE: 11 variant IDs and rpm=1 MUST NOT be changed
 # Each variant has independent 200/id/day quota on ModelScope
+#
+# opc2_uname_r1 changes (data-driven):
+#   - Port 41002→42001 (admin directive: 41001=glm5.1, 42001=dsv4p)
+#   - timeout: 120→300 per deployment (remote had 120, too short)
+#   - request_timeout: 600→300 (matches remote validated)
+#   - lowest_latency_buffer: 0.0→0.1 (0.0 always picks fastest, 0.1 allows load balancing)
+#   - store_prompts_in_spend_logs + background_health_checks added
 
 model_list:
   # ─── variant 1: deepseek-ai/deepseek-v4-pro ───
@@ -590,11 +597,13 @@ model_list:
 litellm_settings:
   drop_params: false
   json_logs: true
-  request_timeout: 600
+  request_timeout: 300
+  store_prompts_in_spend_logs: true
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
+  background_health_checks: false
 
 router_settings:
   num_retries: 3

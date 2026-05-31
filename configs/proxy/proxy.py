@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
-"""Minimal Anthropic ↔ OpenAI format converter proxy.
+"""Anthropic ↔ OpenAI format converter proxy with metrics logging.
 
-Only handles protocol conversion. All retry, fallback, routing, cooldown
-logic is delegated to LiteLLM upstream.
+Format conversion only — no proxy-level retry. All retry/fallback/routing
+delegated to LiteLLM upstream.
 
 Architecture:
-  CC(40001) → this proxy (format conversion only)
+  CC(40001) → this proxy (format conversion + metrics + input safety)
       → 41001 LiteLLM (glm5.1, with retry/fallback/routing)
-      → 41002 LiteLLM (dsv4p, with retry/fallback/routing)
-
-Model routing: proxy maps Anthropic model name → LiteLLM gateway URL.
-LiteLLM handles everything else internally.
+      → 42001 LiteLLM (dsv4p, with retry/fallback/routing)
 
 Env vars:
-  LITELLM_URL_GLM51  — glm5.1 gateway (default: http://glm5.1_uni41001:4000)
-  LITELLM_URL_DSV4P  — dsv4p gateway (default: http://dsv4p_uni41002:4000)
+  LITELLM_URL_GLM51  — glm5.1 chat URL (default: http://glm5.1_uni41001:4000/v1/chat/completions)
+  LITELLM_URL_DSV4P  — dsv4p chat URL (default: http://dsv4p_uni42001:4000/v1/chat/completions)
+  LITELLM_MODELS_URL_GLM51 — glm5.1 models URL
+  LITELLM_MODELS_URL_DSV4P — dsv4p models URL
   LITELLM_KEY        — upstream API key (default: sk-litellm-local)
   LISTEN_PORT         — listen port (default: 40001)
   PROXY_TIMEOUT       — upstream timeout seconds (default: 300)
-  MAX_TOOL_DESC       — max chars for tool descriptions (default: 800)
-  MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 300)
+  MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
+  MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
+  CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 3.5)
+  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 190000)
+  MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 120000)
   LOG_DIR             — log directory (default: /app/logs)
 """
 import http.server
 import json
 import os
 import sys
+import time
 import datetime
 import threading
 import http.client
@@ -39,34 +42,51 @@ LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-local")
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "40001"))
 PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))
-MAX_TOOL_DESC = int(os.environ.get("MAX_TOOL_DESC", "800"))
-MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "300"))
+MAX_TOOL_DESC = int(os.environ.get("MAX_TOOL_DESC", "2000"))
+MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "600"))
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
+CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.5"))
 
-# Per-model LiteLLM gateway URLs — LiteLLM handles all routing/fallback/retry
-LITELLM_URL_GLM51 = os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_uni41001:4000")
-LITELLM_URL_DSV4P = os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni41002:4000")
-
-# Model name → LiteLLM gateway mapping
-# Claude Code sends Anthropic model names; we map them to the correct LiteLLM gateway
-MODEL_GATEWAYS = {
-    "glm5.1": LITELLM_URL_GLM51,
-    "glm-5.1": LITELLM_URL_GLM51,
-    "zhipuai/glm-5.1": LITELLM_URL_GLM51,
-    "dsv4p": LITELLM_URL_DSV4P,
-    "deepseek-v4-pro": LITELLM_URL_DSV4P,
-    "deepseek-ai/deepseek-v4-pro": LITELLM_URL_DSV4P,
-    # Claude Code Anthropic model names → glm5.1 gateway (primary)
-    "claude-sonnet-4-20250514": LITELLM_URL_GLM51,
-    "claude-sonnet-4-6-20250514": LITELLM_URL_GLM51,
-    "claude-opus-4-20250514": LITELLM_URL_GLM51,
-    "claude-opus-4-8-20250514": LITELLM_URL_GLM51,
-    "claude-haiku-4-5-20251001": LITELLM_URL_GLM51,
-    "claude-3-5-sonnet-20241022": LITELLM_URL_GLM51,
-    "claude-3-5-haiku-20241022": LITELLM_URL_GLM51,
-    "claude-3-opus-20240229": LITELLM_URL_GLM51,
+# Per-model upstream routing — chat_url and models_url
+MODEL_UPSTREAMS = {
+    "glm5.1": {
+        "chat_url": os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_uni41001:4000/v1/chat/completions"),
+        "models_url": os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_uni41001:4000/v1/models"),
+    },
+    "dsv4p": {
+        "chat_url": os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"),
+        "models_url": os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/models"),
+    },
 }
-DEFAULT_GATEWAY = LITELLM_URL_GLM51
+DEFAULT_UPSTREAM_MODEL = "glm5.1"
+
+# Model name → LiteLLM model_name mapping
+MODEL_MAP = {
+    "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
+    "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
+    # Claude Code names → glm5.1
+    "claude-sonnet-4-20250514": "glm5.1",
+    "claude-sonnet-4-6-20250514": "glm5.1",
+    "claude-opus-4-20250514": "glm5.1",
+    "claude-opus-4-8-20250514": "glm5.1",
+    "claude-haiku-4-5-20251001": "glm5.1",
+    "claude-3-5-sonnet-20241022": "glm5.1",
+    "claude-3-5-haiku-20241022": "glm5.1",
+    "claude-3-opus-20240229": "glm5.1",
+}
+
+# Input token safety limits (GLM-5.1: 202745 from ModelScope docs; DSv4P: 131072 conservative)
+MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745, "dsv4p": 131072}
+MODEL_INPUT_TOKEN_SAFETY = {
+    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "190000")),
+    "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "120000")),
+}
+
+DEFAULT_MODEL = "glm5.1"
+
+_log_lock = threading.Lock()
+_metrics_lock = threading.Lock()
+_error_detail_lock = threading.Lock()
 
 _log_lock = threading.Lock()
 
@@ -79,6 +99,26 @@ def _log(level, msg):
         date = datetime.date.today().isoformat()
         with _log_lock, open(os.path.join(LOG_DIR, f"proxy.{date}.log"), "a") as f:
             f.write(line + "\n")
+    except Exception:
+        pass
+
+def _log_metrics(entry):
+    """Write structured JSON metrics to metrics.{date}.jsonl for optimization analysis."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        date = datetime.date.today().isoformat()
+        with _metrics_lock, open(os.path.join(LOG_DIR, f"metrics.{date}.jsonl"), "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+def _log_error_detail(detail):
+    """Write detailed error info to error_detail.{date}.jsonl for root-cause analysis."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        date = datetime.date.today().isoformat()
+        with _error_detail_lock, open(os.path.join(LOG_DIR, f"error_detail.{date}.jsonl"), "a") as f:
+            f.write(json.dumps(detail, ensure_ascii=False, default=str) + "\n")
     except Exception:
         pass
 
@@ -427,10 +467,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ("/health", "/"):
+            gw_urls = {k: v["chat_url"] for k, v in MODEL_UPSTREAMS.items()}
             self._send_json(200, {
                 "status": "ok",
                 "proxy": "anthropic-to-openai",
-                "gateways": {"glm5.1": LITELLM_URL_GLM51, "dsv4p": LITELLM_URL_DSV4P},
+                "gateways": gw_urls,
                 "port": LISTEN_PORT,
             })
         elif parsed.path in ("/v1/models", "/models"):
@@ -462,37 +503,119 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── /v1/messages — Anthropic format request ───
     def _handle_messages(self):
+        t_start = time.time()
+        request_id = str(uuid.uuid4())[:8]
+        metrics = {
+            "request_id": request_id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "path": "/v1/messages",
+            "request_model": "?",
+            "mapped_model": "?",
+            "stream": False,
+            "num_messages": 0,
+            "num_tools": 0,
+            "system_prompt_chars": 0,
+            "total_input_chars": 0,
+            "ttfb_ms": None,
+            "duration_ms": 0,
+            "status": 0,
+            "finish_reason": None,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "tool_truncation": None,
+            "error_type": None,
+            "error_message": None,
+            "upstream": "?",
+        }
+
         try:
-            body_len = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(body_len) if body_len > 0 else b""
-            body = json.loads(raw) if raw else {}
+            length = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(length)
+            anth_body = json.loads(raw_body)
         except Exception as e:
-            self._send_json(400, {"error": f"Invalid request body: {e}"})
+            self._send_json(400, {"error": {"message": f"bad request: {e}"}})
+            metrics["status"] = 400; metrics["error_type"] = "BadRequest"; metrics["error_message"] = str(e)
+            _log("ERROR", f"bad request: {e}")
+            _log_metrics(metrics)
             return
 
-        request_model = body.get("model", "claude-sonnet-4-20250514")
-        # Map to LiteLLM model name + gateway
-        target_model = self._map_model(request_model)
-        gateway_base = self._get_gateway(request_model)
-        gateway_url = f"{gateway_base}/v1/chat/completions"
+        request_model = anth_body.get("model", DEFAULT_MODEL)
+        is_stream = anth_body.get("stream", False)
+        metrics["request_model"] = request_model
+        metrics["stream"] = is_stream
+
+        # Track system prompt size
+        system_blocks = anth_body.get("system")
+        if system_blocks:
+            if isinstance(system_blocks, str):
+                metrics["system_prompt_chars"] = len(system_blocks)
+            elif isinstance(system_blocks, list):
+                metrics["system_prompt_chars"] = sum(
+                    len(b.get("text", "")) if isinstance(b, dict) else len(b)
+                    for b in system_blocks
+                )
 
         # Convert Anthropic → OpenAI
-        oai_body = anth_to_openai(body, target_model=target_model)
-        is_stream = oai_body.get("stream", False)
+        oai_body = anth_to_openai(anth_body)
+        mapped_model = oai_body.get("model", DEFAULT_MODEL)
+        metrics["mapped_model"] = mapped_model
+        metrics["num_messages"] = len(oai_body.get("messages", []))
+        metrics["num_tools"] = len(oai_body.get("tools", []))
+        metrics["total_input_chars"] = len(json.dumps(oai_body))
 
-        _log("REQ", f"model={request_model} → {target_model} @ {gateway_base}")
+        # Track tool truncation
+        if metrics["num_tools"] > 0:
+            total_orig = sum(len(t.get("description", "")) for t in anth_body.get("tools", [])
+                            if t.get("type", "tool_use") == "tool_use")
+            total_trunc = sum(len(t.get("function", {}).get("description", ""))
+                            for t in oai_body.get("tools", [])
+                            if t.get("type") == "function")
+            metrics["tool_truncation"] = {
+                "original_total_chars": total_orig,
+                "truncated_total_chars": total_trunc,
+                "reduction_pct": round((1 - total_trunc / total_orig) * 100, 1) if total_orig > 0 else 0,
+                "num_tools": metrics["num_tools"],
+            }
 
-        # Forward to LiteLLM
+        # Select upstream
+        upstream_key = mapped_model if mapped_model in MODEL_UPSTREAMS else DEFAULT_UPSTREAM_MODEL
+        upstream = MODEL_UPSTREAMS[upstream_key]
+        litellm_url = upstream["chat_url"]
+        metrics["upstream"] = upstream_key
+
+        # ─── Input token pre-check ───
+        model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
+        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 120000)
+        estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
+        metrics["estimated_input_tokens"] = estimated_tokens
+        if estimated_tokens > model_safety:
+            _log("INPUT-EXCEED", f"estimated_tokens={estimated_tokens} > safety={model_safety}")
+            err_msg = (f"Input exceeds model limit (~{estimated_tokens} estimated input tokens, "
+                       f"max {model_max_tokens}). Please start a new conversation.")
+            metrics["status"] = 400; metrics["error_type"] = "InputTooLong"; metrics["error_message"] = err_msg
+            self._send_json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": err_msg}})
+            _log_metrics(metrics)
+            return
+
+        _log("REQ", f"model={request_model}→{mapped_model} stream={is_stream} "
+                    f"msgs={len(oai_body.get('messages',[]))} "
+                    f"tools={len(oai_body.get('tools',[]))}")
+
+        # Forward to LiteLLM (no proxy-level retry — LiteLLM handles all retry/fallback)
+        auth_key = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
         headers_out = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {LITELLM_KEY}",
+            "Authorization": f"Bearer {auth_key}",
+            "Content-Length": str(len(json.dumps(oai_body).encode("utf-8"))),
         }
         oai_data = json.dumps(oai_body).encode("utf-8")
-        parsed = urllib.parse.urlparse(gateway_url)
+        parsed_upstream = urllib.parse.urlparse(litellm_url)
 
         try:
-            conn = self._make_upstream_conn(parsed)
-            conn.request("POST", parsed.path, body=oai_data, headers=headers_out)
+            conn = self._make_upstream_conn(parsed_upstream)
+            conn.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
             resp = conn.getresponse()
 
             if resp.status >= 400:
@@ -502,33 +625,71 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     error_json = {"error": error_body.decode("utf-8", errors="replace")}
                 _log("ERR", f"upstream {resp.status}: {json.dumps(error_json)[:200]}")
-                # Convert OpenAI error to Anthropic error format
+                # Log error detail for analysis
+                _log_error_detail({
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": f"{resp.status}_upstream_error",
+                    "upstream_status": resp.status,
+                    "upstream_headers": dict(resp.getheaders()),
+                    "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:3000],
+                })
+                metrics["status"] = resp.status
+                metrics["error_type"] = "UpstreamError"
+                metrics["error_message"] = json.dumps(error_json)[:200]
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
                 self._send_json(resp.status, self._convert_error(error_json, request_model))
                 conn.close()
                 return
 
             if is_stream:
-                self._stream_to_anth(resp, request_model, target_model, conn)
+                self._stream_to_anth(resp, request_model, mapped_model, conn, metrics, t_start)
             else:
+                ttfb_start = time.time()
                 resp_body = resp.read()
                 oai_response = json.loads(resp_body)
                 anth_response = openai_to_anth(oai_response, request_model)
+                metrics["status"] = 200
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                metrics["ttfb_ms"] = int((ttfb_start - t_start) * 1000)
+                # Extract usage from response
+                usage = oai_response.get("usage", {})
+                metrics["input_tokens"] = usage.get("prompt_tokens", 0)
+                metrics["output_tokens"] = usage.get("completion_tokens", 0)
+                # Extract finish_reason
+                choices = oai_response.get("choices", [])
+                if choices:
+                    metrics["finish_reason"] = choices[0].get("finish_reason")
+                _log_metrics(metrics)
                 self._send_json(200, anth_response)
                 conn.close()
 
         except Exception as e:
             _log("ERR", f"upstream connection error: {e}")
+            metrics["status"] = 502; metrics["error_type"] = "ConnectionError"; metrics["error_message"] = str(e)
+            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+            _log_error_detail({
+                "request_id": request_id,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": "ConnectionRefusedError",
+                "upstream_status": 502,
+                "upstream_headers": {},
+                "upstream_error_body_full": str(e)[:3000],
+            })
+            _log_metrics(metrics)
             self._send_json(502, {"type": "error", "error": {"type": "api_error",
                              "message": f"Upstream connection failed: {e}"}, "model": request_model})
 
     # ─── Streaming SSE conversion ───
-    def _stream_to_anth(self, resp, request_model, target_model, conn):
+    def _stream_to_anth(self, resp, request_model, target_model, conn, metrics, t_start):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
         first_chunk = True
+        ttfb_recorded = False
         buffer = ""
         thinking_block_sent = False
         text_block_sent = False
@@ -551,6 +712,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         data_str = line[5:].strip()
 
                 if not data_str or data_str == "[DONE]":
+                    # Finalize metrics and log
+                    metrics["status"] = 200
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
                     # Send message_stop
                     self._send_sse("message_stop", {"type": "message_stop"})
                     conn.close()
@@ -563,6 +728,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     chunk_data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
+
+                # Record TTFT on first meaningful chunk
+                if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
+                    metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
+                    ttfb_recorded = True
 
                 # Check for finish in stream
                 finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
@@ -634,10 +804,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         stop_reason = "max_tokens"
                     elif finish_reason == "tool_calls":
                         stop_reason = "tool_use"
+                    metrics["finish_reason"] = finish_reason
+                    # Extract usage from last chunk
+                    chunk_usage = chunk_data.get("usage", {})
+                    metrics["output_tokens"] = chunk_usage.get("completion_tokens", 0) or metrics.get("output_tokens", 0)
+                    metrics["input_tokens"] = chunk_usage.get("prompt_tokens", 0) or metrics.get("input_tokens", 0)
                     self._send_sse("message_delta", {
                         "type": "message_delta",
                         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                        "usage": {"output_tokens": chunk_data.get("usage", {}).get("completion_tokens", 0) or 0},
+                        "usage": {"output_tokens": chunk_usage.get("completion_tokens", 0) or 0},
                     })
 
         conn.close()
@@ -646,17 +821,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _passthrough_openai(self):
         body_len = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(body_len) if body_len > 0 else b""
-
         body = json.loads(raw) if raw else {}
-        model = body.get("model", "glm5.1")
-        gateway_base = self._get_gateway(model)
-        gateway_url = f"{gateway_base}/v1/chat/completions"
+        mapped_model = MODEL_MAP.get(body.get("model", DEFAULT_MODEL), DEFAULT_MODEL)
+        upstream_key = mapped_model if mapped_model in MODEL_UPSTREAMS else DEFAULT_UPSTREAM_MODEL
+        upstream = MODEL_UPSTREAMS[upstream_key]
+        litellm_url = upstream["chat_url"]
 
         headers_out = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {LITELLM_KEY}",
         }
-        parsed = urllib.parse.urlparse(gateway_url)
+        parsed = urllib.parse.urlparse(litellm_url)
         try:
             conn = self._make_upstream_conn(parsed)
             conn.request("POST", parsed.path, body=raw, headers=headers_out)
@@ -675,57 +850,40 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── /v1/models proxy ───
     def _proxy_models(self):
-        # Merge models from both gateways
         all_models = []
-        for gateway_base in [LITELLM_URL_GLM51, LITELLM_URL_DSV4P]:
-            url = f"{gateway_base}/v1/models"
-            parsed = urllib.parse.urlparse(url)
+        seen_ids = set()
+        for model_key, upstream in MODEL_UPSTREAMS.items():
+            models_url = upstream["models_url"]
+            parsed = urllib.parse.urlparse(models_url)
             try:
                 conn = self._make_upstream_conn(parsed)
-                conn.request("GET", parsed.path, headers={"Authorization": f"Bearer {LITELLM_KEY}"})
+                conn.request("GET", parsed.path or "/v1/models", headers={"Authorization": f"Bearer {LITELLM_KEY}"})
                 resp = conn.getresponse()
+                if resp.status != 200:
+                    conn.close()
+                    continue
                 data = json.loads(resp.read())
-                models = data.get("data", [])
-                all_models.extend(models)
+                for m in data.get("data", []):
+                    model_id = m.get("id", "")
+                    if model_id not in seen_ids:
+                        seen_ids.add(model_id)
+                        upstream_key = MODEL_MAP.get(model_id, model_id)
+                        context_len = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
+                        all_models.append({
+                            "id": model_id,
+                            "object": "model",
+                            "created": m.get("created", 0),
+                            "owned_by": m.get("owned_by", ""),
+                            "context_length": context_len,
+                        })
                 conn.close()
             except Exception as e:
-                _log("ERR", f"models fetch from {gateway_base}: {e}")
-
-        # Deduplicate by id
-        seen = set()
-        unique = []
-        for m in all_models:
-            if m.get("id") not in seen:
-                seen.add(m["id"])
-                unique.append(m)
-
-        self._send_json(200, {"object": "list", "data": unique})
+                _log("ERROR", f"models proxy error for {model_key}: {e}")
+        self._send_json(200, {"object": "list", "data": all_models})
 
     # ─── Helpers ───
     def _map_model(self, model_name):
-        """Map request model name to LiteLLM model_name (frontend group)."""
-        mapping = {
-            "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
-            "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
-            # Claude Code names → glm5.1
-            "claude-sonnet-4-20250514": "glm5.1",
-            "claude-sonnet-4-6-20250514": "glm5.1",
-            "claude-opus-4-20250514": "glm5.1",
-            "claude-opus-4-8-20250514": "glm5.1",
-            "claude-haiku-4-5-20251001": "glm5.1",
-            "claude-3-5-sonnet-20241022": "glm5.1",
-            "claude-3-5-haiku-20241022": "glm5.1",
-            "claude-3-opus-20240229": "glm5.1",
-        }
-        return mapping.get(model_name, "glm5.1")
-
-    def _get_gateway(self, model_name):
-        """Map request model name to the appropriate LiteLLM gateway URL."""
-        gateway = MODEL_GATEWAYS.get(model_name)
-        if gateway:
-            return gateway
-        # Default: glm5.1 gateway
-        return DEFAULT_GATEWAY
+        return MODEL_MAP.get(model_name, DEFAULT_MODEL)
 
     def _convert_error(self, error_json, request_model):
         """Convert OpenAI error format to Anthropic error format."""
