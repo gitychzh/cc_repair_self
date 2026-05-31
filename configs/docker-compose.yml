@@ -1,9 +1,12 @@
-# Two-model architecture: 41001 (glm5.1) + 41002 (dsv4p)
-# proxy.py (40001/40002) only does format conversion — LiteLLM handles retry/fallback/routing
+# Two-model architecture: 41001 (glm5.1) + 42001 (dsv4p)
+# proxy.py (40001/40002) — format conversion + metrics logging + input safety
+# LiteLLM handles all retry/fallback/routing — proxy does NOT retry
+#
+# Admin directive: 41001=glm5.1, 42001=dsv4p (unified), 41002 removed
 
 services:
   cc_postgres:
-    image: postgres:16-alpine
+    image: postgres:14-alpine
     container_name: cc_postgres
     restart: unless-stopped
     environment:
@@ -36,7 +39,7 @@ services:
       start_period: 30s
 
   glm5.1_uni41001:
-    image: litellm/litellm:v1.85.1
+    image: ghcr.io/berriai/litellm:v1.83.14-stable.patch.1
     container_name: glm5.1_uni41001
     restart: unless-stopped
     environment:
@@ -82,9 +85,9 @@ services:
       - --port
       - "4000"
 
-  dsv4p_uni41002:
-    image: litellm/litellm:v1.85.1
-    container_name: dsv4p_uni41002
+  dsv4p_uni42001:
+    image: ghcr.io/berriai/litellm:v1.83.14-stable.patch.1
+    container_name: dsv4p_uni42001
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -101,7 +104,7 @@ services:
       - ./litellm-dsv4p/config.yaml:/app/config.yaml:ro
       - ./logs/litellm-dsv4p:/app/logs
     ports:
-      - 41002:4000
+      - 42001:4000
     networks:
       - cc-net
     depends_on:
@@ -136,13 +139,18 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000
-      LITELLM_URL_DSV4P: http://dsv4p_uni41002:4000
+      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000/v1/chat/completions
+      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://glm5.1_uni41001:4000/v1/models
+      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
-      MAX_TOOL_DESC: "800"
-      MAX_SCHEMA_DESC: "300"
+      MAX_TOOL_DESC: "2000"
+      MAX_SCHEMA_DESC: "600"
+      CHARS_PER_TOKEN_ESTIMATE: "3.5"
+      MODEL_INPUT_TOKEN_SAFETY_GLM51: "190000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "120000"
       LOG_DIR: /app/logs
     volumes:
       - ./logs/proxy:/app/logs
@@ -152,14 +160,14 @@ services:
       - cc-net
     depends_on:
       - glm5.1_uni41001
-      - dsv4p_uni41002
+      - dsv4p_uni42001
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 256M
           cpus: "0.5"
         reservations:
-          memory: 256M
+          memory: 128M
           cpus: "0.1"
     healthcheck:
       test:
@@ -177,13 +185,18 @@ services:
     container_name: auth_to_api_40002
     restart: unless-stopped
     environment:
-      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000
-      LITELLM_URL_DSV4P: http://dsv4p_uni41002:4000
+      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000/v1/chat/completions
+      LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://glm5.1_uni41001:4000/v1/models
+      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
-      MAX_TOOL_DESC: "800"
-      MAX_SCHEMA_DESC: "300"
+      MAX_TOOL_DESC: "2000"
+      MAX_SCHEMA_DESC: "600"
+      CHARS_PER_TOKEN_ESTIMATE: "3.5"
+      MODEL_INPUT_TOKEN_SAFETY_GLM51: "190000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "120000"
       LOG_DIR: /app/logs
     volumes:
       - ./logs/proxy-40002:/app/logs
@@ -193,14 +206,14 @@ services:
       - cc-net
     depends_on:
       - glm5.1_uni41001
-      - dsv4p_uni41002
+      - dsv4p_uni42001
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 256M
           cpus: "0.5"
         reservations:
-          memory: 256M
+          memory: 128M
           cpus: "0.1"
     healthcheck:
       test:
