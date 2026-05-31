@@ -963,14 +963,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         return MODEL_MAP.get(model_name, DEFAULT_MODEL)
 
     def _convert_error(self, error_json, request_model):
-        """Convert OpenAI error format to Anthropic error format."""
+        """Convert OpenAI error format to Anthropic error format.
+
+        IMPORTANT: authentication_error triggers CC hard-stop. The 401 resilience retry
+        in _handle_messages handles this before this function is called. If we reach here
+        with a 401, it means even the retry failed — we map to api_error instead of
+        authentication_error to prevent CC from freezing (it will retry on api_error).
+        """
         err = error_json.get("error", error_json)
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+        msg_lower = msg.lower()
         err_type = "api_error"
-        if "rate" in msg.lower() or "429" in msg:
+        if "rate" in msg_lower or "429" in msg_lower:
             err_type = "rate_limit_error"
-        elif "invalid" in msg.lower() or "400" in msg:
+        elif "invalid" in msg_lower or "400" in msg_lower:
             err_type = "invalid_request_error"
+        # Intentionally NOT mapping 401 to authentication_error — CC freezes on auth errors.
+        # The resilience retry handles 401s first; if both attempts fail, map to api_error
+        # so CC treats it as a transient server error and continues working.
         return {"type": "error", "error": {"type": err_type, "message": msg}, "model": request_model}
 
     def _make_upstream_conn(self, parsed_url):
