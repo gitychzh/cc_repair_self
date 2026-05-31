@@ -20,7 +20,7 @@ Env vars:
   MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
   MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
   CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 3.5)
-  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 190000)
+  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 120000, model capacity 131072)
   MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 120000)
   LOG_DIR             — log directory (default: /app/logs)
 """
@@ -90,10 +90,10 @@ MODEL_MAP = {
     "claude-3-opus-20240229": "glm5.1",
 }
 
-# Input token safety limits (GLM-5.1: 202745 from ModelScope docs; DSv4P: 131072 conservative)
-MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745, "dsv4p": 131072}
+# Input token safety limits (GLM-5.1: 131072 actual capacity; DSv4P: 131072)
+MODEL_MAX_INPUT_TOKENS = {"glm5.1": 131072, "dsv4p": 131072}
 MODEL_INPUT_TOKEN_SAFETY = {
-    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "190000")),
+    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "120000")),
     "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "120000")),
 }
 

@@ -40,19 +40,20 @@ Claude Code → :40001 proxy (格式转换 + metrics + input safety)
 | 参数 | 当前值 | 范围 | 所在文件 |
 |------|--------|------|----------|
 | num_retries | 3 | 2-12 | litellm config.yaml router_settings |
-| cooldown_time | 30 | 10-300 | litellm config.yaml router_settings |
-| RateLimitErrorAllowedFails | 3 | 0-10 | litellm config.yaml router_settings |
+| cooldown_time | 60 | 10-300 | litellm config.yaml router_settings |
+| RateLimitErrorAllowedFails | 1 | 0-10 | litellm config.yaml router_settings |
 | TimeoutErrorAllowedFails | 2 | 0-10 | litellm config.yaml router_settings |
+| AuthenticationErrorAllowedFails | 0 | 0-10 | litellm config.yaml router_settings |
 | routing_strategy | latency-based-routing | simple-shuffle/latency-based-routing/random | litellm config.yaml |
 | lowest_latency_buffer | 0.1 | - | litellm config.yaml |
-| rolling_window_size | 10 | - | litellm config.yaml |
-| timeout (glm5.1) | 180 | - | litellm config.yaml |
+| rolling_window_size | 30 | - | litellm config.yaml |
+| timeout (glm5.1) | 300 | - | litellm config.yaml |
 | timeout (dsv4p) | 300 | - | litellm config.yaml |
 | request_timeout | 300 | - | litellm config.yaml |
 | MAX_TOOL_DESC | 2000 | 800-4000 | docker-compose.yml env |
 | MAX_SCHEMA_DESC | 600 | 300-1200 | docker-compose.yml env |
 | PROXY_TIMEOUT | 300 | 120-600 | docker-compose.yml env |
-| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 190000 | - | docker-compose.yml env |
+| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 120000 | - | docker-compose.yml env |
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 120000 | - | docker-compose.yml env |
 | CHARS_PER_TOKEN_ESTIMATE | 3.5 | 2-6 | docker-compose.yml env |
 
