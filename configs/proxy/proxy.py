@@ -224,15 +224,41 @@ def anth_to_openai(body, target_model=None):
             if isinstance(content, list):
                 text_parts = []
                 tool_results = []
+                image_parts = []
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "tool_result":
                             tool_results.append(block)
                         elif block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "image":
+                            # Convert Anthropic image block to OpenAI image_url format
+                            source = block.get("source", {})
+                            if source.get("type") == "base64":
+                                media_type = source.get("media_type", "image/png")
+                                data = source.get("data", "")
+                                image_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{media_type};base64,{data}"},
+                                })
+                            elif source.get("type") == "url":
+                                image_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": source.get("url", "")},
+                                })
                     elif isinstance(block, str):
                         text_parts.append(block)
-                if text_parts:
+                # Build OpenAI content array: text + images together in multimodal format
+                if image_parts:
+                    # Multimodal content — must use content array format for OpenAI
+                    oai_content = []
+                    for tp in text_parts:
+                        oai_content.append({"type": "text", "text": tp})
+                    for ip in image_parts:
+                        oai_content.append(ip)
+                    oai_messages.append({"role": "user", "content": oai_content})
+                elif text_parts:
+                    # Simple text-only message — use string content
                     oai_messages.append({"role": "user", "content": "\n".join(text_parts)})
                 for tr in tool_results:
                     tool_id = tr.get("tool_use_id", "")
