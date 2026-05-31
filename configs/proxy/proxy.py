@@ -73,7 +73,13 @@ DEFAULT_UPSTREAM_MODEL = "glm5.1"
 MODEL_MAP = {
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
     "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
-    # Claude Code names → glm5.1
+    # Claude Code names → glm5.1 (with and without date suffixes)
+    "claude-opus-4-8": "glm5.1",
+    "claude-opus-4-7": "glm5.1",
+    "claude-opus-4": "glm5.1",
+    "claude-sonnet-4-6": "glm5.1",
+    "claude-sonnet-4": "glm5.1",
+    "claude-haiku-4-5": "glm5.1",
     "claude-sonnet-4-20250514": "glm5.1",
     "claude-sonnet-4-6-20250514": "glm5.1",
     "claude-opus-4-20250514": "glm5.1",
