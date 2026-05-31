@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-05-31 21:17 by opc2_uname)
+# Deploy Status — opc_uname (updated 2026-06-01 05:50 by opc2_uname)
 
 ## Architecture
 ```
@@ -74,6 +74,14 @@ Fixes applied (三层防御):
 - Caused streaming requests to crash with 502 "cannot access local variable 'delta' where it is not associated with a value"
 - 2×502 crashes observed in logs at 19:29:00 and 19:29:10
 - Fix: moved delta/finish_reason definitions before first usage
+
+### Streaming Tool Call Parse Error (fixed 2026-06-01)
+- **Root cause of "The model's tool call could not be parsed (retry also failed)"**
+- Bug 1: When OpenAI first tool call chunk has both `id` AND partial `arguments` (e.g., `{"`), the `if tc.get("id")` branch only emits `content_block_start` — the `elif` branch for arguments is never reached. The opening brace of JSON args is silently dropped → concatenated `partial_json` is invalid JSON.
+- Bug 2: `message_start` missing `stop_sequence: None` and cache token fields in usage.
+- Bug 3: Empty stream edge case — `[DONE]` without `message_start` → CC receives only `message_stop`.
+- Bug 4: Stream interrupted without `[DONE]` — no `content_block_stop` or `message_stop` emitted → CC gets incomplete message.
+- Fix: emit `input_json_delta` after `content_block_start` when first chunk includes arguments; add missing Anthropic fields; add graceful fallback for empty/broken streams; remove dead `_stream_chunk_to_anth` function.
 
 ## Test Results (2026-05-31, opc2_uname proxy rebuilt)
 - claude-opus-4-7 → glm5.1: ✅ 200
