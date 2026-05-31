@@ -385,97 +385,6 @@ def openai_to_anth(oai_response, request_model):
         },
     }
 
-# ─── SSE Stream Conversion ────────────────────────────────────────────────
-
-def _stream_chunk_to_anth(chunk_data, request_model, first_chunk=True):
-    """Convert an OpenAI SSE chunk to Anthropic streaming event(s)."""
-    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-    finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
-    events = []
-
-    # First chunk: message_start
-    if first_chunk:
-        events.append(("message_start", {
-            "type": "message_start",
-            "message": {"id": chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
-                        "type": "message", "role": "assistant", "model": request_model,
-                        "content": [], "stop_reason": None, "stop_sequence": None,
-                        "usage": {"input_tokens": 0, "output_tokens": 0}},
-        }))
-
-    # Thinking/reasoning
-    reasoning = delta.get("reasoning_content", "")
-    if reasoning:
-        events.append(("content_block_start", {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "thinking", "thinking": ""},
-        }))
-        events.append(("content_block_delta", {
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "thinking_delta", "thinking": reasoning},
-        }))
-
-    # Text
-    text_delta = delta.get("content", "")
-    if text_delta:
-        idx = 1 if reasoning else 0
-        if first_chunk and not reasoning:
-            events.append(("content_block_start", {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text", "text": ""},
-            }))
-        else:
-            idx = 1 if any("thinking" in str(e) for e in events) else 0
-            if not reasoning and first_chunk:
-                idx = 0
-        events.append(("content_block_delta", {
-            "type": "content_block_delta",
-            "index": idx,
-            "delta": {"type": "text_delta", "text": text_delta},
-        }))
-
-    # Tool calls (streaming)
-    tool_calls_delta = delta.get("tool_calls", [])
-    for tc_delta in tool_calls_delta:
-        idx = tc_delta.get("index", 0) + (1 if reasoning else 0) + (1 if text_delta and not reasoning else 0)
-        tc_fn = tc_delta.get("function", {})
-        if tc_delta.get("id"):
-            # Tool call start
-            try:
-                partial_input = json.loads(tc_fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                partial_input = {}
-            events.append(("content_block_start", {
-                "type": "content_block_start",
-                "index": idx,
-                "content_block": {"type": "tool_use", "id": tc_delta["id"],
-                                  "name": tc_fn.get("name", ""), "input": partial_input},
-            }))
-        elif tc_fn.get("arguments"):
-            events.append(("content_block_delta", {
-                "type": "content_block_delta",
-                "index": idx,
-                "delta": {"type": "input_json_delta", "partial_json": tc_fn["arguments"]},
-            }))
-
-    # Finish
-    if finish_reason:
-        stop_reason = "end_turn"
-        if finish_reason == "length":
-            stop_reason = "max_tokens"
-        elif finish_reason == "tool_calls":
-            stop_reason = "tool_use"
-        events.append(("message_delta", {
-            "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": chunk_data.get("usage", {}).get("completion_tokens", 0)},
-        }))
-
-    return events
-
 # ─── Proxy Handler ────────────────────────────────────────────────────────
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -775,11 +684,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
-        first_chunk = True
+        message_start_sent = False
         ttfb_recorded = False
         buffer = ""
-        thinking_block_sent = False
-        text_block_sent = False
+        next_block_idx = 0
+        # Track active content blocks by type to emit content_block_stop at transitions
+        active_block_type = None  # "thinking", "text", or "tool_use"
 
         while True:
             chunk = resp.read(1)
@@ -799,6 +709,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         data_str = line[5:].strip()
 
                 if not data_str or data_str == "[DONE]":
+                    # Close any active content block
+                    if active_block_type is not None:
+                        self._send_sse("content_block_stop",
+                                       {"type": "content_block_stop", "index": next_block_idx - 1})
+                        active_block_type = None
+                    # Emit message_start if not yet sent (empty stream edge case)
+                    if not message_start_sent:
+                        self._send_sse("message_start", {
+                            "type": "message_start",
+                            "message": {
+                                "id": f"msg_{uuid.uuid4().hex[:24]}",
+                                "type": "message", "role": "assistant",
+                                "model": request_model, "content": [],
+                                "stop_reason": None, "stop_sequence": None,
+                                "usage": {"input_tokens": 0, "output_tokens": 0,
+                                          "cache_creation_input_tokens": 0,
+                                          "cache_read_input_tokens": 0},
+                            },
+                        })
                     # Finalize metrics and log
                     metrics["status"] = 200
                     metrics["duration_ms"] = int((time.time() - t_start) * 1000)
@@ -816,83 +745,115 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except json.JSONDecodeError:
                     continue
 
-                # Check for finish in stream
-                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
                 delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
-                # Record TTFT on first meaningful chunk
+                # Emit message_start on first real content
+                if not message_start_sent:
+                    self._send_sse("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
+                            "type": "message", "role": "assistant",
+                            "model": request_model, "content": [],
+                            "stop_reason": None, "stop_sequence": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0,
+                                      "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": 0},
+                        },
+                    })
+                    message_start_sent = True
+
+                # Record TTFT on first meaningful delta
                 if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
                     metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
                     ttfb_recorded = True
 
-                # Handle reasoning/thinking content
-                reasoning = delta.get("reasoning_content", "")
-                if reasoning and not thinking_block_sent:
-                    self._send_sse("content_block_start", {
-                        "type": "content_block_start", "index": 0,
-                        "content_block": {"type": "thinking", "thinking": ""},
-                    })
-                    thinking_block_sent = True
+                # ── Reasoning/thinking content ──
+                reasoning = delta.get("reasoning_content")
                 if reasoning:
+                    if active_block_type != "thinking":
+                        # Close previous block if any
+                        if active_block_type is not None:
+                            self._send_sse("content_block_stop",
+                                           {"type": "content_block_stop", "index": next_block_idx - 1})
+                        self._send_sse("content_block_start", {
+                            "type": "content_block_start", "index": next_block_idx,
+                            "content_block": {"type": "thinking", "thinking": ""},
+                        })
+                        next_block_idx += 1
+                        active_block_type = "thinking"
                     self._send_sse("content_block_delta", {
-                        "type": "content_block_delta", "index": 0,
+                        "type": "content_block_delta", "index": next_block_idx - 1,
                         "delta": {"type": "thinking_delta", "thinking": reasoning},
                     })
 
-                # Handle text content
-                text_delta = delta.get("content", "")
-                if text_delta and not text_block_sent:
-                    idx = 1 if thinking_block_sent else 0
-                    if first_chunk and not thinking_block_sent:
-                        # Send message_start first
-                        self._send_sse("message_start", {
-                            "type": "message_start",
-                            "message": {"id": chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
-                                        "type": "message", "role": "assistant",
-                                        "model": request_model, "content": [],
-                                        "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}},
-                        })
+                # ── Text content ──
+                text_delta = delta.get("content")
+                # Skip empty content strings (model sends content="" alongside reasoning)
+                if text_delta and active_block_type != "text":
+                    # Close previous block if any
+                    if active_block_type is not None:
+                        self._send_sse("content_block_stop",
+                                       {"type": "content_block_stop", "index": next_block_idx - 1})
                     self._send_sse("content_block_start", {
-                        "type": "content_block_start", "index": idx,
+                        "type": "content_block_start", "index": next_block_idx,
                         "content_block": {"type": "text", "text": ""},
                     })
-                    text_block_sent = True
-                    first_chunk = False
-
+                    next_block_idx += 1
+                    active_block_type = "text"
                 if text_delta:
-                    idx = 1 if thinking_block_sent else 0
                     self._send_sse("content_block_delta", {
-                        "type": "content_block_delta", "index": idx,
+                        "type": "content_block_delta", "index": next_block_idx - 1,
                         "delta": {"type": "text_delta", "text": text_delta},
                     })
-                    if first_chunk:
-                        first_chunk = False
 
-                # Handle tool calls in stream
+                # ── Tool calls ──
                 tool_calls = delta.get("tool_calls", [])
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     if tc.get("id"):
-                        idx = 2 if thinking_block_sent and text_block_sent else (1 if thinking_block_sent or text_block_sent else 0)
+                        # New tool call — close previous block, start new tool_use block
+                        if active_block_type is not None:
+                            self._send_sse("content_block_stop",
+                                           {"type": "content_block_stop", "index": next_block_idx - 1})
                         self._send_sse("content_block_start", {
-                            "type": "content_block_start", "index": idx,
-                            "content_block": {"type": "tool_use", "id": tc["id"],
-                                              "name": fn.get("name", ""), "input": {}},
+                            "type": "content_block_start", "index": next_block_idx,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tc["id"],
+                                "name": fn.get("name", ""),
+                                "input": {},
+                            },
                         })
-                    elif fn.get("arguments"):
+                        next_block_idx += 1
+                        active_block_type = "tool_use"
+                        # The first tool call chunk may include partial arguments
+                        # (e.g., "{") — must emit input_json_delta for them
+                        if fn.get("arguments"):
+                            self._send_sse("content_block_delta", {
+                                "type": "content_block_delta", "index": next_block_idx - 1,
+                                "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]},
+                            })
+                    elif fn.get("arguments") and active_block_type == "tool_use":
                         self._send_sse("content_block_delta", {
-                            "type": "content_block_delta",
+                            "type": "content_block_delta", "index": next_block_idx - 1,
                             "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]},
                         })
 
+                # ── Finish ──
                 if finish_reason:
+                    # Close the last active content block
+                    if active_block_type is not None:
+                        self._send_sse("content_block_stop",
+                                       {"type": "content_block_stop", "index": next_block_idx - 1})
+                        active_block_type = None
                     stop_reason = "end_turn"
                     if finish_reason == "length":
                         stop_reason = "max_tokens"
                     elif finish_reason == "tool_calls":
                         stop_reason = "tool_use"
                     metrics["finish_reason"] = finish_reason
-                    # Extract usage from last chunk
                     chunk_usage = chunk_data.get("usage", {})
                     metrics["output_tokens"] = chunk_usage.get("completion_tokens", 0) or metrics.get("output_tokens", 0)
                     metrics["input_tokens"] = chunk_usage.get("prompt_tokens", 0) or metrics.get("input_tokens", 0)
@@ -902,6 +863,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         "usage": {"output_tokens": chunk_usage.get("completion_tokens", 0) or 0},
                     })
 
+        # Stream ended without [DONE] — close gracefully
+        if active_block_type is not None:
+            self._send_sse("content_block_stop",
+                           {"type": "content_block_stop", "index": next_block_idx - 1})
+        if message_start_sent:
+            self._send_sse("message_stop", {"type": "message_stop"})
+        metrics["status"] = 200
+        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+        _log_metrics(metrics)
         conn.close()
 
     # ─── Passthrough for OpenAI format requests ───
