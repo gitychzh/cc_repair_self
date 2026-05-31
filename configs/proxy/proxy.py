@@ -572,9 +572,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     for b in system_blocks
                 )
 
-        # Convert Anthropic → OpenAI
-        oai_body = anth_to_openai(anth_body)
-        mapped_model = oai_body.get("model", DEFAULT_MODEL)
+        # Convert Anthropic → OpenAI (map Claude model names to LiteLLM model_name)
+        request_model_raw = request_model
+        mapped_model = MODEL_MAP.get(request_model, DEFAULT_MODEL)
+        oai_body = anth_to_openai(anth_body, target_model=mapped_model)
         metrics["mapped_model"] = mapped_model
         metrics["num_messages"] = len(oai_body.get("messages", []))
         metrics["num_tools"] = len(oai_body.get("tools", []))
@@ -913,14 +914,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream = MODEL_UPSTREAMS[upstream_key]
         litellm_url = upstream["chat_url"]
 
+        # Replace model name in body with mapped LiteLLM model_name
+        body["model"] = mapped_model
+        forwarded_body = json.dumps(body).encode("utf-8")
+
         headers_out = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {LITELLM_KEY}",
+            "Content-Length": str(len(forwarded_body)),
         }
         parsed = urllib.parse.urlparse(litellm_url)
         try:
             conn = self._make_upstream_conn(parsed)
-            conn.request("POST", parsed.path, body=raw, headers=headers_out)
+            conn.request("POST", parsed.path, body=forwarded_body, headers=headers_out)
             resp = conn.getresponse()
             resp_body = resp.read()
             self.send_response(resp.status)
