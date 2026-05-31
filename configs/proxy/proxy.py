@@ -360,8 +360,9 @@ def openai_to_anth(oai_response, request_model):
     oai_content = oai_response.get("choices", [])
     if not oai_content:
         return {"type": "message", "role": "assistant", "content": [{"type": "text", "text": ""}],
-                "model": request_model, "stop_reason": "end_turn",
-                "usage": {"input_tokens": 0, "output_tokens": 0}}
+                "model": request_model, "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0,
+                          "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}
 
     choice = oai_content[0]
     message = choice.get("message", {})
