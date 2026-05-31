@@ -15,7 +15,7 @@ Claude Code → :40001 proxy (仅Anthropic↔OpenAI格式转换)
             → ModelScope API
 ```
 
-核心原则：**proxy.py 只做格式转换，LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实���。**
+核心原则：**proxy.py 只做格式转换，LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实现���。**
 
 ## 不可变更约束（NEVER CHANGE）
 

@@ -27,7 +27,7 @@ if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/h
 fi
 
 # Check LiteLLM DSv4P health
-if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:42001/health > /dev/null 2>&1; then
+if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41002/health > /dev/null 2>&1; then
   LITELLM_DSV4P_HEALTHY="yes"
 fi
 

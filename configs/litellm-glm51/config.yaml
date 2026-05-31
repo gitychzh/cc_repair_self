@@ -624,11 +624,13 @@ general_settings:
   database_url: os.environ/DATABASE_URL
 
 router_settings:
-  num_retries: 5
-  cooldown_time: 15
-  routing_strategy: simple-shuffle
+  num_retries: 3
+  cooldown_time: 30
+  routing_strategy: latency-based-routing
+  lowest_latency_buffer: 0.1
+  rolling_window_size: 10
   enable_pre_call_checks: true
   allowed_fails_policy:
     BadRequestErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 3
-    TimeoutErrorAllowedFails: 3
+    TimeoutErrorAllowedFails: 2

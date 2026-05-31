@@ -81,7 +81,7 @@ fi
 
 if [ -f "$BACKUP_DIR/litellm-dsv4p/config.yaml" ]; then
   echo "  Restarting dsv4p LiteLLM..."
-  docker restart dsv4p_uni42001
+  docker restart dsv4p_uni41002
   sleep 10
 fi
 

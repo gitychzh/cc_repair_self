@@ -16,36 +16,34 @@
     "2026-05-29": {"requests": 451, "success": 436, "success_rate": 96.7, "errors": 44, "models": {"glm5.1": 451}, "error_breakdown": {"ConnectionRefusedError": 19, "429_retry": 10, "429_rate_limit": 5, "TimeoutError": 3}}
   },
   "diagnosis": {
-    "root_cause_1": "42001 dsv4p_uni42001 orphaned container with broken DATABASE_URL (litellm_dsv4p DB never created)",
+    "root_cause_1": "42001 dsv4p_uni42001 orphaned container with broken DATABASE_URL",
     "root_cause_2": "docker-compose services not started (postgres, 41001, 40001, 40002 all down)",
-    "root_cause_3": "litellm-glm51/config.yaml used mixed-case model names (ZHipuAI/GlM-5.1 etc) that ModelScope rejects for GLM models",
-    "root_cause_4": "rpm=14 too high for ModelScope free-tier keys (actual limit ~2-3 RPM per key)",
-    "root_cause_5": "cooldown_time=5s insufficient for 429 recovery (ModelScope cooldown ~30-60s)"
+    "root_cause_3": "proxy.py had 2289 lines with redundant retry/fallback/metrics logic (should be format conversion only)",
+    "root_cause_4": "remote claude CLI not found (3 root causes: broken npm symlink, stub binary, PATH blocked by interactive check)"
   },
   "fixes_applied": {
     "fix_1": "Stopped and removed orphaned dsv4p_uni42001 container",
-    "fix_2": "Started full docker-compose stack: cc_postgres + glm5.1_uni41001 + auth_to_api_40001 + auth_to_api_40002",
-    "fix_3": "Rewrote litellm-glm51/config.yaml: removed 140+ mixed-case deployments, kept only 21 tier-1 lowercase deployments (7 keys × 3 models)",
-    "fix_4": "Reduced rpm from 14 to 2 per deployment (matches ModelScope free-tier actual limits)",
-    "fix_5": "Increased cooldown_time from 5s to 15s (better 429 recovery)",
-    "fix_6": "Added 3-model fallback chain: glm5.1 → dsv4p → glm5 (bidirectional)",
-    "fix_7": "Increased num_retries from 3 to 5 (more resilience against transient 429s)",
-    "fix_8": "Added allowed_openai_params for GLM models (enables reasoning_effort, response_format etc)",
-    "fix_9": "Increased request_timeout from 300 to 600s (longer for DSv4P heavy requests)"
+    "fix_2": "Started full docker-compose stack: 5 containers all healthy",
+    "fix_3": "Rewrote proxy.py from 2289→784 lines: pure format conversion only, all retry/fallback/routing delegated to LiteLLM",
+    "fix_4": "Restored all 11 variant model IDs per model (11×7keys=77 deployments, rpm=1) — each variant has independent 200/id/day quota",
+    "fix_5": "Aligned router settings to local stable config: num_retries=3, cooldown_time=30, latency-based-routing, lowest_latency_buffer=0.1, rolling_window_size=10",
+    "fix_6": "Fixed remote claude CLI: npm reinstall, corrected symlink, moved PATH export before interactive check in .bashrc",
+    "fix_7": "Cleaned repo: single orphan commit, 17 clean files, comprehensive CLAUDE.md for next agent handoff"
   },
   "post_fix_test_results": {
     "all_containers_healthy": true,
-    "41001_litellm_health": "20/21 endpoints healthy",
-    "40001_anth_glm51": "PASS - full Anthropic format response with thinking+text blocks",
-    "41001_oai_dsv4p": "PASS - DSv4P returns correct response",
-    "41001_oai_glm5": "PASS - GLM-5 returns correct response",
-    "41001_oai_glm51": "PASS - GLM-5.1 returns correct response",
-    "40001_anth_dsv4p": "PASS - DSv4P via Anthropic format works"
+    "41001_litellm": "healthy (77 deployments: 11 variants × 7 keys)",
+    "41002_litellm": "healthy (77 deployments: 11 variants × 7 keys)",
+    "40001_anth_glm51": "PASS - Anthropic format with thinking+text blocks",
+    "40001_anth_dsv4p": "PASS - Anthropic format with thinking+text blocks",
+    "41001_oai_glm51": "PASS - OpenAI format",
+    "41002_oai_dsv4p": "PASS - OpenAI format",
+    "remote_claude_cli": "PASS - v2.1.158 working"
   },
   "optimization_targets_for_next_round": {
-    "target_1": "Reduce ConnectionRefusedError by adding persistent connection pool in proxy",
-    "target_2": "Add per-key RPM tracking and automatic key rotation",
-    "target_3": "Add streaming response caching for repeated tool calls",
-    "target_4": "Monitor actual RPM per key and adjust litellm_config dynamically"
+    "target_1": "Monitor actual latency per variant and validate latency-based-routing effectiveness",
+    "target_2": "Compare error rates before/after router alignment (cooldown=30, retries=3 vs cooldown=15, retries=5)",
+    "target_3": "Test if rolling_window_size=10 provides enough statistical stability for routing decisions",
+    "target_4": "Check if TimeoutErrorAllowedFails=2 is sufficient or needs increase for dsv4p (timeout=300)"
   }
 }
