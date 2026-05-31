@@ -27,3 +27,21 @@ CC → 40001(proxy, format conversion only) → 41001(LiteLLM glm5.1) → ModelS
 - dsv4p OK: Anthropic format, thinking + text
 - 41001 models: glm5.1 only
 - 41002 models: dsv4p only
+
+## Round 2 Changes — opc_uname optimizing opc2_uname (2026-05-31)
+
+### CC Settings on opc2_uname (~/.claude/settings.json)
+| Parameter | Before | After | Reason |
+|-----------|--------|-------|--------|
+| contextWindow | 190000 | 120000 | GLM-5.1 real capacity = 128K (131072 tokens). 120K ≈ 91% of 131K, auto-compact triggers BEFORE model errors |
+| CLAUDE_CODE_MAX_OUTPUT_TOKENS | 32768 | 8192 | Model internally caps at ~4-8K. 8192 gives room for longer responses without wasting quota on impossible 32K requests |
+| autoCompactWindow | not set | "auto" | Claude Code v2.1.158 feature. Actual threshold = min(auto, contextWindow). Ensures graceful compaction |
+
+### TUI StatusLine on opc2_uname (~/.claude/statusline-command.sh)
+- Added statusLine feature: displays model name + token count + context usage % in TUI bottom bar
+- Example display: `glm5.1 | 10222/200000 tokens (5% used)`
+- Uses jq to parse JSON from Claude Code stdin (model.display_name, context_window stats)
+
+### Documentation Sources
+- GLM-5.1 context window: 128K (131072 tokens) — ZhipuAI open.bigmodel.cn API docs, ModelScope model card
+- autoCompactWindow/statusLine: reverse-engineered from Claude Code v2.1.158 binary
