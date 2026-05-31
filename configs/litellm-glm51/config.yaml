@@ -617,7 +617,7 @@ model_list:
 litellm_settings:
   drop_params: false
   json_logs: true
-  request_timeout: 600
+  request_timeout: 300
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
@@ -625,11 +625,11 @@ general_settings:
 
 router_settings:
   num_retries: 3
-  cooldown_time: 30
+  cooldown_time: 120
   routing_strategy: latency-based-routing
-  lowest_latency_buffer: 0.1
-  rolling_window_size: 10
-  enable_pre_call_checks: true
+  lowest_latency_buffer: 0.3
+  rolling_window_size: 30
+  enable_pre_call_checks: false
   allowed_fails_policy:
     BadRequestErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 3
