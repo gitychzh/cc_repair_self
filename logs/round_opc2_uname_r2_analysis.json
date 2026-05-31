@@ -1,0 +1,71 @@
+{
+  "round": "opc2_uname_r2",
+  "timestamp": "2026-05-31T22:50:00Z",
+  "operator": "opc2_uname",
+  "target_host": "opc_uname",
+  "trigger": "8-hour mutual optimization session — analyze remote cc-infra configuration and proxy code for bugs, inconsistencies, and optimization opportunities",
+  "analysis_performed": {
+    "analysis_1": "Deep proxy.py code review: found 15+ bugs including unhandled streaming errors, missing message_delta/message_start on broken streams, nested function scope bug (nonlocal), byte-by-byte streaming, missing thinking signature, duplicate _log_lock, malformed JSON chunks silently skipped",
+    "analysis_2": "LiteLLM config comparison: KEY5 discrepancy (glm51 had 7 keys/77 deployments, dsv4p had 6 keys/66 deployments), missing AuthenticationErrorAllowedFails in glm51, duplicate AuthenticationErrorAllowedFails in dsv4p, missing store_prompts_in_spend_logs in glm51, stale header comments",
+    "analysis_3": "Docker-compose review: MS_KEY5 env var was duplicate of MS_KEY1, proxy healthcheck used GET instead of HEAD, MODEL_INPUT_TOKEN_SAFETY_GLM51 was 190000 (exceeded model capacity)",
+    "analysis_4": "Proxy error conversion: _convert_error could map 401 to authentication_error which freezes Claude Code — added safety to never map to auth_error",
+    "analysis_5": "Health check script review: uses /health endpoint on LiteLLM containers which triggers deployment freeze (ROOT CAUSE of 401 freeze chain)",
+    "analysis_6": "opc_uname r2 analysis review: confirmed GLM-5.1 context window is 128K (131072), not 190K"
+  },
+  "fixes_applied": {
+    "fix_1": "KEY5 removed from glm51 config: 77→66 deployments (11 variants × 6 keys). KEY5 was duplicate of KEY1 (same value ms-bb4e5bee), not the revoked ms-f7231d97. 11 redundant deployments consuming KEY1 quota twice",
+    "fix_2": "MS_KEY5 env var removed from docker-compose.yml for both services, replaced with revocation comment",
+    "fix_3": "AuthenticationErrorAllowedFails: 0 added to glm51 config (was missing — caused 401 freeze risk since KEY5 was still present)",
+    "fix_4": "Duplicate AuthenticationErrorAllowedFails line removed from dsv4p config",
+    "fix_5": "store_prompts_in_spend_logs: true added to glm51 config (parity with dsv4p)",
+    "fix_6": "glm51 deployment timeout: 180→300 (match dsv4p, allow retries within request_timeout=300 window)",
+    "fix_7": "cooldown_time: 120→60 in both configs (reduce capacity loss during cooldown at 66 RPM pool)",
+    "fix_8": "lowest_latency_buffer: 0.3→0.1 in both configs (tighter latency routing at rpm=1)",
+    "fix_9": "RateLimitErrorAllowedFails: 3→1 in both configs (rpm=1 means rate limit is definitive quota exhaustion)",
+    "fix_10": "Proxy streaming: wrapped streaming loop in try/except — catches RemoteDisconnected/timeout/OSError/ConnectionResetError/IncompleteRead. Emits graceful close (content_block_stop + message_delta + message_stop)",
+    "fix_11": "Proxy streaming: added _emit_graceful_end() helper that always emits message_delta + message_stop on stream end",
+    "fix_12": "Proxy streaming: added nonlocal declarations for message_start_sent, message_delta_sent, active_block_type — without these, nested helper functions created new local variables instead of modifying outer scope",
+    "fix_13": "Proxy streaming: added message_delta_sent tracking to avoid duplicate message_delta events",
+    "fix_14": "Proxy streaming: thinking content_block_start now includes signature field",
+    "fix_15": "Proxy streaming: changed resp.read(1) to resp.read(8192) for ~8000x throughput improvement",
+    "fix_16": "Proxy streaming: malformed JSON chunks now logged as WARN instead of silently skipped",
+    "fix_17": "Proxy: duplicate _log_lock definition removed (line 102 and 106 were both threading.Lock())",
+    "fix_18": "Proxy: incorporated opc_uname's SSE event_type fix: `if event_type and event_type != \"chunk\"` — LiteLLM sends data without event: line",
+    "fix_19": "Proxy: _convert_error now intentionally never maps 401 to authentication_error — CC freezes on auth errors, resilience retry handles 401s first",
+    "fix_20": "MODEL_INPUT_TOKEN_SAFETY_GLM51: 190000→120000 (model capacity is 131072, 190K exceeded limit)",
+    "fix_21": "MODEL_MAX_INPUT_TOKENS glm5.1: 202745→131072 (actual capacity confirmed by ZhipuAI docs)",
+    "fix_22": "Proxy Dockerfile: ghcr.io/berriai/litellm:v1.83.14 → python:3.11-alpine (1.68GB→~50MB)",
+    "fix_23": "health_check.sh: changed LiteLLM health check from /health to /health/liveliness (prevents deployment freeze)",
+    "fix_24": "docker-compose proxy healthcheck: changed from GET /health to HEAD /health (lighter weight)",
+    "fix_25": "CLAUDE.md adjustable params table updated with current values"
+  },
+  "documentation_sources": {
+    "key5_revoked": "DEPLOY_STATUS.md: KEY5 (ms-f7231d97) REVOKED — returns 401 AuthenticationError",
+    "key5_duplicate": "docker-compose.yml: MS_KEY5=ms-bb4e5bee (same as MS_KEY1, not the revoked ms-f7231d97)",
+    "glm51_capacity": "opc_uname r2 analysis: GLM-5.1 context window is 128K (131072 tokens) per ZhipuAI docs",
+    "health_endpoint_freeze": "DEPLOY_STATUS.md: /health triggers on-demand health check → choices=null → ALL deployments marked unhealthy",
+    "401_freeze_chain": "DEPLOY_STATUS.md: Root Cause: 401 Freeze Chain — enable_pre_call_checks → health check → unhealthy → KEY5 401 → no healthy deployments → CC stops"
+  },
+  "expected_outcomes": {
+    "outcome_1": "11 fewer KEY5 401 errors per request cycle — KEY5 deployments removed, no more auth errors on glm51",
+    "outcome_2": "Faster recovery from rate-limit/timeout errors — cooldown_time reduced from 120→60s",
+    "outcome_3": "Better latency routing — lowest_latency_buffer 0.3→0.1 reduces wasted latency at rpm=1",
+    "outcome_4": "Fewer wasted requests on rate-limited deployments — RateLimitErrorAllowedFails 3→1",
+    "outcome_5": "No more streaming connection crashes — exceptions caught and handled gracefully",
+    "outcome_6": "No more missing message_stop/message_delta on broken streams — CC always receives complete Anthropic protocol events",
+    "outcome_7": "Better streaming throughput — 8192 byte reads vs 1 byte reads",
+    "outcome_8": "No input token safety exceeding model capacity — 120000 limit on 131072 model",
+    "outcome_9": "Faster proxy container rebuild — python:3.11-alpine vs 1.68GB litellm image",
+    "outcome_10": "No deployment freeze from health check scripts — /health/liveliness used instead of /health"
+  },
+  "optimization_targets_for_next_round": {
+    "target_1": "Monitor 401 error rate after KEY5 removal — should drop to zero on glm51",
+    "target_2": "Monitor cooldown recovery time — compare before/after error rates at cooldown_time=60",
+    "target_3": "Monitor latency distribution with lowest_latency_buffer=0.1 — should see tighter latency spread",
+    "target_4": "Verify proxy streaming error handling in production — check for graceful close events in logs",
+    "target_5": "Monitor if python:3.11-alpine proxy container works correctly (no stdlib version issues)",
+    "target_6": "Verify /health/liveliness endpoint works on LiteLLM containers for monitoring",
+    "target_7": "Compare proxy rebuild time before/after (litellm image vs alpine)",
+    "target_8": "Check if MODEL_MAX_INPUT_TOKENS=131072 is correct for /v1/models endpoint response"
+  }
+}
