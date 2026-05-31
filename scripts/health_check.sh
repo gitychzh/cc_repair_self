@@ -21,13 +21,15 @@ if curl -sf http://127.0.0.1:40001/health > /dev/null 2>&1; then
   PROXY_HEALTHY="yes"
 fi
 
-# Check LiteLLM GLM-5.1 health
-if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/health > /dev/null 2>&1; then
+# Check LiteLLM GLM-5.1 health — MUST use /health/liveliness, NOT /health!
+# /health triggers on-demand health check → choices=null → ALL deployments marked unhealthy → freeze
+if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/health/liveliness > /dev/null 2>&1; then
   LITELLM_GLM51_HEALTHY="yes"
 fi
 
-# Check LiteLLM DSv4P health
-if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:42001/health > /dev/null 2>&1; then
+# Check LiteLLM DSv4P health — MUST use /health/liveliness, NOT /health!
+# Same reason as above — /health triggers deployment freeze
+if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:42001/health/liveliness > /dev/null 2>&1; then
   LITELLM_DSV4P_HEALTHY="yes"
 fi
 
