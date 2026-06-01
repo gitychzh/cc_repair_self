@@ -643,12 +643,12 @@ general_settings:
 
 router_settings:
   num_retries: 3
-  cooldown_time: 60
+  cooldown_time: 30
   routing_strategy: latency-based-routing
   lowest_latency_buffer: 0.1
   rolling_window_size: 30
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
-    RateLimitErrorAllowedFails: 1
+    RateLimitErrorAllowedFails: 3
     TimeoutErrorAllowedFails: 2
