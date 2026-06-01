@@ -2,15 +2,15 @@
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + 401 resilience retry) → 41001(LiteLLM glm5.1) → ModelScope
-                                                               → 42001(LiteLLM dsv4p)  → ModelScope
+CC → 40001(proxy, format conversion + DSv4P force-stream + error mapping) → 41001(LiteLLM glm5.1) → ModelScope
+                                                                            → 42001(LiteLLM dsv4p)  → ModelScope
 ```
 
 ## Containers (all healthy)
 - cc_postgres :5432
 - glm5.1_uni41001 :41001 (66 deployments: 11 variants × 6 keys, KEY5 revoked)
 - dsv4p_uni42001 :42001 (66 deployments: 11 variants × 6 keys, KEY5 revoked)
-- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + 401 resilience retry)
+- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping)
 - auth_to_api_40002 :40002 (Codex proxy, same codebase)
 
 ## opc2_uname_r2 Changes (2026-05-31)
@@ -58,6 +58,17 @@ CC → 40001(proxy, format conversion + 401 resilience retry) → 41001(LiteLLM 
 - TimeoutErrorAllowedFails: 2
 
 ## Key Issues Found (2026-06-01)
+
+### DSv4P Non-Stream InternalServerError — FIXED (2026-06-01, opc2_uname)
+- **Root cause**: ModelScope DSv4P non-stream responses include `delta` field in `choices[0]` — invalid for OpenAI non-stream format. LiteLLM's `convert_dict_to_response.py` assertion fails: `choices` parsed as `None` → InternalServerError.
+- **Symptom**: ALL dsv4p non-stream requests failed with 500 InternalServerError. 17×500 errors in today's logs. Only streaming mode worked.
+- **Fix**: For dsv4p non-stream requests, proxy forces `stream=True` to LiteLLM via `force_stream_for_nonstream` flag, then collects streaming chunks and synthesizes non-stream Anthropic response via `_collect_stream_to_anth()`. All retry/fallback paths updated accordingly.
+- **Also**: DSv4P fallback from glm5.1 always uses streaming (dsv4p non-stream would crash LiteLLM).
+- **Also**: `reasoning_effort` only set for glm5.1 (DSv4P doesn't support it → UnsupportedParamsError).
+
+### Error Mapping Fix (2026-06-01, opc2_uname)
+- **429 → rate_limit_error** (was `overloaded_error`): CC retries with backoff on rate_limit_error. overloaded_error triggers auto-compaction which is wrong for rate limits.
+- **400 InvalidParameter → api_error** (was `invalid_request_error`): CC stops on invalid_request_error (won't retry). But ModelScope InvalidParameter is a server-side constraint (thinking_budget vs max_completion_tokens), not a genuine client error. api_error lets CC retry, giving proxy's preflight fix another chance.
 
 ### MS_KEY5 (`ms-f7231d97-13d8-4049-97d9-378984f4fb2d`) — 401 AuthenticationError
 - Key returns 401 on all 22 variants since 2026-05-31 ~18:50 BJ
@@ -122,10 +133,13 @@ Fixes applied (三层防御):
 - **Removed**: 82-line resilience retry code (opc_uname's `should_fix_thinking_budget`) — redundant since preflight fix prevents the error. Reactive retry violated "proxy only does format conversion" principle and added latency.
 - **Tested**: `thinking=enabled budget_tokens=32768 max_tokens=8192` → ✅ 200 OK (previously 400 InvalidParameter)
 
-## Test Results (2026-05-31, opc2_uname proxy rebuilt)
-- claude-opus-4-7 → glm5.1: ✅ 200
-- claude-opus-4-8 → glm5.1: ✅ 200
-- claude-sonnet-4-6 → glm5.1: ✅ 200 (intermittent 500 from ModelScope choices=None, non-proxy bug)
-- dsv4p → dsv4p: ✅ 200
-- delta crash: ✅ no more UnboundLocalError after rebuild
-- 400 Invalid model: ✅ no more after MODEL_MAP fix deployment
+## Test Results (2026-06-01, opc2_uname proxy rebuilt with DSv4P force-stream fix)
+- glm5.1 non-stream: ✅ 200 (working as before)
+- glm5.1 stream: ✅ 200 (working as before)
+- dsv4p non-stream: ✅ 200 (FIXED — was 500 InternalServerError before force-stream)
+- dsv4p stream: ✅ 200 (working as before)
+- dsv4p with thinking: ✅ 200 (FIXED — was UnsupportedParamsError before reasoning_effort fix)
+- dsv4p with tools: ✅ 200 (FIXED — force-stream + collect works with tool calls)
+- claude-opus-4-8 → glm5.1: ✅ 200 (MODEL_MAP working)
+- error mapping 429→rate_limit_error: ✅ (prevents CC auto-compaction on rate limit)
+- error mapping 400 InvalidParameter→api_error: ✅ (prevents CC freeze, allows retry)
