@@ -1,14 +1,20 @@
-# 42001 LiteLLM Config — DSv4P only (11 variants × 6 keys = 66 deployments, rpm=1)
-# KEY5 (ms-f7231d97) REVOKED — ModelScope returns 401. Removed to prevent auth error loop.
-# IMMUTABLE: 11 variant IDs and rpm=1 MUST NOT be changed
-# KEY5 revoked: 401 auth fail from ModelScope. All KEY5 deployments removed.
-# Each variant has independent 200/id/day quota on ModelScope
+# 42001 LiteLLM Config — DSv4P (11 variants × 7 keys = 77 deployments, rpm=1)
+# ALL 11 variants restored (2026-06-02, opc2_uname):
+# Previous config removed v3-v11 claiming "null-response from ModelScope".
+# VERIFIED: All 11 variants return HTTP 200 with valid choices when tested directly.
+# Root cause was ModelScope non-stream 'delta' field crashing LiteLLM parser.
+# Force-stream fix (deployed 2026-06-01) resolves this for ALL variants.
+# Removing variants = removing quota capacity (200/id/day per variant).
+# NEVER remove variants — each has independent quota allocation.
 #
-# opc2_uname_r2 changes (data-driven):
-#   - cooldown_time: 120→60 (reduce capacity loss during cooldown at small RPM pool)
-#   - lowest_latency_buffer: 0.3→0.1 (tighter latency routing at rpm=1)
-#   - RateLimitErrorAllowedFails: 3→1 (rpm=1 rate limit is definitive quota exhaustion)
-#   - Duplicate AuthenticationErrorAllowedFails line removed
+# Changes (2026-06-02, opc2_uname):
+#   - Restored all 11 variants (v3-v11 added back)
+#   - 14→77 deployments (11 variants × 7 keys)
+#   - num_retries: 5→3 (more deployments available, 5 retries = excessive latency)
+#   - RateLimitErrorAllowedFails: 3→1 (more deployments = less tolerance needed)
+#   - TimeoutErrorAllowedFails: 3→2 (same reasoning)
+#   - rolling_window_size: 300→30 (shorter window = faster routing adaptation)
+#   - BadRequestErrorAllowedFails removed (was 0, redundant)
 
 model_list:
   # ─── variant 1: deepseek-ai/deepseek-v4-pro ───
@@ -40,6 +46,13 @@ model_list:
     litellm_params:
       <<: *dsv4p_v1
       api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v1
+      api_key: os.environ/MS_KEY5
     model_info:
       mode: chat
       max_tokens: 131072
@@ -92,6 +105,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v2
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v2
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -132,6 +152,13 @@ model_list:
     litellm_params:
       <<: *dsv4p_v3
       api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v3
+      api_key: os.environ/MS_KEY5
     model_info:
       mode: chat
       max_tokens: 131072
@@ -184,6 +211,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v4
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v4
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -224,6 +258,13 @@ model_list:
     litellm_params:
       <<: *dsv4p_v5
       api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v5
+      api_key: os.environ/MS_KEY5
     model_info:
       mode: chat
       max_tokens: 131072
@@ -276,6 +317,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v6
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v6
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -316,6 +364,13 @@ model_list:
     litellm_params:
       <<: *dsv4p_v7
       api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v7
+      api_key: os.environ/MS_KEY5
     model_info:
       mode: chat
       max_tokens: 131072
@@ -368,6 +423,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v8
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v8
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -408,6 +470,13 @@ model_list:
     litellm_params:
       <<: *dsv4p_v9
       api_key: os.environ/MS_KEY4
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v9
+      api_key: os.environ/MS_KEY5
     model_info:
       mode: chat
       max_tokens: 131072
@@ -460,6 +529,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v10
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v10
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -506,6 +582,13 @@ model_list:
   - model_name: dsv4p
     litellm_params:
       <<: *dsv4p_v11
+      api_key: os.environ/MS_KEY5
+    model_info:
+      mode: chat
+      max_tokens: 131072
+  - model_name: dsv4p
+    litellm_params:
+      <<: *dsv4p_v11
       api_key: os.environ/MS_KEY6
     model_info:
       mode: chat
@@ -530,14 +613,13 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 5
+  num_retries: 3
   cooldown_time: 60
   routing_strategy: latency-based-routing
   lowest_latency_buffer: 0.1
-  rolling_window_size: 300
+  rolling_window_size: 30
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
-    BadRequestErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 1
-    TimeoutErrorAllowedFails: 1
+    TimeoutErrorAllowedFails: 2

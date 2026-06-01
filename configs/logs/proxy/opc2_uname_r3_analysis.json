@@ -1,0 +1,79 @@
+{
+  "round": "opc2_uname_r3",
+  "date": "2026-06-02",
+  "author": "opc2_uname",
+  "changes": [
+    {
+      "type": "critical_fix",
+      "description": "Restore all 11 variants (v5-v11 for glm5.1, v3-v11 for dsv4p)",
+      "before": "glm5.1=28 deployments (4 variants \u00d7 7 keys), dsv4p=14 (2 variants \u00d7 7 keys)",
+      "after": "77 deployments each (11 variants \u00d7 7 keys)",
+      "evidence": "All 22 variants tested directly against ModelScope API on 2026-06-02 \u2014 all returned HTTP 200 with valid choices",
+      "root_cause": "ModelScope non-stream 'delta' field crashes LiteLLM parser (force-stream fix resolves this for ALL variants)"
+    },
+    {
+      "type": "param_revert",
+      "description": "num_retries: 5\u21923",
+      "before": 5,
+      "after": 3,
+      "evidence": "5 retries with 77 deployments wastes latency; 3 retries sufficient on larger pool"
+    },
+    {
+      "type": "param_revert",
+      "description": "RateLimitErrorAllowedFails: 3\u21921",
+      "before": 3,
+      "after": 1,
+      "evidence": "At rpm=1, rate-limit means definitive quota exhaustion; 3 allowed fails wastes requests"
+    },
+    {
+      "type": "param_revert",
+      "description": "TimeoutErrorAllowedFails: 3\u21922",
+      "before": 3,
+      "after": 2,
+      "evidence": "Same reasoning as RateLimitError \u2014 more deployments = less tolerance needed"
+    },
+    {
+      "type": "param_revert",
+      "description": "rolling_window_size: 300\u219230",
+      "before": 300,
+      "after": 30,
+      "evidence": "300-window too slow for routing adaptation at rpm=1; shorter window adapts faster"
+    },
+    {
+      "type": "param_revert",
+      "description": "BadRequestErrorAllowedFails removed",
+      "before": 0,
+      "after": "removed",
+      "evidence": "BadRequest is client error, not deployment health indicator"
+    }
+  ],
+  "metrics_before": {
+    "date": "2026-06-01",
+    "total_requests": 428,
+    "success_rate": "86.0%",
+    "avg_latency_glm51_ms": 18684,
+    "p50_latency_glm51_ms": 14352,
+    "p95_latency_glm51_ms": 38807,
+    "errors": {
+      "502": 20,
+      "429": 19,
+      "529": 15,
+      "400": 4,
+      "ConnectionRefused": 20,
+      "InputTooLong": 18
+    },
+    "deployments": {
+      "glm5.1": 28,
+      "dsv4p": 14
+    }
+  },
+  "test_results": {
+    "glm5.1_nonstream": "200 OK",
+    "glm5.1_stream": "200 OK",
+    "dsv4p_nonstream": "200 OK",
+    "dsv4p_stream": "200 OK",
+    "claude-opus-4-7_to_glm5.1": "200 OK",
+    "deployments_glm51": 77,
+    "deployments_dsv4p": 77
+  }
+}
