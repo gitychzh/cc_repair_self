@@ -26,6 +26,7 @@ model_list:
         - max_tokens
         - max_completion_tokens
         - reasoning_effort
+        - thinking_budget
         - temperature
         - top_p
         - stream

@@ -340,10 +340,24 @@ def anth_to_openai(body, target_model=None):
     if tc:
         oai_body["tool_choice"] = tc
 
-    # Anthropic thinking → OpenAI reasoning_effort
+    # Anthropic thinking → GLM-5.1 thinking_budget + reasoning_effort
+    # ModelScope GLM-5.1 requires: max_completion_tokens > thinking_budget
+    # Claude Code sends thinking.budget_tokens=32768 (default) with max_tokens=8192
+    # We must ensure max_completion_tokens > thinking_budget
     if body.get("thinking"):
         thinking_cfg = body["thinking"]
         budget = thinking_cfg.get("budget_tokens", 8000)
+        # Pass thinking_budget directly for ModelScope GLM-5.1
+        oai_body["thinking_budget"] = budget
+        # Ensure max_completion_tokens > thinking_budget (ModelScope constraint)
+        # Leave room for actual output after thinking: thinking_budget + output margin
+        OUTPUT_TOKEN_MARGIN = 8192
+        required_min = budget + OUTPUT_TOKEN_MARGIN
+        if output_tokens < required_min:
+            output_tokens = required_min
+            oai_body["max_tokens"] = output_tokens
+            oai_body["max_completion_tokens"] = output_tokens
+        # Also set reasoning_effort for compatibility with other providers
         if budget >= 10000:
             oai_body["reasoning_effort"] = "high"
         elif budget >= 5000:
@@ -429,14 +443,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "gateways": gw_urls,
                 "port": LISTEN_PORT,
             })
-        elif parsed.path in ("/v1/models", "/models"):
-            self._proxy_models()
+        elif parsed.path == "/v1/models" or parsed.path == "/models":
+            # Check if this is a Anthropic-format request (has anthropic-version header)
+            anth_version = self.headers.get("anthropic-version")
+            if anth_version:
+                self._anthropic_models_list()
+            else:
+                self._proxy_models()
+        elif parsed.path.startswith("/v1/models/") or parsed.path.startswith("/models/"):
+            # Anthropic model detail endpoint: /v1/models/{model_id}
+            model_id = parsed.path.split("/models/")[1].strip("/")
+            self._anthropic_model_detail(model_id)
         else:
             self._send_json(404, {"error": "not found"})
 
     def do_HEAD(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in ("/health", "/", "/v1/models", "/models"):
+        if parsed.path in ("/health", "/", "/v1/models", "/models") or parsed.path.startswith("/v1/models/") or parsed.path.startswith("/models/"):
             self.send_response(200)
             self.end_headers()
         else:
@@ -550,8 +573,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _log("INPUT-EXCEED", f"estimated_tokens={estimated_tokens} > safety={model_safety}")
             err_msg = (f"Input exceeds model limit (~{estimated_tokens} estimated input tokens, "
                        f"max {model_max_tokens}). Please start a new conversation.")
-            metrics["status"] = 400; metrics["error_type"] = "InputTooLong"; metrics["error_message"] = err_msg
-            self._send_json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": err_msg}})
+            metrics["status"] = 529; metrics["error_type"] = "InputTooLong"; metrics["error_message"] = err_msg
+            # Use overloaded_error so CC retries with auto-compaction instead of crashing.
+            # CC treats invalid_request_error as a client error (no retry, just stops).
+            # CC treats overloaded_error as a server overload (retries, potentially with compaction).
+            # This is the fallback: if CC didn't compact early enough (due to hardcoded context
+            # window mismatch), the overloaded_error triggers CC's retry-with-compaction logic.
+            self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}})
             _log_metrics(metrics)
             return
 
@@ -978,7 +1006,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
                         upstream_key = MODEL_MAP.get(model_id, model_id)
-                        context_len = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
+                        # Use safety limit (120000) as context_length so CC sees the effective
+                        # context window, not the raw model max (131072). This ensures CC's
+                        # auto-compaction triggers early enough.
+                        context_len = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 120000)
                         all_models.append({
                             "id": model_id,
                             "object": "model",
@@ -990,6 +1021,58 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 _log("ERROR", f"models proxy error for {model_key}: {e}")
         self._send_json(200, {"object": "list", "data": all_models})
+
+    # ─── Anthropic-format /v1/models endpoints ───
+    def _anthropic_models_list(self):
+        """Return Anthropic-format model list with context_window.
+        Critical for Claude Code auto-compaction: CC uses this context_window
+        to decide when to compact. If CC thinks it has 200K context (hardcoded
+        for known Claude models), it won't compact before our 131K backend limit.
+        Reporting context_window=120000 forces CC to compact early enough.
+        """
+        all_models = []
+        seen_ids = set()
+        # Include all model IDs from MODEL_MAP (known Claude names + our names)
+        for model_id, mapped in MODEL_MAP.items():
+            if mapped not in seen_ids:
+                seen_ids.add(mapped)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 120000)
+                all_models.append({
+                    "id": model_id,
+                    "type": "model",
+                    "display_name": mapped,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "context_window": safety,
+                })
+        # Also include the canonical model names (glm5.1, dsv4p)
+        for model_key in MODEL_UPSTREAMS:
+            if model_key not in seen_ids:
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 120000)
+                all_models.append({
+                    "id": model_key,
+                    "type": "model",
+                    "display_name": model_key,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "context_window": safety,
+                })
+        self._send_json(200, {"data": all_models, "has_more": False})
+
+    def _anthropic_model_detail(self, model_id):
+        """Return Anthropic-format model detail for a specific model ID.
+        Reports context_window=120000 to ensure CC auto-compaction triggers
+        before the 131K backend limit, regardless of model name.
+        """
+        mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
+        # Use the safety limit (120000) as context_window, not the model max (131072)
+        # This ensures CC compacts early enough to stay within the backend's capacity
+        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 120000)
+        self._send_json(200, {
+            "id": model_id,
+            "type": "model",
+            "display_name": mapped,
+            "created_at": "2024-01-01T00:00:00Z",
+            "context_window": safety,
+        })
 
     # ─── Helpers ───
     def _map_model(self, model_name):
