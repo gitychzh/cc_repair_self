@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-05-31 22:00 by opc2_uname)
+# Deploy Status — opc_uname (updated 2026-06-01 by opc2_uname)
 
 ## Architecture
 ```
@@ -115,6 +115,12 @@ Fixes applied (三层防御):
 - Bug 3: Empty stream edge case — `[DONE]` without `message_start` → CC receives only `message_stop`.
 - Bug 4: Stream interrupted without `[DONE]` — no `content_block_stop` or `message_stop` emitted → CC gets incomplete message.
 - Fix: emit `input_json_delta` after `content_block_start` when first chunk includes arguments; add missing Anthropic fields; add graceful fallback for empty/broken streams; remove dead `_stream_chunk_to_anth` function.
+
+### thinking_budget InvalidParameter Fix (2026-06-01, opc2_uname)
+- **Root cause**: ModelScope GLM-5.1 requires `max_completion_tokens > thinking_budget`. Claude Code sends `thinking.budget_tokens=32768` with `max_tokens=8192` → 400 error.
+- **Fix**: `anth_to_openai()` preflight check adjusts `max_completion_tokens = budget_tokens + 8192` when constraint violated. This prevents the error at format conversion stage — no retry needed.
+- **Removed**: 82-line resilience retry code (opc_uname's `should_fix_thinking_budget`) — redundant since preflight fix prevents the error. Reactive retry violated "proxy only does format conversion" principle and added latency.
+- **Tested**: `thinking=enabled budget_tokens=32768 max_tokens=8192` → ✅ 200 OK (previously 400 InvalidParameter)
 
 ## Test Results (2026-05-31, opc2_uname proxy rebuilt)
 - claude-opus-4-7 → glm5.1: ✅ 200
