@@ -959,63 +959,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         except Exception as e:
             err_str = str(e)
-            is_connection_refused = "Connection refused" in err_str or "Errno 111" in err_str
-            is_timeout = "timed out" in err_str.lower()
 
-            # Resilience retry for ConnectionRefused: LiteLLM container may be restarting.
-            # Wait 3s and retry once — container restarts are brief (2-5 seconds).
-            # This prevents CC from seeing 502 errors during planned restarts.
-            should_conn_retry = (
-                is_connection_refused
-                and metrics.get("_conn_retry_count", 0) < 1
-            )
-
-            if should_conn_retry:
-                metrics["_conn_retry_count"] = metrics.get("_conn_retry_count", 0) + 1
-                _log("CONNRETRY", f"ConnectionRefused → waiting 3s then retry")
-                time.sleep(3)
-                _log_error_detail({
-                    "request_id": request_id,
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "error_subcategory": "502-ConnectionRefused_retry",
-                    "upstream_status": 502,
-                    "upstream_error_body_full": err_str[:1000],
-                })
-                try:
-                    conn_retry = self._make_upstream_conn(parsed_upstream)
-                    conn_retry.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
-                    resp_retry = conn_retry.getresponse()
-                    if resp_retry.status < 400:
-                        if is_stream:
-                            self._stream_to_anth(resp_retry, request_model, mapped_model, conn_retry, metrics, t_start)
-                            metrics["status"] = 200
-                            metrics["conn_retry_success"] = True
-                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                            _log_metrics(metrics)
-                            return
-                        elif force_stream_for_nonstream:
-                            self._collect_stream_to_anth(resp_retry, request_model, mapped_model, conn_retry, metrics, t_start)
-                            metrics["conn_retry_success"] = True
-                            return
-                        else:
-                            ttfb_retry = time.time()
-                            resp_body_retry = resp_retry.read()
-                            oai_resp_retry = json.loads(resp_body_retry)
-                            anth_resp_retry = openai_to_anth(oai_resp_retry, request_model)
-                            metrics["status"] = 200
-                            metrics["conn_retry_success"] = True
-                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                            metrics["ttfb_ms"] = int((ttfb_retry - t_start) * 1000)
-                            _log_metrics(metrics)
-                            self._send_json(200, anth_resp_retry)
-                            conn_retry.close()
-                            return
-                    # Retry also failed — fall through to error reporting
-                    conn_retry.close()
-                    _log("ERR", f"conn_retry also failed: {resp_retry.status}")
-                except Exception as e_retry:
-                    _log("ERR", f"conn_retry connection error: {e_retry}")
-
+            # No conn_retry: data shows 3% success rate (1/36) with 3s wait.
+            # ConnectionRefused errors happen during container restarts when all
+            # requests fail regardless. CC's built-in retry handles recovery.
             _log("ERR", f"upstream connection error: {e}")
             metrics["status"] = 502; metrics["error_type"] = "ConnectionError"; metrics["error_message"] = err_str
             metrics["duration_ms"] = int((time.time() - t_start) * 1000)
