@@ -344,6 +344,7 @@ def anth_to_openai(body, target_model=None):
     # ModelScope GLM-5.1 requires: max_completion_tokens > thinking_budget
     # Claude Code sends thinking.budget_tokens=32768 (default) with max_tokens=8192
     # We must ensure max_completion_tokens > thinking_budget
+    # NOTE: DSv4P does NOT support reasoning_effort — only set it for glm5.1
     if body.get("thinking"):
         thinking_cfg = body["thinking"]
         budget = thinking_cfg.get("budget_tokens", 8000)
@@ -357,13 +358,14 @@ def anth_to_openai(body, target_model=None):
             output_tokens = required_min
             oai_body["max_tokens"] = output_tokens
             oai_body["max_completion_tokens"] = output_tokens
-        # Also set reasoning_effort for compatibility with other providers
-        if budget >= 10000:
-            oai_body["reasoning_effort"] = "high"
-        elif budget >= 5000:
-            oai_body["reasoning_effort"] = "medium"
-        else:
-            oai_body["reasoning_effort"] = "low"
+        # Set reasoning_effort for GLM-5.1 only — DSv4P doesn't support it
+        if target_model == "glm5.1":
+            if budget >= 10000:
+                oai_body["reasoning_effort"] = "high"
+            elif budget >= 5000:
+                oai_body["reasoning_effort"] = "medium"
+            else:
+                oai_body["reasoning_effort"] = "low"
 
     return oai_body
 
@@ -576,6 +578,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} > safety={model_safety} (passing through)")
             # Log but do NOT reject — let the model decide
 
+        # ─── DSv4P force-stream hack ───
+        # ModelScope DSv4P non-stream responses include a 'delta' field in choices[0],
+        # which is invalid for OpenAI non-stream format. LiteLLM's response parser crashes
+        # on this (choices=None → InternalServerError). Streaming mode works fine.
+        # Fix: for dsv4p non-stream requests, force stream=True to LiteLLM, then
+        # collect the streaming chunks and synthesize a non-stream Anthropic response.
+        force_stream_for_nonstream = (mapped_model == "dsv4p" and not is_stream)
+        if force_stream_for_nonstream:
+            oai_body["stream"] = True
+            _log("FORCE-STREAM", f"DSv4P non-stream → forcing stream=True (collect+synthesize)")
+
         _log("REQ", f"model={request_model}→{mapped_model} stream={is_stream} "
                     f"msgs={len(oai_body.get('messages',[]))} "
                     f"tools={len(oai_body.get('tools',[]))}")
@@ -680,6 +693,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                     metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                     _log_metrics(metrics)
                                     return
+                                elif force_stream_for_nonstream:
+                                    self._collect_stream_to_anth(resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
+                                    metrics["thinking_budget_fix_success"] = True
+                                    return
                                 else:
                                     ttfb_fix = time.time()
                                     resp_body_fix = resp_fix.read()
@@ -727,6 +744,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                 metrics["resilience_retry_success"] = True
                                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                 _log_metrics(metrics)
+                                return
+                            elif force_stream_for_nonstream:
+                                self._collect_stream_to_anth(resp2, request_model, mapped_model, conn2, metrics, t_start)
+                                metrics["resilience_retry_success"] = True
                                 return
                             else:
                                 ttfb_start2 = time.time()
@@ -790,6 +811,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                 _log_metrics(metrics)
                                 return
+                            elif force_stream_for_nonstream:
+                                self._collect_stream_to_anth(resp_rl, request_model, mapped_model, conn_rl, metrics, t_start)
+                                metrics["rate_limit_retry_success"] = True
+                                return
                             else:
                                 ttfb_rl = time.time()
                                 resp_body_rl = resp_rl.read()
@@ -834,8 +859,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         "fallback_model": "dsv4p",
                     })
                     # Build fallback request with dsv4p model
+                    # DSv4P must use stream=True to avoid LiteLLM crash on non-stream
+                    # (ModelScope returns 'delta' in choices which crashes LiteLLM parser)
                     oai_body_fallback = json.loads(oai_data.decode("utf-8"))
                     oai_body_fallback["model"] = "dsv4p"
+                    oai_body_fallback["stream"] = True
+                    _log("FALLBACK", f"forcing stream=True for DSv4P fallback")
                     fallback_data = json.dumps(oai_body_fallback).encode("utf-8")
                     fallback_upstream = MODEL_UPSTREAMS["dsv4p"]
                     fallback_url = fallback_upstream["chat_url"]
@@ -847,6 +876,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         conn_fb.request("POST", parsed_fallback.path, body=fallback_data, headers=fallback_headers)
                         resp_fb = conn_fb.getresponse()
                         if resp_fb.status < 400:
+                            # DSv4P fallback: always streaming because DSv4P non-stream
+                            # responses crash LiteLLM (choices=None). For is_stream=True, use
+                            # _stream_to_anth directly. For non-stream client, use
+                            # _collect_stream_to_anth to synthesize non-stream response.
                             if is_stream:
                                 self._stream_to_anth(resp_fb, request_model, "dsv4p", conn_fb, metrics, t_start)
                                 metrics["status"] = 200
@@ -855,23 +888,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                 _log_metrics(metrics)
                                 return
                             else:
-                                ttfb_fb = time.time()
-                                resp_body_fb = resp_fb.read()
-                                oai_response_fb = json.loads(resp_body_fb)
-                                anth_response_fb = openai_to_anth(oai_response_fb, request_model)
-                                metrics["status"] = 200
+                                # Client wanted non-stream: collect streaming and synthesize
+                                self._collect_stream_to_anth(resp_fb, request_model, "dsv4p", conn_fb, metrics, t_start)
                                 metrics["dsv4p_fallback_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                metrics["ttfb_ms"] = int((ttfb_fb - t_start) * 1000)
-                                usage_fb = oai_response_fb.get("usage", {})
-                                metrics["input_tokens"] = usage_fb.get("prompt_tokens", 0)
-                                metrics["output_tokens"] = usage_fb.get("completion_tokens", 0)
-                                choices_fb = oai_response_fb.get("choices", [])
-                                if choices_fb:
-                                    metrics["finish_reason"] = choices_fb[0].get("finish_reason")
-                                _log_metrics(metrics)
-                                self._send_json(200, anth_response_fb)
-                                conn_fb.close()
                                 return
                         # DSv4P also failed
                         error_body_fb = resp_fb.read()
@@ -913,6 +932,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             if is_stream:
                 self._stream_to_anth(resp, request_model, mapped_model, conn, metrics, t_start)
+            elif force_stream_for_nonstream:
+                # DSv4P non-stream → collect streaming response and synthesize non-stream Anthropic response
+                self._collect_stream_to_anth(resp, request_model, mapped_model, conn, metrics, t_start)
             else:
                 ttfb_start = time.time()
                 resp_body = resp.read()
@@ -968,6 +990,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             metrics["conn_retry_success"] = True
                             metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                             _log_metrics(metrics)
+                            return
+                        elif force_stream_for_nonstream:
+                            self._collect_stream_to_anth(resp_retry, request_model, mapped_model, conn_retry, metrics, t_start)
+                            metrics["conn_retry_success"] = True
                             return
                         else:
                             ttfb_retry = time.time()
@@ -1217,6 +1243,150 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Stream ended without [DONE] — close gracefully with message_delta
         _emit_graceful_end()
 
+    # ─── Collect streaming response → non-stream Anthropic response ───
+    def _collect_stream_to_anth(self, resp, request_model, target_model, conn, metrics, t_start):
+        """Collect a streaming SSE response from upstream and synthesize a non-stream
+        Anthropic-format response. Used for DSv4P non-stream requests because ModelScope
+        DSv4P non-stream responses include a 'delta' field that crashes LiteLLM's parser.
+        """
+        reasoning_text = ""
+        content_text = ""
+        tool_calls_data = []
+        finish_reason = "stop"
+        total_input_tokens = 0
+        total_output_tokens = 0
+        msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+        ttfb_recorded = False
+        buffer = ""
+
+        try:
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                buffer += chunk.decode("utf-8", errors="replace")
+
+                while "\n\n" in buffer:
+                    event_str, buffer = buffer.split("\n\n", 1)
+                    lines = event_str.split("\n")
+                    event_type = None
+                    data_str = ""
+                    for line in lines:
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data_str = line[5:].strip()
+
+                    if not data_str or data_str == "[DONE]":
+                        # Stream complete
+                        break
+
+                    if event_type and event_type != "chunk":
+                        continue
+
+                    try:
+                        chunk_data = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if not ttfb_recorded:
+                        metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
+                        ttfb_recorded = True
+
+                    msg_id = chunk_data.get("id", msg_id)
+                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                    fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
+
+                    # Collect reasoning
+                    reasoning = delta.get("reasoning_content", "")
+                    if reasoning:
+                        reasoning_text += reasoning
+
+                    # Collect text content
+                    text = delta.get("content", "")
+                    if text:
+                        content_text += text
+
+                    # Collect tool calls
+                    tool_calls = delta.get("tool_calls", [])
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        if tc.get("id"):
+                            # New tool call starts
+                            tool_calls_data.append({
+                                "id": tc["id"],
+                                "name": fn.get("name", ""),
+                                "arguments": fn.get("arguments", ""),
+                            })
+                        elif fn.get("arguments") and tool_calls_data:
+                            # Continuation of previous tool call
+                            tool_calls_data[-1]["arguments"] += fn["arguments"]
+
+                    # Collect usage
+                    chunk_usage = chunk_data.get("usage", {})
+                    if chunk_usage:
+                        total_input_tokens = chunk_usage.get("prompt_tokens", total_input_tokens)
+                        total_output_tokens = chunk_usage.get("completion_tokens", total_output_tokens)
+
+                    if fr:
+                        finish_reason = fr
+
+            conn.close()
+        except Exception as e:
+            _log("ERR", f"collect_stream connection error: {e}")
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        # Synthesize Anthropic non-stream response
+        content = []
+        if reasoning_text:
+            content.append({"type": "thinking", "thinking": reasoning_text,
+                            "signature": os.environ.get("THINKING_SIGNATURE", "ErUB3WY0k2GCM2h+4O0S3Y3W3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f")})
+        if content_text:
+            content.append({"type": "text", "text": content_text})
+        for tc_data in tool_calls_data:
+            try:
+                input_data = json.loads(tc_data["arguments"])
+            except json.JSONDecodeError:
+                input_data = {"raw": tc_data["arguments"]}
+            content.append({"type": "tool_use", "id": tc_data["id"],
+                            "name": tc_data["name"], "input": input_data})
+        if not content:
+            content.append({"type": "text", "text": ""})
+
+        stop_reason = "end_turn"
+        if finish_reason == "length":
+            stop_reason = "max_tokens"
+        elif finish_reason == "tool_calls":
+            stop_reason = "tool_use"
+
+        metrics["status"] = 200
+        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+        metrics["input_tokens"] = total_input_tokens
+        metrics["output_tokens"] = total_output_tokens
+        metrics["finish_reason"] = finish_reason
+        metrics["force_stream_collect_success"] = True
+        _log_metrics(metrics)
+
+        anth_response = {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": request_model,
+            "content": content,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+            },
+        }
+        self._send_json(200, anth_response)
+
     # ─── Passthrough for OpenAI format requests ───
     def _passthrough_openai(self):
         body_len = int(self.headers.get("Content-Length", 0))
@@ -1348,22 +1518,34 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _convert_error(self, error_json, request_model):
         """Convert OpenAI error format to Anthropic error format.
 
-        IMPORTANT: authentication_error triggers CC hard-stop. The 401 resilience retry
-        in _handle_messages handles this before this function is called. If we reach here
-        with a 401, it means even the retry failed — we map to api_error instead of
-        authentication_error to prevent CC from freezing (it will retry on api_error).
+        IMPORTANT: CC treats different error types differently:
+        - authentication_error → CC hard-stops (fatal, won't retry)
+        - invalid_request_error → CC stops (client error, won't retry)
+        - rate_limit_error → CC retries with backoff
+        - api_error → CC retries (server error, recoverable)
+        - overloaded_error → CC retries with auto-compaction
+
+        Mapping strategy:
+        - 429/rate-limit → rate_limit_error (CC retries with backoff)
+        - 401/403 auth → api_error (NOT authentication_error, to prevent CC freeze)
+        - 400 InvalidParameter from ModelScope → api_error (NOT invalid_request_error)
+          Reason: CC sent valid Anthropic params. ModelScope rejects them due to
+          its own parameter constraints (e.g. thinking_budget > max_completion_tokens).
+          This is a server-side compatibility issue, not a client error. CC should
+          retry (preflight fix handles the conversion on next attempt).
+        - Everything else → api_error (CC retries)
         """
         err = error_json.get("error", error_json)
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         msg_lower = msg.lower()
         err_type = "api_error"
         if "rate" in msg_lower or "429" in msg_lower:
-            err_type = "overloaded_error"
-        elif "invalid" in msg_lower or "400" in msg_lower:
-            err_type = "invalid_request_error"
-        # Intentionally NOT mapping 401 to authentication_error — CC freezes on auth errors.
-        # The resilience retry handles 401s first; if both attempts fail, map to api_error
-        # so CC treats it as a transient server error and continues working.
+            err_type = "rate_limit_error"
+        # Intentionally NOT mapping 400 InvalidParameter to invalid_request_error.
+        # CC stops on invalid_request_error, but ModelScope InvalidParameter is a
+        # server-side constraint mismatch (e.g. thinking_budget vs max_completion_tokens),
+        # not a genuine client error. Mapping to api_error lets CC retry, which
+        # gives the proxy's preflight fix another chance to adjust parameters.
         return {"type": "error", "error": {"type": err_type, "message": msg}, "model": request_model}
 
     def _get_upstream_status_for_client(self, upstream_status):
