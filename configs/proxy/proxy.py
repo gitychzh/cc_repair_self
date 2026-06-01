@@ -20,8 +20,8 @@ Env vars:
   MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
   MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
   CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 3.5)
-  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 120000, model capacity 131072)
-  MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 120000)
+  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 130000, model capacity 131072)
+  MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 130000)
   LOG_DIR             — log directory (default: /app/logs)
 """
 import http.server
@@ -93,8 +93,8 @@ MODEL_MAP = {
 # Input token safety limits (GLM-5.1: 131072 actual capacity; DSv4P: 131072)
 MODEL_MAX_INPUT_TOKENS = {"glm5.1": 131072, "dsv4p": 131072}
 MODEL_INPUT_TOKEN_SAFETY = {
-    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "120000")),
-    "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "120000")),
+    "glm5.1": 130000,
+    "dsv4p": 130000,
 }
 
 DEFAULT_MODEL = "glm5.1"
@@ -565,23 +565,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["upstream"] = upstream_key
 
         # ─── Input token pre-check ───
+        # DISABLED: Let the model handle oversized requests directly.
+        # The proxy's char-based estimation is inaccurate and causes false rejections
+        # when the actual token count is within the model's capacity.
         model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
-        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 120000)
+        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 130000)
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
         if estimated_tokens > model_safety:
-            _log("INPUT-EXCEED", f"estimated_tokens={estimated_tokens} > safety={model_safety}")
-            err_msg = (f"Input exceeds model limit (~{estimated_tokens} estimated input tokens, "
-                       f"max {model_max_tokens}). Please start a new conversation.")
-            metrics["status"] = 529; metrics["error_type"] = "InputTooLong"; metrics["error_message"] = err_msg
-            # Use overloaded_error so CC retries with auto-compaction instead of crashing.
-            # CC treats invalid_request_error as a client error (no retry, just stops).
-            # CC treats overloaded_error as a server overload (retries, potentially with compaction).
-            # This is the fallback: if CC didn't compact early enough (due to hardcoded context
-            # window mismatch), the overloaded_error triggers CC's retry-with-compaction logic.
-            self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}})
-            _log_metrics(metrics)
-            return
+            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} > safety={model_safety} (passing through)")
+            # Log but do NOT reject — let the model decide
 
         _log("REQ", f"model={request_model}→{mapped_model} stream={is_stream} "
                     f"msgs={len(oai_body.get('messages',[]))} "
@@ -623,6 +616,95 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     and "AuthenticationError" in err_str
                     and metrics.get("_resilience_retry_count", 0) < 1
                 )
+
+                # Rate limit retry for 429: retry once after brief delay to allow
+                # LiteLLM to route to a different deployment with remaining quota.
+                should_rate_limit_retry = (
+                    resp.status == 429
+                    and metrics.get("_rate_limit_retry_count", 0) < 1
+                )
+
+                # Resilience retry for InvalidParameter (thinking_budget > max_completion_tokens):
+                # ModelScope GLM-5.1 requires max_completion_tokens > thinking_budget.
+                # The pre-flight check in anth_to_openai should prevent this, but if an
+                # edge case causes it, we fix the parameters and retry once rather than
+                # just forwarding the error to CC (which would crash without retry).
+                should_fix_thinking_budget = (
+                    resp.status == 400
+                    and "InvalidParameter" in err_str
+                    and "thinking_budget" in err_str
+                    and "max_completion_tokens" in err_str
+                    and metrics.get("_thinking_budget_retry_count", 0) < 1
+                )
+
+                if should_fix_thinking_budget:
+                    metrics["_thinking_budget_retry_count"] = metrics.get("_thinking_budget_retry_count", 0) + 1
+                    # Parse the error to extract actual values
+                    import re as _re
+                    _tb_match = _re.search(r'thinking_budget\s*\[(\d+)\]', err_str)
+                    _mc_match = _re.search(r'max_completion_tokens\s*\[(\d+)\]', err_str)
+                    if _tb_match and _mc_match:
+                        actual_tb = int(_tb_match.group(1))
+                        actual_mc = int(_mc_match.group(1))
+                        # Fix: set max_completion_tokens = thinking_budget + output margin
+                        OUTPUT_TOKEN_MARGIN = 8192
+                        fixed_mc = actual_tb + OUTPUT_TOKEN_MARGIN
+                        _log("THINKFIX", f"thinking_budget={actual_tb} > max_completion_tokens={actual_mc} → fixing to {fixed_mc}")
+                        oai_body_fixed = json.loads(oai_data.decode("utf-8"))
+                        oai_body_fixed["max_tokens"] = fixed_mc
+                        oai_body_fixed["max_completion_tokens"] = fixed_mc
+                        if "thinking_budget" not in oai_body_fixed:
+                            oai_body_fixed["thinking_budget"] = actual_tb
+                        fixed_data = json.dumps(oai_body_fixed).encode("utf-8")
+                        fixed_headers = dict(headers_out)
+                        fixed_headers["Content-Length"] = str(len(fixed_data))
+                        _log_error_detail({
+                            "request_id": request_id,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "error_subcategory": "400_thinking_budget_fix_retry",
+                            "upstream_status": resp.status,
+                            "original_max_completion_tokens": actual_mc,
+                            "original_thinking_budget": actual_tb,
+                            "fixed_max_completion_tokens": fixed_mc,
+                            "upstream_error_body_full": err_str[:1000],
+                        })
+                        try:
+                            conn_fix = self._make_upstream_conn(parsed_upstream)
+                            conn_fix.request("POST", parsed_upstream.path, body=fixed_data, headers=fixed_headers)
+                            resp_fix = conn_fix.getresponse()
+                            if resp_fix.status < 400:
+                                if is_stream:
+                                    self._stream_to_anth(resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
+                                    metrics["status"] = 200
+                                    metrics["thinking_budget_fix_success"] = True
+                                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                    _log_metrics(metrics)
+                                    return
+                                else:
+                                    ttfb_fix = time.time()
+                                    resp_body_fix = resp_fix.read()
+                                    oai_resp_fix = json.loads(resp_body_fix)
+                                    anth_resp_fix = openai_to_anth(oai_resp_fix, request_model)
+                                    metrics["status"] = 200
+                                    metrics["thinking_budget_fix_success"] = True
+                                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                    metrics["ttfb_ms"] = int((ttfb_fix - t_start) * 1000)
+                                    _log_metrics(metrics)
+                                    self._send_json(200, anth_resp_fix)
+                                    conn_fix.close()
+                                    return
+                            # Fix retry also failed — fall through to error reporting
+                            error_body_fix = resp_fix.read()
+                            try:
+                                error_json_fix = json.loads(error_body_fix)
+                            except Exception:
+                                error_json_fix = {"error": error_body_fix.decode("utf-8", errors="replace")}
+                            conn_fix.close()
+                            error_json = error_json_fix
+                            _log("ERR", f"thinking_budget fix retry also failed: {resp_fix.status} {json.dumps(error_json_fix)[:200]}")
+                        except Exception as e_fix:
+                            _log("ERR", f"thinking_budget fix retry connection error: {e_fix}")
+                            # Fall through to error reporting with original error
                 if should_resilience_retry:
                     metrics["_resilience_retry_count"] = metrics.get("_resilience_retry_count", 0) + 1
                     _log("RESILIENCE", f"401/403 AuthError → retry #{metrics['_resilience_retry_count']} (KEY5 cooldown should force different deployment)")
@@ -682,6 +764,122 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     resp_status_final = resp.status
 
+                # Rate limit retry for 429: brief delay then retry once
+                # This allows LiteLLM to route to a different deployment with quota
+                if should_rate_limit_retry and resp_status_final == 429:
+                    metrics["_rate_limit_retry_count"] = metrics.get("_rate_limit_retry_count", 0) + 1
+                    _log("RATELIMIT", f"429 RateLimit → retry #{metrics['_rate_limit_retry_count']} (waiting 2s for deployment rotation)")
+                    _log_error_detail({
+                        "request_id": request_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "error_subcategory": "429_rate_limit_retry_triggered",
+                        "upstream_status": resp.status,
+                        "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:1000],
+                    })
+                    import time as _time
+                    _time.sleep(2)  # Brief delay for LiteLLM cooldown/rotation
+                    try:
+                        conn_rl = self._make_upstream_conn(parsed_upstream)
+                        conn_rl.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
+                        resp_rl = conn_rl.getresponse()
+                        if resp_rl.status < 400:
+                            if is_stream:
+                                self._stream_to_anth(resp_rl, request_model, mapped_model, conn_rl, metrics, t_start)
+                                metrics["status"] = 200
+                                metrics["rate_limit_retry_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                _log_metrics(metrics)
+                                return
+                            else:
+                                ttfb_rl = time.time()
+                                resp_body_rl = resp_rl.read()
+                                oai_response_rl = json.loads(resp_body_rl)
+                                anth_response_rl = openai_to_anth(oai_response_rl, request_model)
+                                metrics["status"] = 200
+                                metrics["rate_limit_retry_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                metrics["ttfb_ms"] = int((ttfb_rl - t_start) * 1000)
+                                usage_rl = oai_response_rl.get("usage", {})
+                                metrics["input_tokens"] = usage_rl.get("prompt_tokens", 0)
+                                metrics["output_tokens"] = usage_rl.get("completion_tokens", 0)
+                                choices_rl = oai_response_rl.get("choices", [])
+                                if choices_rl:
+                                    metrics["finish_reason"] = choices_rl[0].get("finish_reason")
+                                _log_metrics(metrics)
+                                self._send_json(200, anth_response_rl)
+                                conn_rl.close()
+                                return
+                        # Retry also failed — use latest error
+                        error_body_rl = resp_rl.read()
+                        try:
+                            error_json_rl = json.loads(error_body_rl)
+                        except Exception:
+                            error_json_rl = {"error": error_body_rl.decode("utf-8", errors="replace")}
+                        conn_rl.close()
+                        error_json = error_json_rl
+                        resp_status_final = resp_rl.status
+                        _log("ERR", f"rate limit retry also failed: {resp_rl.status} {json.dumps(error_json_rl)[:200]}")
+                    except Exception as e_rl:
+                        _log("ERR", f"rate limit retry connection error: {e_rl}")
+
+                # DSv4P fallback: if GLM-5.1 is rate limited, try DeepSeek-V4-Pro
+                if resp_status_final == 429 and mapped_model == "glm5.1":
+                    _log("FALLBACK", f"GLM-5.1 429 → trying DSv4P fallback")
+                    _log_error_detail({
+                        "request_id": request_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "error_subcategory": "429_dsv4p_fallback_triggered",
+                        "upstream_status": resp_status_final,
+                        "original_model": mapped_model,
+                        "fallback_model": "dsv4p",
+                    })
+                    # Build fallback request with dsv4p model
+                    oai_body_fallback = json.loads(oai_data.decode("utf-8"))
+                    oai_body_fallback["model"] = "dsv4p"
+                    fallback_data = json.dumps(oai_body_fallback).encode("utf-8")
+                    fallback_upstream = MODEL_UPSTREAMS["dsv4p"]
+                    fallback_url = fallback_upstream["chat_url"]
+                    parsed_fallback = urllib.parse.urlparse(fallback_url)
+                    fallback_headers = dict(headers_out)
+                    fallback_headers["Content-Length"] = str(len(fallback_data))
+                    try:
+                        conn_fb = self._make_upstream_conn(parsed_fallback)
+                        conn_fb.request("POST", parsed_fallback.path, body=fallback_data, headers=fallback_headers)
+                        resp_fb = conn_fb.getresponse()
+                        if resp_fb.status < 400:
+                            if is_stream:
+                                self._stream_to_anth(resp_fb, request_model, "dsv4p", conn_fb, metrics, t_start)
+                                metrics["status"] = 200
+                                metrics["dsv4p_fallback_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                _log_metrics(metrics)
+                                return
+                            else:
+                                ttfb_fb = time.time()
+                                resp_body_fb = resp_fb.read()
+                                oai_response_fb = json.loads(resp_body_fb)
+                                anth_response_fb = openai_to_anth(oai_response_fb, request_model)
+                                metrics["status"] = 200
+                                metrics["dsv4p_fallback_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                metrics["ttfb_ms"] = int((ttfb_fb - t_start) * 1000)
+                                usage_fb = oai_response_fb.get("usage", {})
+                                metrics["input_tokens"] = usage_fb.get("prompt_tokens", 0)
+                                metrics["output_tokens"] = usage_fb.get("completion_tokens", 0)
+                                choices_fb = oai_response_fb.get("choices", [])
+                                if choices_fb:
+                                    metrics["finish_reason"] = choices_fb[0].get("finish_reason")
+                                _log_metrics(metrics)
+                                self._send_json(200, anth_response_fb)
+                                conn_fb.close()
+                                return
+                        # DSv4P also failed
+                        error_body_fb = resp_fb.read()
+                        _log("ERR", f"DSv4P fallback also failed: {resp_fb.status} {error_body_fb.decode('utf-8', errors='replace')[:200]}")
+                        conn_fb.close()
+                    except Exception as e_fb:
+                        _log("ERR", f"DSv4P fallback connection error: {e_fb}")
+
                 _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
                 # Log error detail for analysis
                 _log_error_detail({
@@ -696,7 +894,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 metrics["error_message"] = json.dumps(error_json)[:200]
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                 _log_metrics(metrics)
-                self._send_json(resp_status_final, self._convert_error(error_json, request_model))
+
+                # Convert upstream "input exceeds" 400 errors to overloaded_error (529).
+                # When ModelScope returns 400 "exceeds model limit / token limit", CC
+                # treats it as a client error and stops without retry. Convert to
+                # overloaded_error so CC retries with auto-compaction.
+                if resp_status_final == 400 and "exceeds" in json.dumps(error_json).lower() and ("token" in json.dumps(error_json).lower() or "limit" in json.dumps(error_json).lower()):
+                    _log("OVERLOAD-CONV", f"400 input exceeds → 529 overloaded_error for CC compaction retry")
+                    err_msg = json.dumps(error_json)[:500]
+                    self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model})
+                    metrics["status"] = 529
+                    metrics["error_type"] = "InputExceedsOverloaded"
+                    return
+
+                client_status = self._get_upstream_status_for_client(resp_status_final)
+                self._send_json(client_status, self._convert_error(error_json, request_model))
                 return
 
             if is_stream:
@@ -722,8 +934,62 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
 
         except Exception as e:
+            err_str = str(e)
+            is_connection_refused = "Connection refused" in err_str or "Errno 111" in err_str
+            is_timeout = "timed out" in err_str.lower()
+
+            # Resilience retry for ConnectionRefused: LiteLLM container may be restarting.
+            # Wait 3s and retry once — container restarts are brief (2-5 seconds).
+            # This prevents CC from seeing 502 errors during planned restarts.
+            should_conn_retry = (
+                is_connection_refused
+                and metrics.get("_conn_retry_count", 0) < 1
+            )
+
+            if should_conn_retry:
+                metrics["_conn_retry_count"] = metrics.get("_conn_retry_count", 0) + 1
+                _log("CONNRETRY", f"ConnectionRefused → waiting 3s then retry")
+                time.sleep(3)
+                _log_error_detail({
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": "502-ConnectionRefused_retry",
+                    "upstream_status": 502,
+                    "upstream_error_body_full": err_str[:1000],
+                })
+                try:
+                    conn_retry = self._make_upstream_conn(parsed_upstream)
+                    conn_retry.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
+                    resp_retry = conn_retry.getresponse()
+                    if resp_retry.status < 400:
+                        if is_stream:
+                            self._stream_to_anth(resp_retry, request_model, mapped_model, conn_retry, metrics, t_start)
+                            metrics["status"] = 200
+                            metrics["conn_retry_success"] = True
+                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                            _log_metrics(metrics)
+                            return
+                        else:
+                            ttfb_retry = time.time()
+                            resp_body_retry = resp_retry.read()
+                            oai_resp_retry = json.loads(resp_body_retry)
+                            anth_resp_retry = openai_to_anth(oai_resp_retry, request_model)
+                            metrics["status"] = 200
+                            metrics["conn_retry_success"] = True
+                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                            metrics["ttfb_ms"] = int((ttfb_retry - t_start) * 1000)
+                            _log_metrics(metrics)
+                            self._send_json(200, anth_resp_retry)
+                            conn_retry.close()
+                            return
+                    # Retry also failed — fall through to error reporting
+                    conn_retry.close()
+                    _log("ERR", f"conn_retry also failed: {resp_retry.status}")
+                except Exception as e_retry:
+                    _log("ERR", f"conn_retry connection error: {e_retry}")
+
             _log("ERR", f"upstream connection error: {e}")
-            metrics["status"] = 502; metrics["error_type"] = "ConnectionError"; metrics["error_message"] = str(e)
+            metrics["status"] = 502; metrics["error_type"] = "ConnectionError"; metrics["error_message"] = err_str
             metrics["duration_ms"] = int((time.time() - t_start) * 1000)
             _log_error_detail({
                 "request_id": request_id,
@@ -731,7 +997,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "error_subcategory": "ConnectionRefusedError",
                 "upstream_status": 502,
                 "upstream_headers": {},
-                "upstream_error_body_full": str(e)[:3000],
+                "upstream_error_body_full": err_str[:3000],
             })
             _log_metrics(metrics)
             self._send_json(502, {"type": "error", "error": {"type": "api_error",
@@ -1010,7 +1276,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         # Use safety limit (120000) as context_length so CC sees the effective
                         # context window, not the raw model max (131072). This ensures CC's
                         # auto-compaction triggers early enough.
-                        context_len = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 120000)
+                        context_len = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
                         all_models.append({
                             "id": model_id,
                             "object": "model",
@@ -1029,7 +1295,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         Critical for Claude Code auto-compaction: CC uses this context_window
         to decide when to compact. If CC thinks it has 200K context (hardcoded
         for known Claude models), it won't compact before our 131K backend limit.
-        Reporting context_window=120000 forces CC to compact early enough.
+        Reporting context_window=130000 (safety limit) forces CC to compact early enough.
         """
         all_models = []
         seen_ids = set()
@@ -1037,7 +1303,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for model_id, mapped in MODEL_MAP.items():
             if mapped not in seen_ids:
                 seen_ids.add(mapped)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 120000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 130000)
                 all_models.append({
                     "id": model_id,
                     "type": "model",
@@ -1048,7 +1314,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Also include the canonical model names (glm5.1, dsv4p)
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 120000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 130000)
                 all_models.append({
                     "id": model_key,
                     "type": "model",
@@ -1060,13 +1326,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _anthropic_model_detail(self, model_id):
         """Return Anthropic-format model detail for a specific model ID.
-        Reports context_window=120000 to ensure CC auto-compaction triggers
-        before the 131K backend limit, regardless of model name.
+        Reports context_window=130000 (safety limit) to ensure CC auto-compaction
+        triggers before the 131K backend limit, regardless of model name.
         """
         mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
-        # Use the safety limit (120000) as context_window, not the model max (131072)
+        # Use the safety limit as context_window, not the model max (131072)
         # This ensures CC compacts early enough to stay within the backend's capacity
-        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 120000)
+        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 130000)
         self._send_json(200, {
             "id": model_id,
             "type": "model",
@@ -1092,13 +1358,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         msg_lower = msg.lower()
         err_type = "api_error"
         if "rate" in msg_lower or "429" in msg_lower:
-            err_type = "rate_limit_error"
+            err_type = "overloaded_error"
         elif "invalid" in msg_lower or "400" in msg_lower:
             err_type = "invalid_request_error"
         # Intentionally NOT mapping 401 to authentication_error — CC freezes on auth errors.
         # The resilience retry handles 401s first; if both attempts fail, map to api_error
         # so CC treats it as a transient server error and continues working.
         return {"type": "error", "error": {"type": err_type, "message": msg}, "model": request_model}
+
+    def _get_upstream_status_for_client(self, upstream_status):
+        """Map upstream HTTP status to client-facing status.
+
+        ModelScope returns 429 for rate limit/quota errors.
+        Claude Code treats 529 as "API overloaded" and shows a user-friendly message.
+        Map 429 → 529 so CC displays "API is at capacity" instead of generic error.
+        """
+        if upstream_status == 429:
+            return 529
+        return upstream_status
 
     def _make_upstream_conn(self, parsed_url):
         host = parsed_url.hostname

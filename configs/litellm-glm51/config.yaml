@@ -561,14 +561,14 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 3
+  num_retries: 5
   cooldown_time: 60
   routing_strategy: latency-based-routing
   lowest_latency_buffer: 0.1
-  rolling_window_size: 30
+  rolling_window_size: 300
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
     BadRequestErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 1
-    TimeoutErrorAllowedFails: 2
+    TimeoutErrorAllowedFails: 1
