@@ -45,26 +45,41 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - Proxy streaming bug fixes (graceful end, byte-by-byte, etc.)
 - Proxy error mapping (429→rate_limit_error, 400 InvalidParameter→api_error)
 
-## Router Settings (updated 2026-06-02)
+## Router Settings (updated 2026-06-02, Round 1-4 optimizations)
 - num_retries: 3
-- cooldown_time: 60
+- cooldown_time: 30 (was 60, reduced — LiteLLM default=5s, 60s=12x default, excessively punitive)
 - routing_strategy: latency-based-routing
 - lowest_latency_buffer: 0.1
 - rolling_window_size: 30
 - enable_pre_call_checks: false
 - background_health_checks: false
 - AuthenticationErrorAllowedFails: 0 (immediate cooldown on 401)
-- RateLimitErrorAllowedFails: 1 (definitive quota exhaustion at rpm=1)
+- RateLimitErrorAllowedFails: 3 (was 1 — 1 allowed fail + 60s cooldown caused 65/77 unhealthy cascade)
 - TimeoutErrorAllowedFails: 2
+- InternalServerErrorAllowedFails: 3 (NEW — prevents ModelScope null-response cooldown cascade)
 
-## Metrics Summary (2026-06-01, before variant restoration)
-- Total requests: 428
-- Success rate: 86.0% (368/428)
-- Avg latency: 18684ms (glm5.1)
-- P50 latency: 14352ms (glm5.1)
-- P95 latency: 38807ms (glm5.1)
-- Error breakdown: 502=20, 429=19, 529=15, 400=4, ConnectionRefused=20, InputTooLong=18
-- Note: With only 28+14=42 deployments, rate-limit errors are frequent. After restoring to 77+77=154, rate-limit errors should decrease significantly (3.6x more quota capacity).
+## Proxy Changes (Round 1-4)
+- Added `import socket` — socket.timeout referenced at line 1233 but module not imported
+- Removed conn_retry — 3% success rate (1/36), 3s wasted latency per attempt
+- RateLimitErrorAllowedFails: 1→3, cooldown_time: 60→30, InternalServerErrorAllowedFails: 3
+
+## Metrics Summary (2026-06-02, after Round 1-4 optimizations)
+- Total requests (clean data, 19:10 UTC onwards): 89
+- Success rate: 100% (89/89) — zero 502, zero 429
+- RL retry: 6 attempts, 3 success (50%)
+- Conn retry: 0 (removed in Round 2)
+- Avg duration: 15241ms
+- P90 duration: 24468ms
+
+### Before vs After Comparison
+| Metric | Before (Round 1) | After (Round 4) |
+|--------|-----------------|-----------------|
+| Success rate | 85.4% | 100% |
+| 502 errors | 13.1% | 0% |
+| 429 errors | 1.0% | 0% |
+| RL retry | 19 | 6 (50% success) |
+| Conn retry | 18 (3% success) | 0 (removed) |
+| Avg duration | 12065ms | 15241ms |
 
 ## Key Issues Found
 
