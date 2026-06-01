@@ -578,16 +578,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} > safety={model_safety} (passing through)")
             # Log but do NOT reject — let the model decide
 
-        # ─── DSv4P force-stream hack ───
-        # ModelScope DSv4P non-stream responses include a 'delta' field in choices[0],
-        # which is invalid for OpenAI non-stream format. LiteLLM's response parser crashes
-        # on this (choices=None → InternalServerError). Streaming mode works fine.
-        # Fix: for dsv4p non-stream requests, force stream=True to LiteLLM, then
-        # collect the streaming chunks and synthesize a non-stream Anthropic response.
-        force_stream_for_nonstream = (mapped_model == "dsv4p" and not is_stream)
+        # ─── ModelScope force-stream ───
+        # ModelScope non-stream responses (both GLM-5.1 and DSv4P) intermittently include
+        # a 'delta' field in choices[0], which is invalid for OpenAI non-stream format.
+        # LiteLLM's response parser crashes on this (choices=None → InternalServerError).
+        # Data: glm5.1 non-stream has 14% 500-error rate (18/127), dsv4p is 100% broken.
+        # Streaming mode always works. Fix: for ALL non-stream requests, force stream=True
+        # to LiteLLM, then collect streaming chunks and synthesize non-stream Anthropic response.
+        force_stream_for_nonstream = (not is_stream)
         if force_stream_for_nonstream:
             oai_body["stream"] = True
-            _log("FORCE-STREAM", f"DSv4P non-stream → forcing stream=True (collect+synthesize)")
+            _log("FORCE-STREAM", f"non-stream → forcing stream=True (collect+synthesize)")
 
         _log("REQ", f"model={request_model}→{mapped_model} stream={is_stream} "
                     f"msgs={len(oai_body.get('messages',[]))} "
