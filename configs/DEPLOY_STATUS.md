@@ -2,9 +2,14 @@
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + DSv4P force-stream + error mapping) → 41001(LiteLLM glm5.1) → ModelScope
-                                                                            → 42001(LiteLLM dsv4p)  → ModelScope
+CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(LiteLLM glm5.1) → ModelScope
+                                                                     → 42001(LiteLLM dsv4p)  → ModelScope
 ```
+
+## Deploy Method
+- **docker compose**: `cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001`
+- **Docker Hub**: unreachable from China without proxy → mihomo on port 7880 configured as Docker systemd proxy (`/etc/systemd/system/docker.service.d/proxy.conf`)
+- **Legacy builder**: `DOCKER_BUILDKIT=0` required — BuildKit doesn't respect systemd proxy
 
 ## Containers (all healthy)
 - cc_postgres :5432
@@ -59,11 +64,11 @@ CC → 40001(proxy, format conversion + DSv4P force-stream + error mapping) → 
 
 ## Key Issues Found (2026-06-01)
 
-### DSv4P Non-Stream InternalServerError — FIXED (2026-06-01, opc2_uname)
-- **Root cause**: ModelScope DSv4P non-stream responses include `delta` field in `choices[0]` — invalid for OpenAI non-stream format. LiteLLM's `convert_dict_to_response.py` assertion fails: `choices` parsed as `None` → InternalServerError.
-- **Symptom**: ALL dsv4p non-stream requests failed with 500 InternalServerError. 17×500 errors in today's logs. Only streaming mode worked.
-- **Fix**: For dsv4p non-stream requests, proxy forces `stream=True` to LiteLLM via `force_stream_for_nonstream` flag, then collects streaming chunks and synthesizes non-stream Anthropic response via `_collect_stream_to_anth()`. All retry/fallback paths updated accordingly.
-- **Also**: DSv4P fallback from glm5.1 always uses streaming (dsv4p non-stream would crash LiteLLM).
+### ModelScope Non-Stream InternalServerError — FIXED (2026-06-01, opc2_uname)
+- **Root cause**: ModelScope non-stream responses (both GLM-5.1 and DSv4P) intermittently include `delta` field in `choices[0]` — invalid for OpenAI non-stream format. LiteLLM's `convert_dict_to_response.py` assertion fails: `choices` parsed as `None` → InternalServerError.
+- **Symptom**: DSv4P: 100% non-stream failure. GLM-5.1: 14% non-stream failure (18/127 = 500 errors).
+- **Fix**: ALL non-stream requests now force `stream=True` to LiteLLM. Proxy collects streaming chunks via `_collect_stream_to_anth()` and synthesizes non-stream Anthropic response. Eliminates 14% glm5.1 and 100% dsv4p 500-error rate.
+- **Also**: DSv4P fallback from glm5.1 always uses streaming.
 - **Also**: `reasoning_effort` only set for glm5.1 (DSv4P doesn't support it → UnsupportedParamsError).
 
 ### Error Mapping Fix (2026-06-01, opc2_uname)
