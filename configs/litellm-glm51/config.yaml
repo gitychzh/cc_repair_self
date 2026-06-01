@@ -652,3 +652,4 @@ router_settings:
     AuthenticationErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 3
     TimeoutErrorAllowedFails: 2
+    InternalServerErrorAllowedFails: 3
