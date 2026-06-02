@@ -94,7 +94,13 @@ MODEL_MAP = {
 # Input token safety limits — read from env vars, fallback to 128000
 # docker-compose passes MODEL_INPUT_TOKEN_SAFETY_GLM51/DSV4P env vars.
 # Previously these env vars were ignored (hardcoded 130000). Fixed to read env.
-MODEL_MAX_INPUT_TOKENS = {"glm5.1": 131072, "dsv4p": 131072}
+# ModelScope GLM-5.1 and DSv4P actual API input token limit is 202745 (confirmed by
+# ModelScope error: "Range of input length should be [1, 202745]"). The previous value
+# 131072 was the model's native context window, but ModelScope's API enforces a
+# different (larger) limit. This affects the OpenAI-format /v1/models endpoint.
+# Anthropic-format model endpoints use MODEL_INPUT_TOKEN_SAFETY (128000) for
+# context_window, which is deliberately lower to trigger CC auto-compaction early.
+MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745, "dsv4p": 202745}
 MODEL_INPUT_TOKEN_SAFETY = {
     "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "128000")),
     "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "128000")),
@@ -809,12 +815,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                 _log_metrics(metrics)
 
-                # Convert upstream "input exceeds" 400 errors to overloaded_error (529).
-                # When ModelScope returns 400 "exceeds model limit / token limit", CC
-                # treats it as a client error and stops without retry. Convert to
-                # overloaded_error so CC retries with auto-compaction.
-                if resp_status_final == 400 and "exceeds" in json.dumps(error_json).lower() and ("token" in json.dumps(error_json).lower() or "limit" in json.dumps(error_json).lower()):
-                    _log("OVERLOAD-CONV", f"400 input exceeds → 529 overloaded_error for CC compaction retry")
+                # Convert upstream input-token-overflow 400 errors to overloaded_error (529).
+                # When ModelScope returns 400 "exceeds model limit / token limit" OR
+                # "Range of input length should be [1, 202745]", CC treats it as a
+                # client error and stops without retry. Convert to overloaded_error so
+                # CC retries with auto-compaction (the correct recovery strategy).
+                # ModelScope uses two distinct error formats for the same problem:
+                #   1. "exceeds ... token/limit" (quota/context exceeds)
+                #   2. "InternalError.Algo.InvalidParameter: Range of input length should be [1, N]"
+                err_str_lower = json.dumps(error_json).lower()
+                is_input_overflow = (
+                    resp_status_final == 400
+                    and (
+                        # Pattern 1: "exceeds" + ("token" or "limit")
+                        ("exceeds" in err_str_lower and ("token" in err_str_lower or "limit" in err_str_lower))
+                        # Pattern 2: ModelScope "Range of input length should be [1, N]"
+                        or ("range of input length" in err_str_lower)
+                        # Pattern 3: InvalidParameter + input length reference
+                        or ("invalidparameter" in err_str_lower and ("input length" in err_str_lower or "input token" in err_str_lower))
+                    )
+                )
+                if is_input_overflow:
+                    _log("OVERLOAD-CONV", f"400 input overflow → 529 overloaded_error for CC compaction retry (matched: {err_str_lower[:100]})")
                     err_msg = json.dumps(error_json)[:500]
                     self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model})
                     metrics["status"] = 529
@@ -1375,6 +1397,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
           its own parameter constraints (e.g. thinking_budget > max_completion_tokens).
           This is a server-side compatibility issue, not a client error. CC should
           retry (preflight fix handles the conversion on next attempt).
+        - 400 InvalidParameter "Range of input length" → overloaded_error (NOT api_error)
+          Reason: This is input token overflow. Retrying with the same content never
+          works. CC's auto-compaction truncates conversation history, which is the
+          correct recovery strategy. overloaded_error triggers compaction specifically.
         - Everything else → api_error (CC retries)
         """
         err = error_json.get("error", error_json)
@@ -1383,7 +1409,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         err_type = "api_error"
         if "rate" in msg_lower or "429" in msg_lower:
             err_type = "rate_limit_error"
-        # Intentionally NOT mapping 400 InvalidParameter to invalid_request_error.
+        # Input token overflow from ModelScope → overloaded_error (CC auto-compacts)
+        # ModelScope format: "Range of input length should be [1, 202745]"
+        # Retrying the same oversized content never works — CC must compact first.
+        elif ("range of input length" in msg_lower
+              or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))):
+            err_type = "overloaded_error"
+        # Intentionally NOT mapping other 400 InvalidParameter to invalid_request_error.
         # CC stops on invalid_request_error, but ModelScope InvalidParameter is a
         # server-side constraint mismatch (e.g. thinking_budget vs max_completion_tokens),
         # not a genuine client error. Mapping to api_error lets CC retry, which

@@ -90,6 +90,17 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - **After**: Read from os.environ.get() with fallback 128000. All .get() fallbacks also changed from 130000→128000
 - **Evidence**: proxy log now shows `safety=128000` (was `safety=130000` before fix)
 
+### MODEL_MAX_INPUT_TOKENS fix (proxy.py)
+- **Before**: MODEL_MAX_INPUT_TOKENS = {glm5.1:131072, dsv4p:131072} (model's native context window)
+- **After**: MODEL_MAX_INPUT_TOKENS = {glm5.1:202745, dsv4p:202745} (ModelScope API's actual enforced limit)
+- **Why**: ModelScope returns "Range of input length should be [1, 202745]" — the API enforces 202745, not 131072. The Anthropic-format /v1/models endpoints still use MODEL_INPUT_TOKEN_SAFETY (128000) for context_window, which is deliberately lower to trigger CC auto-compaction early.
+
+### ModelScope "Range of input length" error → 529 overloaded_error (proxy.py)
+- **Before**: 400→529 conversion only matched "exceeds" + ("token" OR "limit"). ModelScope's actual error format "InternalError.Algo.InvalidParameter: Range of input length should be [1, 202745]" was NOT matched → CC received 400 api_error → CC retries with same oversized content → infinite retry loop.
+- **After**: 400→529 conversion now also matches "range of input length" and "invalidparameter" + ("input length" OR "input token"). CC receives 529 overloaded_error → CC triggers auto-compaction → retry with smaller content → success.
+- **Why**: Two error formats for the same problem: (1) "exceeds...token/limit" and (2) "Range of input length should be [1, N]". Both mean input overflow. CC needs overloaded_error to trigger auto-compaction, not api_error (which just retries same content).
+- **Also**: _convert_error now maps input-overflow InvalidParameter to overloaded_error (not api_error). thinking_budget InvalidParameter still maps to api_error (preflight fix adjusts params → retry works).
+
 ## Router Settings (updated 2026-06-02, Round 1-6 optimizations)
 - num_retries: 3
 - cooldown_time: 30
@@ -105,13 +116,16 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3 (NEW — prevents ModelScope null-response cooldown cascade)
 
-## Proxy Changes (Round 1-5)
+## Proxy Changes (Round 1-6)
 - Added `import socket` — socket.timeout referenced at line 1233 but module not imported
 - Removed conn_retry — 3% success rate (1/36), 3s wasted latency per attempt
 - Removed rate_limit_retry — 8% success rate (1/13), 2s wasted latency per attempt
 - Removed glm→dsv4p FALLBACK — always fails (UnsupportedParamsError on reasoning_effort)
 - should_rate_limit_retry = False (disabled for clarity, not deleted)
 - RateLimitErrorAllowedFails: 1→3, cooldown_time: 60→30, InternalServerErrorAllowedFails: 3
+- MODEL_MAX_INPUT_TOKENS: 131072→202745 (ModelScope API's actual enforced limit)
+- 400→529 overloaded_error conversion: extended to match ModelScope "Range of input length should be [1, N]" and "InvalidParameter" + "input length" error formats
+- _convert_error: input-overflow InvalidParameter → overloaded_error (CC auto-compacts), thinking_budget InvalidParameter → api_error (CC retries with preflight fix)
 
 ## Metrics Summary (2026-06-02, after Round 1-4 optimizations)
 - Total requests (clean data, 19:10 UTC onwards): 89
