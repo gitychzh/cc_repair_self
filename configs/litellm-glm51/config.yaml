@@ -643,7 +643,7 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 3
+  num_retries: 5
   cooldown_time: 30
   routing_strategy: latency-based-routing
   routing_strategy_args:
@@ -652,6 +652,6 @@ router_settings:
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
-    RateLimitErrorAllowedFails: 3
+    RateLimitErrorAllowedFails: 1
     TimeoutErrorAllowedFails: 2
     InternalServerErrorAllowedFails: 3
