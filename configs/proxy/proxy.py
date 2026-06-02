@@ -651,8 +651,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 )
 
                 # No rate_limit_retry: data shows 8% success rate (1/13) with 2s wait.
-                # CC has built-in retry with backoff on rate_limit_error (429→529 mapping).
-                # LiteLLM's own num_retries=3 handles deployment rotation on 429.
+                # CC has built-in retry with backoff on rate_limit_error (429 stays as 429).
+                # LiteLLM's own num_retries=5 handles deployment rotation on 429.
                 # Proxy retry wastes 2s latency for 92% of already-failed requests.
                 should_rate_limit_retry = False
 
@@ -807,8 +807,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # No rate_limit_retry or model fallback:
                 # Data proves: RATELIMIT retry 8% success (1/13) with 2s waste.
                 # FALLBACK (glm5.1→dsv4p) always fails: UnsupportedParamsError on reasoning_effort.
-                # CC handles 429 via rate_limit_error/529 mapping → CC retries with backoff.
-                # LiteLLM handles deployment rotation via num_retries=3.
+                # CC handles 429 via rate_limit_error type → CC retries with backoff.
+                # LiteLLM handles deployment rotation via num_retries=5.
+                # NOTE: 429 is NOT converted to 529 — 529 causes CC "Repeated Overloaded" crash.
 
                 _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
                 # Log error detail for analysis
@@ -1434,12 +1435,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _get_upstream_status_for_client(self, upstream_status):
         """Map upstream HTTP status to client-facing status.
 
-        ModelScope returns 429 for rate limit/quota errors.
-        Claude Code treats 529 as "API overloaded" and shows a user-friendly message.
-        Map 429 → 529 so CC displays "API is at capacity" instead of generic error.
+        DO NOT convert 429 → 529. Data proves 529 causes CC to show "Repeated 529
+        Overloaded errors" and attempt auto-compaction, which is wrong for RPM rate
+        limits. CC should see 429 + rate_limit_error → retries with backoff (correct
+        behavior for rate limits). Only genuine overloaded/overflow errors should be 529.
         """
-        if upstream_status == 429:
-            return 529
+        # 429 passes through as-is — _convert_error() maps message to rate_limit_error
+        # CC retries with exponential backoff on rate_limit_error (correct for RPM limits)
         return upstream_status
 
     def _make_upstream_conn(self, parsed_url):
