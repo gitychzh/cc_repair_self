@@ -1,0 +1,50 @@
+{
+  "round": 5,
+  "operator": "opc2_uname",
+  "timestamp": "2026-06-02T03:30:00Z",
+  "analysis_window": "2h proxy log (2026-06-01 ~18:30-20:00 UTC)",
+  "total_requests": 489,
+  "error_types": {
+    "ConnectionRefused_original": 35,
+    "ConnectionRefused_connretry": 23,
+    "429_RateLimit": 16,
+    "429_RateLimit_variant": 4,
+    "RATELIMIT_proxy_retry": 13,
+    "FALLBACK_glm_to_dsv4p": 3,
+    "INPUT_WARN": 82,
+    "socket_not_defined": 1,
+    "IncompleteRead": 1,
+    "ConnectionReset": 3,
+    "dsv4p_uni41001_invalid_model": 12
+  },
+  "changes": [
+    {
+      "type": "proxy_code",
+      "what": "remove RATELIMIT retry + FALLBACK",
+      "why": "8% success rate for rate_limit_retry (1/13); FALLBACK always fails (UnsupportedParamsError); core principle: proxy only does format conversion",
+      "lines_removed": 109,
+      "evidence": "13 RATELIMIT retries → 1 success; 3 FALLBACKs → 0 success (UnsupportedParamsError)"
+    },
+    {
+      "type": "litellm_config_both",
+      "what": "move lowest_latency_buffer + rolling_window_size to routing_strategy_args",
+      "why": "LiteLLM v1.85.1 Router.__init__() ignores these keys at router_settings level. Startup warning: 'Key is not a valid argument'",
+      "evidence": "both LiteLLM instances log WARNING on startup; verified Router.__init__ param list excludes these"
+    },
+    {
+      "type": "litellm_config_dsv4p",
+      "what": "add allowed_openai_params + drop_params=true",
+      "why": "UnsupportedParamsError when reasoning_effort sent to dsv4p",
+      "evidence": "FALLBACK log: 'UnsupportedParamsError: openai does not support parameters: [reasoning_effort]'"
+    }
+  ],
+  "test_results": {
+    "glm5.1_stream": 200,
+    "glm5.1_non_stream": 200,
+    "dsv4p_stream": 200,
+    "dsv4p_non_stream": 200,
+    "litellm_warnings_eliminated": true,
+    "proxy_errors_after_deploy": 0
+  },
+  "containers_restarted": ["auth_to_api_40001 (rebuild)", "glm5.1_uni41001", "dsv4p_uni42001"]
+}

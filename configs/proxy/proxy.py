@@ -632,12 +632,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     and metrics.get("_resilience_retry_count", 0) < 1
                 )
 
-                # Rate limit retry for 429: retry once after brief delay to allow
-                # LiteLLM to route to a different deployment with remaining quota.
-                should_rate_limit_retry = (
-                    resp.status == 429
-                    and metrics.get("_rate_limit_retry_count", 0) < 1
-                )
+                # No rate_limit_retry: data shows 8% success rate (1/13) with 2s wait.
+                # CC has built-in retry with backoff on rate_limit_error (429→529 mapping).
+                # LiteLLM's own num_retries=3 handles deployment rotation on 429.
+                # Proxy retry wastes 2s latency for 92% of already-failed requests.
+                should_rate_limit_retry = False
 
                 # Resilience retry for InvalidParameter (thinking_budget > max_completion_tokens):
                 # ModelScope GLM-5.1 requires max_completion_tokens > thinking_budget.
@@ -787,119 +786,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     resp_status_final = resp.status
 
-                # Rate limit retry for 429: brief delay then retry once
-                # This allows LiteLLM to route to a different deployment with quota
-                if should_rate_limit_retry and resp_status_final == 429:
-                    metrics["_rate_limit_retry_count"] = metrics.get("_rate_limit_retry_count", 0) + 1
-                    _log("RATELIMIT", f"429 RateLimit → retry #{metrics['_rate_limit_retry_count']} (waiting 2s for deployment rotation)")
-                    _log_error_detail({
-                        "request_id": request_id,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "error_subcategory": "429_rate_limit_retry_triggered",
-                        "upstream_status": resp.status,
-                        "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:1000],
-                    })
-                    import time as _time
-                    _time.sleep(2)  # Brief delay for LiteLLM cooldown/rotation
-                    try:
-                        conn_rl = self._make_upstream_conn(parsed_upstream)
-                        conn_rl.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
-                        resp_rl = conn_rl.getresponse()
-                        if resp_rl.status < 400:
-                            if is_stream:
-                                self._stream_to_anth(resp_rl, request_model, mapped_model, conn_rl, metrics, t_start)
-                                metrics["status"] = 200
-                                metrics["rate_limit_retry_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                _log_metrics(metrics)
-                                return
-                            elif force_stream_for_nonstream:
-                                self._collect_stream_to_anth(resp_rl, request_model, mapped_model, conn_rl, metrics, t_start)
-                                metrics["rate_limit_retry_success"] = True
-                                return
-                            else:
-                                ttfb_rl = time.time()
-                                resp_body_rl = resp_rl.read()
-                                oai_response_rl = json.loads(resp_body_rl)
-                                anth_response_rl = openai_to_anth(oai_response_rl, request_model)
-                                metrics["status"] = 200
-                                metrics["rate_limit_retry_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                metrics["ttfb_ms"] = int((ttfb_rl - t_start) * 1000)
-                                usage_rl = oai_response_rl.get("usage", {})
-                                metrics["input_tokens"] = usage_rl.get("prompt_tokens", 0)
-                                metrics["output_tokens"] = usage_rl.get("completion_tokens", 0)
-                                choices_rl = oai_response_rl.get("choices", [])
-                                if choices_rl:
-                                    metrics["finish_reason"] = choices_rl[0].get("finish_reason")
-                                _log_metrics(metrics)
-                                self._send_json(200, anth_response_rl)
-                                conn_rl.close()
-                                return
-                        # Retry also failed — use latest error
-                        error_body_rl = resp_rl.read()
-                        try:
-                            error_json_rl = json.loads(error_body_rl)
-                        except Exception:
-                            error_json_rl = {"error": error_body_rl.decode("utf-8", errors="replace")}
-                        conn_rl.close()
-                        error_json = error_json_rl
-                        resp_status_final = resp_rl.status
-                        _log("ERR", f"rate limit retry also failed: {resp_rl.status} {json.dumps(error_json_rl)[:200]}")
-                    except Exception as e_rl:
-                        _log("ERR", f"rate limit retry connection error: {e_rl}")
-
-                # DSv4P fallback: if GLM-5.1 is rate limited, try DeepSeek-V4-Pro
-                if resp_status_final == 429 and mapped_model == "glm5.1":
-                    _log("FALLBACK", f"GLM-5.1 429 → trying DSv4P fallback")
-                    _log_error_detail({
-                        "request_id": request_id,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                        "error_subcategory": "429_dsv4p_fallback_triggered",
-                        "upstream_status": resp_status_final,
-                        "original_model": mapped_model,
-                        "fallback_model": "dsv4p",
-                    })
-                    # Build fallback request with dsv4p model
-                    # DSv4P must use stream=True to avoid LiteLLM crash on non-stream
-                    # (ModelScope returns 'delta' in choices which crashes LiteLLM parser)
-                    oai_body_fallback = json.loads(oai_data.decode("utf-8"))
-                    oai_body_fallback["model"] = "dsv4p"
-                    oai_body_fallback["stream"] = True
-                    _log("FALLBACK", f"forcing stream=True for DSv4P fallback")
-                    fallback_data = json.dumps(oai_body_fallback).encode("utf-8")
-                    fallback_upstream = MODEL_UPSTREAMS["dsv4p"]
-                    fallback_url = fallback_upstream["chat_url"]
-                    parsed_fallback = urllib.parse.urlparse(fallback_url)
-                    fallback_headers = dict(headers_out)
-                    fallback_headers["Content-Length"] = str(len(fallback_data))
-                    try:
-                        conn_fb = self._make_upstream_conn(parsed_fallback)
-                        conn_fb.request("POST", parsed_fallback.path, body=fallback_data, headers=fallback_headers)
-                        resp_fb = conn_fb.getresponse()
-                        if resp_fb.status < 400:
-                            # DSv4P fallback: always streaming because DSv4P non-stream
-                            # responses crash LiteLLM (choices=None). For is_stream=True, use
-                            # _stream_to_anth directly. For non-stream client, use
-                            # _collect_stream_to_anth to synthesize non-stream response.
-                            if is_stream:
-                                self._stream_to_anth(resp_fb, request_model, "dsv4p", conn_fb, metrics, t_start)
-                                metrics["status"] = 200
-                                metrics["dsv4p_fallback_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                _log_metrics(metrics)
-                                return
-                            else:
-                                # Client wanted non-stream: collect streaming and synthesize
-                                self._collect_stream_to_anth(resp_fb, request_model, "dsv4p", conn_fb, metrics, t_start)
-                                metrics["dsv4p_fallback_success"] = True
-                                return
-                        # DSv4P also failed
-                        error_body_fb = resp_fb.read()
-                        _log("ERR", f"DSv4P fallback also failed: {resp_fb.status} {error_body_fb.decode('utf-8', errors='replace')[:200]}")
-                        conn_fb.close()
-                    except Exception as e_fb:
-                        _log("ERR", f"DSv4P fallback connection error: {e_fb}")
+                # No rate_limit_retry or model fallback:
+                # Data proves: RATELIMIT retry 8% success (1/13) with 2s waste.
+                # FALLBACK (glm5.1→dsv4p) always fails: UnsupportedParamsError on reasoning_effort.
+                # CC handles 429 via rate_limit_error/529 mapping → CC retries with backoff.
+                # LiteLLM handles deployment rotation via num_retries=3.
 
                 _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
                 # Log error detail for analysis

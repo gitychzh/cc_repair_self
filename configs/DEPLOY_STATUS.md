@@ -45,12 +45,39 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - Proxy streaming bug fixes (graceful end, byte-by-byte, etc.)
 - Proxy error mapping (429→rate_limit_error, 400 InvalidParameter→api_error)
 
-## Router Settings (updated 2026-06-02, Round 1-4 optimizations)
+## opc2_uname_r5 Changes (2026-06-02)
+
+### Proxy RATELIMIT retry + FALLBACK removed (highest priority)
+- **Before**: Proxy had rate_limit_retry (429 → 2s wait → retry) and FALLBACK (glm5.1 429 → dsv4p)
+- **After**: Both removed. 429 errors directly mapped to CC via rate_limit_error/529 → CC retries with backoff
+- **Why**: Core principle "proxy only does format conversion" + data proves:
+  - RATELIMIT retry: 8% success (1/13), 2s latency waste per attempt
+  - FALLBACK: always fails — UnsupportedParamsError on reasoning_effort (dsv4p doesn't support it)
+  - CC has built-in retry on rate_limit_error, LiteLLM has num_retries=3 for deployment rotation
+- **Code removed**: 109 lines (RATELIMIT retry block + FALLBACK block)
+- **should_rate_limit_retry**: set to `False` (disabled, not deleted for clarity)
+
+### LiteLLM config: routing_strategy_args fix (critical)
+- **Before**: `lowest_latency_buffer: 0.1` and `rolling_window_size: 30` placed directly under `router_settings`
+- **After**: Moved to `router_settings.routing_strategy_args` sub-key
+- **Why**: LiteLLM v1.85.1 Router.__init__() does NOT accept these as direct parameters. Warning logged on every startup: "Key 'lowest_latency_buffer' is not a valid argument for Router.__init__(). Ignoring this key."
+- **Impact**: latency-based-routing strategy was effectively running WITHOUT buffer/window tuning (parameters ignored = default behavior). After fix, routing properly considers latency buffer and rolling window.
+- **Verified**: `docker exec glm5.1_uni41001 python3 -c "Router([...], routing_strategy_args={'lowest_latency_buffer': 0.1, 'rolling_window_size': 30})"` → OK
+
+### DSv4P config: allowed_openai_params + drop_params (bug fix)
+- **Before**: dsv4p config had no `allowed_openai_params` and `drop_params: false`
+- **After**: Added `allowed_openai_params` list (parity with glm5.1) + `drop_params: true`
+- **Why**: FALLBACK failure evidence: `UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=deepseek-ai/DeepSeek-v4-pro`. Even without FALLBACK, this config deficiency should be fixed — future direct dsv4p requests would also fail with reasoning_effort.
+- **Note**: reasoning_effort is intentionally excluded from dsv4p's allowed_openai_params (DSv4P doesn't support it). drop_params=true drops it gracefully.
+
+## Router Settings (updated 2026-06-02, Round 1-5 optimizations)
 - num_retries: 3
 - cooldown_time: 30 (was 60, reduced — LiteLLM default=5s, 60s=12x default, excessively punitive)
 - routing_strategy: latency-based-routing
-- lowest_latency_buffer: 0.1
-- rolling_window_size: 30
+- routing_strategy_args:
+  - lowest_latency_buffer: 0.1
+  - rolling_window_size: 30
+  (Previously placed directly in router_settings — LiteLLM v1.85 ignored them. Now under routing_strategy_args — actually effective.)
 - enable_pre_call_checks: false
 - background_health_checks: false
 - AuthenticationErrorAllowedFails: 0 (immediate cooldown on 401)
@@ -58,9 +85,12 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3 (NEW — prevents ModelScope null-response cooldown cascade)
 
-## Proxy Changes (Round 1-4)
+## Proxy Changes (Round 1-5)
 - Added `import socket` — socket.timeout referenced at line 1233 but module not imported
 - Removed conn_retry — 3% success rate (1/36), 3s wasted latency per attempt
+- Removed rate_limit_retry — 8% success rate (1/13), 2s wasted latency per attempt
+- Removed glm→dsv4p FALLBACK — always fails (UnsupportedParamsError on reasoning_effort)
+- should_rate_limit_retry = False (disabled for clarity, not deleted)
 - RateLimitErrorAllowedFails: 1→3, cooldown_time: 60→30, InternalServerErrorAllowedFails: 3
 
 ## Metrics Summary (2026-06-02, after Round 1-4 optimizations)

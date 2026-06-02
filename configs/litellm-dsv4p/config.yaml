@@ -15,6 +15,9 @@
 #   - TimeoutErrorAllowedFails: 3→2 (same reasoning)
 #   - rolling_window_size: 300→30 (shorter window = faster routing adaptation)
 #   - BadRequestErrorAllowedFails removed (was 0, redundant)
+#   - drop_params: false→true (DSv4P doesn't support reasoning_effort; drop it gracefully)
+#   - allowed_openai_params added (parity with glm5.1 config)
+#   - lowest_latency_buffer + rolling_window_size moved to routing_strategy_args (LiteLLM v1.85 ignores them at router_settings level)
 
 model_list:
   # ─── variant 1: deepseek-ai/deepseek-v4-pro ───
@@ -25,6 +28,22 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: &dsv4p_allowed
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
     model_info:
       mode: chat
       max_tokens: 131072
@@ -78,6 +97,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -131,6 +151,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -184,6 +205,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -237,6 +259,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -290,6 +313,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -343,6 +367,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -396,6 +421,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -449,6 +475,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -502,6 +529,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -555,6 +583,7 @@ model_list:
       api_key: os.environ/MS_KEY1
       rpm: 1
       timeout: 300
+      allowed_openai_params: *dsv4p_allowed
     model_info:
       mode: chat
       max_tokens: 131072
@@ -602,7 +631,7 @@ model_list:
       max_tokens: 131072
 
 litellm_settings:
-  drop_params: false
+  drop_params: true
   json_logs: true
   request_timeout: 300
   store_prompts_in_spend_logs: true
@@ -616,8 +645,9 @@ router_settings:
   num_retries: 3
   cooldown_time: 30
   routing_strategy: latency-based-routing
-  lowest_latency_buffer: 0.1
-  rolling_window_size: 30
+  routing_strategy_args:
+    lowest_latency_buffer: 0.1
+    rolling_window_size: 30
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0

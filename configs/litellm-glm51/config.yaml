@@ -15,6 +15,7 @@
 #   - TimeoutErrorAllowedFails: 3→2 (same reasoning)
 #   - rolling_window_size: 300→30 (shorter window = faster routing adaptation)
 #   - BadRequestErrorAllowedFails removed (was 0, redundant)
+#   - lowest_latency_buffer + rolling_window_size moved to routing_strategy_args (LiteLLM v1.85 ignores them at router_settings level)
 
 model_list:
   # ─── variant 1: zhipuai/glm-5.1 ───
@@ -645,8 +646,9 @@ router_settings:
   num_retries: 3
   cooldown_time: 30
   routing_strategy: latency-based-routing
-  lowest_latency_buffer: 0.1
-  rolling_window_size: 30
+  routing_strategy_args:
+    lowest_latency_buffer: 0.1
+    rolling_window_size: 30
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
