@@ -20,8 +20,8 @@ Env vars:
   MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
   MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
   CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 3.5)
-  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 130000, model capacity 131072)
-  MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 130000)
+  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 128000, model capacity 131072)
+  MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 128000)
   LOG_DIR             — log directory (default: /app/logs)
 """
 import http.server
@@ -91,11 +91,13 @@ MODEL_MAP = {
     "claude-3-opus-20240229": "glm5.1",
 }
 
-# Input token safety limits (GLM-5.1: 131072 actual capacity; DSv4P: 131072)
+# Input token safety limits — read from env vars, fallback to 128000
+# docker-compose passes MODEL_INPUT_TOKEN_SAFETY_GLM51/DSV4P env vars.
+# Previously these env vars were ignored (hardcoded 130000). Fixed to read env.
 MODEL_MAX_INPUT_TOKENS = {"glm5.1": 131072, "dsv4p": 131072}
 MODEL_INPUT_TOKEN_SAFETY = {
-    "glm5.1": 130000,
-    "dsv4p": 130000,
+    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "128000")),
+    "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "128000")),
 }
 
 DEFAULT_MODEL = "glm5.1"
@@ -572,7 +574,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # The proxy's char-based estimation is inaccurate and causes false rejections
         # when the actual token count is within the model's capacity.
         model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
-        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 130000)
+        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 128000)
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
         if estimated_tokens > model_safety:
@@ -1313,7 +1315,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for model_id, mapped in MODEL_MAP.items():
             if mapped not in seen_ids:
                 seen_ids.add(mapped)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 130000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
                 all_models.append({
                     "id": model_id,
                     "type": "model",
@@ -1324,7 +1326,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Also include the canonical model names (glm5.1, dsv4p)
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 130000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 128000)
                 all_models.append({
                     "id": model_key,
                     "type": "model",
@@ -1342,7 +1344,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
         # Use the safety limit as context_window, not the model max (131072)
         # This ensures CC compacts early enough to stay within the backend's capacity
-        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 130000)
+        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
         self._send_json(200, {
             "id": model_id,
             "type": "model",

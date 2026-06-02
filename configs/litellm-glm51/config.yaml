@@ -643,7 +643,7 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 5
+  num_retries: 3
   cooldown_time: 30
   routing_strategy: latency-based-routing
   routing_strategy_args:
