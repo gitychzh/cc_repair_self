@@ -651,6 +651,7 @@ router_settings:
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
+    BadRequestErrorAllowedFails: 0
     RateLimitErrorAllowedFails: 3
     TimeoutErrorAllowedFails: 2
     InternalServerErrorAllowedFails: 3
