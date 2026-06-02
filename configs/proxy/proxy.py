@@ -576,16 +576,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["upstream"] = upstream_key
 
         # ─── Input token pre-check ───
-        # DISABLED: Let the model handle oversized requests directly.
-        # The proxy's char-based estimation is inaccurate and causes false rejections
-        # when the actual token count is within the model's capacity.
+        # HARD rejection for obviously oversized requests (> safety limit).
+        # Returns 529 overloaded_error immediately, triggering CC compaction retry
+        # without wasting a full round-trip to ModelScope. Borderline requests
+        # (between warning threshold and safety limit) pass through with a soft warning.
         model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
         model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 128000)
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
         if estimated_tokens > model_safety:
-            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} > safety={model_safety} (passing through)")
-            # Log but do NOT reject — let the model decide
+            _log("INPUT-REJECT", f"estimated_tokens={estimated_tokens} > safety={model_safety}")
+            self._send_json(529, {"type": "error", "error": {"type": "overloaded_error",
+                             "message": f"Input tokens (~{estimated_tokens}) exceed safe limit ({model_safety}). Auto-compact will retry."},
+                             "model": request_model})
+            metrics["status"] = 529
+            metrics["error_type"] = "InputExceedsProxyReject"
+            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+            _log_metrics(metrics)
+            return
+        elif estimated_tokens > model_max_tokens * 0.8:
+            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} near model_max={model_max_tokens} (passing through)")
 
         # ─── ModelScope force-stream ───
         # ModelScope non-stream responses (both GLM-5.1 and DSv4P) intermittently include
@@ -815,7 +825,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                 _log_metrics(metrics)
 
-                # Convert upstream input-token-overflow 400 errors to overloaded_error (529).
+# Convert upstream input-token-overflow 400 errors to overloaded_error (529).
                 # When ModelScope returns 400 "exceeds model limit / token limit" OR
                 # "Range of input length should be [1, 202745]", CC treats it as a
                 # client error and stops without retry. Convert to overloaded_error so
@@ -823,20 +833,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # ModelScope uses two distinct error formats for the same problem:
                 #   1. "exceeds ... token/limit" (quota/context exceeds)
                 #   2. "InternalError.Algo.InvalidParameter: Range of input length should be [1, N]"
-                err_str_lower = json.dumps(error_json).lower()
+                # Guard: thinking_budget errors are handled separately by resilience retry.
+                err_lower = json.dumps(error_json).lower()
                 is_input_overflow = (
                     resp_status_final == 400
                     and (
-                        # Pattern 1: "exceeds" + ("token" or "limit")
-                        ("exceeds" in err_str_lower and ("token" in err_str_lower or "limit" in err_str_lower))
-                        # Pattern 2: ModelScope "Range of input length should be [1, N]"
-                        or ("range of input length" in err_str_lower)
-                        # Pattern 3: InvalidParameter + input length reference
-                        or ("invalidparameter" in err_str_lower and ("input length" in err_str_lower or "input token" in err_str_lower))
+                        ("exceeds" in err_lower and ("token" in err_lower or "limit" in err_lower))
+                        or ("range of input length" in err_lower)
+                        or ("invalidparameter" in err_lower and ("input length" in err_lower or "input token" in err_lower))
                     )
+                    and "thinking_budget" not in err_lower
                 )
                 if is_input_overflow:
-                    _log("OVERLOAD-CONV", f"400 input overflow → 529 overloaded_error for CC compaction retry (matched: {err_str_lower[:100]})")
+                    _log("OVERLOAD-CONV", f"400 input overflow → 529 overloaded_error for CC compaction retry")
                     err_msg = json.dumps(error_json)[:500]
                     self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model})
                     metrics["status"] = 529
