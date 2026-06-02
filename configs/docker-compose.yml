@@ -39,7 +39,7 @@ services:
       start_period: 30s
 
   glm5.1_uni41001:
-    image: litellm/litellm:v1.85.1
+    image: litellm/litellm:v1.87.0
     container_name: glm5.1_uni41001
     restart: unless-stopped
     environment:
@@ -86,7 +86,7 @@ services:
       - "4000"
 
   dsv4p_uni42001:
-    image: litellm/litellm:v1.85.1
+    image: litellm/litellm:v1.87.0
     container_name: dsv4p_uni42001
     restart: unless-stopped
     environment:
