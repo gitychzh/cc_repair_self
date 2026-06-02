@@ -29,7 +29,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 
 ### Router Settings Reverted to Optimal Values (both configs)
 - `num_retries`: 5→3 — With 77 deployments, 5 retries wastes latency. LiteLLM's latency-based-routing finds a working deployment faster with 3 retries on a larger pool.
-- `RateLimitErrorAllowedFails`: 3→1 — At rpm=1, rate-limit means definitive quota exhaustion. With 77 deployments, allowing 3 fails wastes requests on already-limited deployments.
+- `RateLimitErrorAllowedFails`: 3→1 — At rpm=1, rate-limit means definitive quota exhaustion. With 77 deployments, allowing 3 fails wastes requests on already-limited deployments. **NOTE: Round 6 data analysis changed this back to 3 — see Round 6 section.**
 - `TimeoutErrorAllowedFails`: 3→2 — Same reasoning. More deployments = less tolerance needed.
 - `rolling_window_size`: 300→30 — 300-window is too slow for routing adaptation at rpm=1. Shorter window allows faster shift to less-loaded deployments.
 - `BadRequestErrorAllowedFails`: 0 removed — BadRequest is a client error, not a deployment health indicator. No deployment should be cooled down for a BadRequest.
@@ -70,9 +70,29 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - **Why**: FALLBACK failure evidence: `UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=deepseek-ai/DeepSeek-v4-pro`. Even without FALLBACK, this config deficiency should be fixed — future direct dsv4p requests would also fail with reasoning_effort.
 - **Note**: reasoning_effort is intentionally excluded from dsv4p's allowed_openai_params (DSv4P doesn't support it). drop_params=true drops it gracefully.
 
-## Router Settings (updated 2026-06-02, Round 1-5 optimizations)
+## opc2_uname_r6 Changes (2026-06-02)
+
+### num_retries: 5→3 (both configs)
+- **Before**: num_retries=5 (opc_uname's Round 5 reverted my 3→5)
+- **After**: num_retries=3
+- **Why**: 429 insufficient_quota exhausts ALL retries regardless of count (all deployments return 429 simultaneously). Data: 38x 429 with num_retries=3 → all exhausted with same outcome. num_retries=5 wastes 2 extra retries (~20-30s latency) for zero benefit on quota-exhaustion 429. For RPM 429 (rpm=1), 3 retries find a non-limited deployment faster than 5.
+
+### RateLimitErrorAllowedFails: 1→3 (both configs)
+- **Before**: RateLimitErrorAllowedFails=1 (opc_uname's Round 5 reverted my 3→1)
+- **After**: RateLimitErrorAllowedFails=3
+- **Why**: Two types of 429 exist:
+  - insufficient_quota: ALL deployments 429 → AllowedFails=1 vs 3 makes NO difference (all exhaust pool)
+  - RPM 429 (rpm=1): AllowedFails=1 is too aggressive → 1 RPM hit → 30s cooldown removes working deployment. AllowedFails=3 tolerates normal RPM rotation.
+  - Previous Round 4 cascade (65/77 unhealthy) was InternalServerError cascade, now mitigated by InternalServerErrorAllowedFails=3
+
+### MODEL_INPUT_TOKEN_SAFETY env reading fix (proxy.py)
+- **Before**: MODEL_INPUT_TOKEN_SAFETY hardcoded as {glm5.1:130000, dsv4p:130000} — docker-compose env vars (128000) were completely IGNORED
+- **After**: Read from os.environ.get() with fallback 128000. All .get() fallbacks also changed from 130000→128000
+- **Evidence**: proxy log now shows `safety=128000` (was `safety=130000` before fix)
+
+## Router Settings (updated 2026-06-02, Round 1-6 optimizations)
 - num_retries: 3
-- cooldown_time: 30 (was 60, reduced — LiteLLM default=5s, 60s=12x default, excessively punitive)
+- cooldown_time: 30
 - routing_strategy: latency-based-routing
 - routing_strategy_args:
   - lowest_latency_buffer: 0.1
