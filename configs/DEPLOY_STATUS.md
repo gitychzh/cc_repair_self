@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-03 by opc_uname R1-R6 optimization)
+# Deploy Status — opc_uname (updated 2026-06-03 by opc2_uname R7 — 529 Overloaded crash fix)
 
 ## Architecture
 ```
@@ -15,8 +15,8 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - cc_postgres :5432
 - glm5.1_uni41001 :41001 (77 deployments: 11 variants × 7 keys)
 - dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys)
-- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping)
-- auth_to_api_40002 :40002 (Codex proxy, same codebase)
+- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping + insufficient_quota→api_error)
+- auth_to_api_40002 :40002 (Codex proxy, same codebase + insufficient_quota→api_error)
 
 ## opc2_uname_r3 Changes (2026-06-02)
 
@@ -70,6 +70,41 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - **Why**: FALLBACK failure evidence: `UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=deepseek-ai/DeepSeek-v4-pro`. Even without FALLBACK, this config deficiency should be fixed — future direct dsv4p requests would also fail with reasoning_effort.
 - **Note**: reasoning_effort is intentionally excluded from dsv4p's allowed_openai_params (DSv4P doesn't support it). drop_params=true drops it gracefully.
 
+## opc2_uname_r7 Changes (2026-06-03 — 529 Overloaded crash fix)
+
+### CRITICAL: insufficient_quota 429 → api_error (NOT rate_limit_error)
+- **Before**: ModelScope `insufficient_quota` 429 was mapped to `rate_limit_error` by `_convert_error()`
+- **After**: `insufficient_quota` 429 → `api_error`
+- **Why**: CC treats `rate_limit_error` as a temporary throttle → retries with exponential backoff. But `insufficient_quota` means ModelScope account quota is genuinely exhausted (token/month limit) — CC backoff wastes time because quota won't recover in seconds (daily/monthly reset). Worse: CC's backoff loop on rate_limit_error + INPUT-REJECT 529 cascades into "Repeated 529 Overloaded" crash.
+- **Evidence**: 2026-06-03 metrics: 26x 529 InputExceedsProxyReject + 25x 429 insufficient_quota. Combined loop triggered CC crash.
+- **Implementation**: `_convert_error()` now checks for `insufficient_quota` error code, `quota + exceeded` message pattern, and `exceeded your current quota` message before classifying as `api_error`. Regular RPM 429 still → `rate_limit_error` (correct for temporary throttles).
+
+### MODEL_INPUT_TOKEN_SAFETY: 110K → 120K (both proxies)
+- **Before**: MODEL_INPUT_TOKEN_SAFETY_GLM51=110000, DSV4P=110000
+- **After**: MODEL_INPUT_TOKEN_SAFETY_GLM51=120000, DSV4P=120000
+- **Why**: CC contextWindow=110K → requests at ~110K tokens → estimated_tokens=110K/chars_per_token → when chars_per_token=2.5: estimated ~110K exactly → INPUT-REJECT at 110K threshold → 529 overloaded_error → CC compaction → retry still at ~110K → another 529 → loop → crash. Raising to 120K gives 10K headroom above CC's contextWindow so legitimate 110K requests pass through.
+- **CC settings unchanged**: contextWindow=110K, autoCompactWindow=90K. With safety=120K, CC 110K requests (estimated ~110K tokens with chars_per_token=3.5) are well under the 120K threshold.
+
+### CHARS_PER_TOKEN_ESTIMATE: 2.5 → 3.5 (both proxies)
+- **Before**: CHARS_PER_TOKEN_ESTIMATE=2.5 (underestimates token count → more INPUT-REJECT hits)
+- **After**: CHARS_PER_TOKEN_ESTIMATE=3.5 (more conservative → fewer false INPUT-REJECT)
+- **Why**: With chars_per_token=2.5, a 385K-char request = estimated 154K tokens (over safety limit). With chars_per_token=3.5, same request = estimated 110K tokens (under 120K safety). The more conservative estimate reduces false INPUT-REJECT rejection, preventing the 529 cascade.
+
+### Root Cause: "Repeated 529 Overloaded" crash chain
+```
+1. CC consumes ~100K tokens → sends request → proxy INPUT-REJECT (estimated ~110K > safety 110K)
+   → HTTP 529 + overloaded_error → CC auto-compaction
+2. CC compacts → sends retry → LiteLLM encounters 429 insufficient_quota (cascade cooldown)
+   → proxy forwards as HTTP 429 + rate_limit_error → CC exponential backoff
+3. CC backoff → sends another request → proxy INPUT-REJECT again (estimated still > 110K)
+   → HTTP 529 + overloaded_error → CC attempts compaction again
+4. Loop continues → CC triggers "Repeated 529 Overloaded" protection → STOPS/FREEZE
+```
+Fix breaks the loop at three points:
+- Point 1: Safety limit 120K (10K headroom) → fewer INPUT-REJECT 529s
+- Point 2: insufficient_quota → api_error (not rate_limit_error) → CC normal retry, no backoff loop
+- Point 3: chars_per_token=3.5 → more conservative estimation → fewer false INPUT-REJECT
+
 ## opc2_uname_r6 Changes (2026-06-02)
 
 ### num_retries: 5→3 (both configs)
@@ -113,7 +148,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - InternalServerErrorAllowedFails: 3 (prevents ModelScope null-response cooldown cascade)
 - BadRequestErrorAllowedFails: 0 (BadRequest is client error — no tolerance)
 
-## Proxy Changes (Round 1-6)
+## Proxy Changes (Round 1-7)
 - Added `import socket` — socket.timeout referenced at line 1233 but module not imported
 - Removed conn_retry — 3% success rate (1/36), 3s wasted latency per attempt
 - Removed rate_limit_retry — 8% success rate (1/13), 2s wasted latency per attempt
@@ -123,6 +158,9 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - MODEL_MAX_INPUT_TOKENS: 131072→202745 (ModelScope API's actual enforced limit)
 - 400→529 overloaded_error conversion: extended to match ModelScope "Range of input length should be [1, N]" and "InvalidParameter" + "input length" error formats
 - _convert_error: input-overflow InvalidParameter → overloaded_error (CC auto-compacts), thinking_budget InvalidParameter → api_error (CC retries with preflight fix)
+- **R7**: _convert_error: insufficient_quota 429 → api_error (NOT rate_limit_error — quota exhausted is not RPM throttle)
+- **R7**: MODEL_INPUT_TOKEN_SAFETY: 110K→120K (headroom above CC 110K contextWindow)
+- **R7**: CHARS_PER_TOKEN_ESTIMATE: 2.5→3.5 (conservative estimate → fewer false INPUT-REJECT)
 
 ## Metrics Summary (2026-06-02, after Round 1-4 optimizations)
 - Total requests (clean data, 19:10 UTC onwards): 89
