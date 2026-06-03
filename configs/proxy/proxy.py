@@ -1420,7 +1420,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         - overloaded_error → CC retries with auto-compaction
 
         Mapping strategy:
-        - 429/rate-limit → rate_limit_error (CC retries with backoff)
+        - 429 insufficient_quota → api_error (NOT rate_limit_error)
+          Reason: insufficient_quota means ModelScope account quota is genuinely
+          exhausted (token/month limit). This is NOT a temporary RPM throttle.
+          CC's backoff on rate_limit_error wastes time because quota won't recover
+          in seconds (it resets daily/monthly). Mapping to api_error lets CC retry
+          with its standard retry mechanism without triggering compaction or
+          extended backoff loops that cause "Repeated 529 Overloaded" crashes.
+        - 429 RPM rate-limit → rate_limit_error (CC retries with backoff)
+          These are temporary RPM throttles that recover in seconds — correct.
         - 401/403 auth → api_error (NOT authentication_error, to prevent CC freeze)
         - 400 InvalidParameter from ModelScope → api_error (NOT invalid_request_error)
           Reason: CC sent valid Anthropic params. ModelScope rejects them due to
@@ -1437,8 +1445,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         msg_lower = msg.lower()
         err_type = "api_error"
-        if "rate" in msg_lower or "429" in msg_lower:
-            err_type = "rate_limit_error"
+
+        # 429 insufficient_quota → api_error (NOT rate_limit_error)
+        # insufficient_quota = ModelScope account quota genuinely exhausted (token/month)
+        # NOT temporary RPM throttle. CC backoff on rate_limit_error wastes time and
+        # can cascade into "Repeated 529 Overloaded" when combined with INPUT-REJECT 529s.
+        # Check for "insufficient_quota" or "quota" + "exceeded" pattern from ModelScope/Aliyun
+        err_code = ""
+        if isinstance(err, dict):
+            err_code = (err.get("code") or "").lower()
+        is_quota_exhausted = (
+            "insufficient_quota" in err_code
+            or ("quota" in msg_lower and "exceeded" in msg_lower)
+            or ("exceeded your current quota" in msg_lower)
+        )
+
+        if is_quota_exhausted:
+            err_type = "api_error"  # quota exhausted → CC retries normally (no compaction)
+        elif "rate" in msg_lower or "429" in msg_lower:
+            err_type = "rate_limit_error"  # RPM throttle → CC retries with backoff
+
         # Input token overflow from ModelScope → overloaded_error (CC auto-compacts)
         # ModelScope format: "Range of input length should be [1, 202745]"
         # Retrying the same oversized content never works — CC must compact first.
@@ -1459,9 +1485,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         Overloaded errors" and attempt auto-compaction, which is wrong for RPM rate
         limits. CC should see 429 + rate_limit_error → retries with backoff (correct
         behavior for rate limits). Only genuine overloaded/overflow errors should be 529.
+
+        insufficient_quota 429 is also NOT converted to 529 — _convert_error() maps
+        it to api_error (not rate_limit_error), so CC retries normally without
+        compaction. This prevents the "Repeated 529 Overloaded" cascade.
         """
-        # 429 passes through as-is — _convert_error() maps message to rate_limit_error
-        # CC retries with exponential backoff on rate_limit_error (correct for RPM limits)
+        # 429 passes through as-is — _convert_error() maps to rate_limit_error or api_error
+        # RPM 429 → rate_limit_error (CC backoff retry, correct for RPM)
+        # insufficient_quota 429 → api_error (CC normal retry, no compaction)
         return upstream_status
 
     def _make_upstream_conn(self, parsed_url):
