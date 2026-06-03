@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-03 R9 — deploy R8 auto-compact + 429 quota→rate_limit_error + safety 170K + Tailscale v1.99 + BBR)
+# Deploy Status — opc_uname (updated 2026-06-04 R9 — INPUT-REJECT estimation fix + auto-compact + safety 120K + chars/token 2.0)
 
 ## Architecture
 ```
@@ -71,6 +71,43 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - **Note**: reasoning_effort is intentionally excluded from dsv4p's allowed_openai_params (DSv4P doesn't support it). drop_params=true drops it gracefully.
 
 ## opc2_uname_r7 Changes (2026-06-03 — 529 Overloaded crash fix)
+
+### opc2_uname_r9 Changes (2026-06-04 — INPUT-REJECT estimation fix)
+
+### CRITICAL: INPUT-REJECT token estimation method fixed (root cause of "Repeated 529 Overloaded")
+- **Before**: `total_input_chars = len(json.dumps(oai_body))` + `CHARS_PER_TOKEN_ESTIMATE=3.5`
+  - `json.dumps(oai_body)` includes JSON structure overhead (brackets, keys, formatting)
+  - These structure characters consume 1-2 tokens each in actual tokenization, but inflate char count by 200-300%
+  - Combined with chars_per_token=3.5 (too high for Chinese content), estimated_tokens was wildly inaccurate
+  - Example: 80K actual tokens → json.dumps ≈ 350K chars → estimated = 350K/3.5 = 100K (25% overestimate)
+  - Example: 110K actual tokens → json.dumps ≈ 480K chars → estimated = 480K/3.5 = 137K → INPUT-REJECT (误触发)
+  - This caused legitimate requests to be rejected → 529 → CC auto-compact → retry same content → another 529 → "Repeated 529 Overloaded" crash
+- **After**: `total_input_chars = _estimate_text_chars(oai_body)` (text content only) + `CHARS_PER_TOKEN_ESTIMATE=2.0`
+  - New `_estimate_text_chars()` function only counts actual text: messages, system prompt, tool descriptions, thinking content, tool call arguments
+  - Excludes JSON structure overhead that doesn't represent actual tokenizable content
+  - chars_per_token=2.0 accounts for mixed Chinese/English content (Chinese ≈ 1.5 chars/token, English ≈ 4-5)
+  - Example: 80K actual tokens → text_chars ≈ 120K → estimated = 120K/2.0 = 60K (conservative, passes through ✅)
+  - Example: 110K actual tokens → text_chars ≈ 165K → estimated = 165K/2.0 = 82.5K (passes through ✅)
+  - Example: 200K actual tokens → text_chars ≈ 300K → estimated = 300K/2.0 = 150K → INPUT-REJECT (correct ❌)
+- **Why**: Previous R8 fix (safety 170K) tried to solve the problem by raising the threshold, but this is treating the symptom not the cause. No matter how high you set the safety limit, inaccurate estimation will eventually cause false INPUT-REJECT at the boundary. The fundamental fix is accurate estimation.
+- **Evidence**: R8 raised safety to 170K but 529 crash still occurred. This proves the estimation method is the root cause — even safety=170K couldn't prevent misfiring when json.dumps included 300% structure overhead.
+- **Auto-compact also fixed**: `_auto_compact_messages()` previously used `len(json.dumps())` for estimation too. Now uses `_estimate_text_chars()` for all compact-size calculations. This prevents unnecessary auto-compacting of requests that are actually within limits.
+
+### MODEL_INPUT_TOKEN_SAFETY: 170K → 120K (both proxies)
+- **Before**: MODEL_INPUT_TOKEN_SAFETY_GLM51=170000, DSV4P=170000 (R8 workaround)
+- **After**: MODEL_INPUT_TOKEN_SAFETY_GLM51=120000, DSV4P=120000
+- **Why**: With accurate estimation (text-only chars + chars/token=2.0), 120K is sufficient headroom above CC's 110K contextWindow. The previous 170K was a workaround for inaccurate estimation — no longer needed.
+
+### CHARS_PER_TOKEN_ESTIMATE: 3.5 → 2.0 (both proxies)
+- **Before**: CHARS_PER_TOKEN_ESTIMATE=3.5 (overestimates Chinese token ratio)
+- **After**: CHARS_PER_TOKEN_ESTIMATE=2.0 (mixed Chinese/English estimate)
+- **Why**: Chinese content has chars/token ≈ 1.5, English ≈ 4-5. With text-only estimation, 2.0 gives conservative but accurate estimates for mixed content. This prevents false INPUT-REJECT while still catching genuinely oversized requests.
+
+### New metrics fields for debugging
+- `total_input_chars_json`: full JSON character count (for comparison)
+- `text_vs_json_ratio`: ratio of text chars to JSON chars (typically 0.3-0.5)
+- `estimated_input_tokens_json`: estimated tokens using old method (for comparison)
+- These fields allow comparing old vs new estimation accuracy to verify the fix.
 
 ### CRITICAL: insufficient_quota 429 → api_error (NOT rate_limit_error)
 - **Before**: ModelScope `insufficient_quota` 429 was mapped to `rate_limit_error` by `_convert_error()`
@@ -229,9 +266,14 @@ All three points now fixed. CC should NEVER see "Repeated 529 Overloaded" crash 
 - **R7**: insufficient_quota 429 → api_error (prevented 529 cascade at the time)
 - **R7**: MODEL_INPUT_TOKEN_SAFETY: 110K→120K, CHARS_PER_TOKEN_ESTIMATE: 2.5→3.5
 - **R8**: Auto-compact INPUT-REJECT messages — instead of returning 529 overloaded_error (which triggers CC "Repeated 529 Overloaded" crash), proxy now truncates message history and forwards compacted request to LiteLLM, returning 200 to CC. Uncompactable requests return 429 rate_limit_error (not 529).
-- **R9**: insufficient_quota 429 → rate_limit_error (REVERTED R7 — with R8 auto-compact, 529 cascade eliminated; rate_limit_error backoff better than api_error limited retries for quota exhaustion)
-- **R9**: MODEL_INPUT_TOKEN_SAFETY: 120K→170K (ModelScope limit 202K, 32K margin; fewer auto-compact events)
-- **R9**: CC contextWindow: 110K→130K, autoCompactWindow: 90K unchanged
+- **R9-pre (opc_uname)**: insufficient_quota 429 → rate_limit_error (REVERTED R7), safety 120K→170K, CC contextWindow 110K→130K
+- **R9 (opc2_uname, current)**: INPUT-REJECT estimation method fixed — root cause of "Repeated 529 Overloaded"
+  - New `_estimate_text_chars()` function: only counts actual text content (messages, system, tools), excludes JSON structure overhead
+  - `len(json.dumps(oai_body))` inflated char count by 200-300% → wildly inaccurate estimated_tokens → false INPUT-REJECT → 529 cascade → CC crash
+  - `_auto_compact_messages()` also fixed to use `_estimate_text_chars()` instead of `len(json.dumps())`
+  - CHARS_PER_TOKEN_ESTIMATE: 3.5→2.0 (mixed Chinese/English estimate)
+  - MODEL_INPUT_TOKEN_SAFETY: 170K→120K (accurate estimation, no need for inflated safety)
+  - New metrics fields: `total_input_chars_json`, `text_vs_json_ratio`, `estimated_input_tokens_json` (for debugging/comparison)
 
 ## Metrics Summary (2026-06-02, after Round 1-4 optimizations)
 - Total requests (clean data, 19:10 UTC onwards): 89

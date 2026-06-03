@@ -55,7 +55,7 @@ Claude Code → :40001 proxy (格式转换 + metrics + input safety)
 | PROXY_TIMEOUT | 300 | 120-600 | docker-compose.yml env |
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 120000 | - | docker-compose.yml env |
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 120000 | - | docker-compose.yml env |
-| CHARS_PER_TOKEN_ESTIMATE | 3.5 | 2-6 | docker-compose.yml env |
+| CHARS_PER_TOKEN_ESTIMATE | 2.0 | 1.5-6 | docker-compose.yml env |
 
 ## 项目文件结构
 

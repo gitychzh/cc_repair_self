@@ -47,7 +47,7 @@
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
   "defaultMode": "bypassPermissions",
-  "contextWindow": 130000,
+  "contextWindow": 120000,
   "autoCompactWindow": 90000,
   "statusLine": {
     "type": "command",

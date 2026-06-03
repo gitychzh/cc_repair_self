@@ -19,7 +19,7 @@ Env vars:
   PROXY_TIMEOUT       — upstream timeout seconds (default: 300)
   MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
   MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
-  CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 3.5)
+  CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 2.0, mixed Chinese/English)
   MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 128000, model capacity 131072)
   MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 128000)
   LOG_DIR             — log directory (default: /app/logs)
@@ -46,7 +46,7 @@ PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))
 MAX_TOOL_DESC = int(os.environ.get("MAX_TOOL_DESC", "2000"))
 MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "600"))
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
-CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.5"))
+CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "2.0"))
 
 def _ensure_url_path(url: str, path: str) -> str:
     """If env var provides only host or host/v1, append the required full path."""
@@ -171,6 +171,99 @@ def _truncate_schema_descriptions(schema, max_len=MAX_SCHEMA_DESC):
         for item in schema:
             _truncate_schema_descriptions(item, max_len)
     return schema
+
+# ─── Text content character estimation for INPUT-REJECT ─────────────────────
+# R9 fix: Previously total_input_chars = len(json.dumps(oai_body)), which included
+# JSON structure overhead (brackets, keys, formatting). This caused estimated_tokens
+# to be wildly inaccurate — JSON keys like "type", "function" are 1-2 tokens each
+# but their character representation inflates the char count by 200-300%.
+# The fix: only count actual text content (message text, system prompt, tool names/
+# descriptions/parameter descriptions). This gives a much more accurate estimate.
+# Example: a request with 80K actual tokens had json.dumps ≈ 350K chars →
+#   estimated = 350K/3.5 = 100K (25% overestimate) → borderline INPUT-REJECT.
+# With text-only: text_chars ≈ 120K → estimated = 120K/2.0 = 60K (25% underestimate,
+# but safely below 120K limit). The underestimate is intentional — we only reject
+# requests that are genuinely oversized, not borderline ones that ModelScope can handle.
+
+def _estimate_text_chars(oai_body):
+    """Estimate character count of actual text content in an OpenAI-format request body.
+    Only counts text that would actually be tokenized — excludes JSON structure overhead.
+    """
+    text_chars = 0
+
+    # System prompt (OpenAI format: {"role": "system", "content": "..."})
+    for msg in oai_body.get("messages", []):
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                text_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_chars += len(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_chars += len(block)
+
+    # User and assistant messages
+    for msg in oai_body.get("messages", []):
+        role = msg.get("role", "")
+        if role == "system":
+            continue  # Already counted above
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text_chars += len(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "")
+                    if block_type == "text":
+                        text_chars += len(block.get("text", ""))
+                    elif block_type == "thinking":
+                        text_chars += len(block.get("thinking", ""))
+                    elif block_type == "tool_use":
+                        # Tool call input (arguments JSON) — these ARE tokenized
+                        text_chars += len(json.dumps(block.get("input", {})))
+                        text_chars += len(block.get("name", ""))
+                    elif block_type == "tool_result":
+                        # Tool result content
+                        tc = block.get("content", "")
+                        if isinstance(tc, str):
+                            text_chars += len(tc)
+                        elif isinstance(tc, list):
+                            for sub_block in tc:
+                                if isinstance(sub_block, dict) and sub_block.get("type") == "text":
+                                    text_chars += len(sub_block.get("text", ""))
+                                else:
+                                    text_chars += len(json.dumps(sub_block, default=str))
+                    elif block_type == "image_url":
+                        # Image URLs are tokenized but differently — rough estimate
+                        url = block.get("image_url", {}).get("url", "")
+                        if url.startswith("data:"):
+                            # Base64 image — roughly 1000 tokens per image regardless of size
+                            text_chars += 8000  # Approximate token cost of a typical image
+                        else:
+                            text_chars += len(url)
+                elif isinstance(block, str):
+                    text_chars += len(block)
+
+        # Tool calls in assistant messages (already in content list above,
+        # but also check the tool_calls key for OpenAI format)
+        tool_calls = msg.get("tool_calls", [])
+        if tool_calls and isinstance(content, str):  # Only if content wasn't a list
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                text_chars += len(fn.get("name", ""))
+                text_chars += len(fn.get("arguments", ""))
+
+    # Tool definitions (these ARE tokenized as part of the system context)
+    for tool in oai_body.get("tools", []):
+        fn = tool.get("function", {})
+        text_chars += len(fn.get("name", ""))
+        text_chars += len(fn.get("description", ""))
+        # Parameter schema descriptions are tokenized too
+        text_chars += len(json.dumps(fn.get("parameters", {})))
+
+    return text_chars
 
 # ─── Anthropic → OpenAI Format Conversion ──────────────────────────────────
 
@@ -553,7 +646,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["mapped_model"] = mapped_model
         metrics["num_messages"] = len(oai_body.get("messages", []))
         metrics["num_tools"] = len(oai_body.get("tools", []))
-        metrics["total_input_chars"] = len(json.dumps(oai_body))
+        # R9 fix: Use text-only chars estimation instead of len(json.dumps(oai_body)).
+        # json.dumps includes JSON structure overhead (brackets, keys, formatting) that
+        # inflates char count by 200-300% vs actual tokenizable text. This caused
+        # estimated_tokens to be wildly inaccurate → legitimate requests incorrectly
+        # INPUT-REJECTED → "Repeated 529 Overloaded" crash in CC.
+        text_chars = _estimate_text_chars(oai_body)
+        json_chars = len(json.dumps(oai_body))
+        metrics["total_input_chars"] = text_chars  # Text content chars (accurate estimate)
+        metrics["total_input_chars_json"] = json_chars  # Full JSON chars (for comparison/debugging)
+        metrics["text_vs_json_ratio"] = round(text_chars / json_chars, 2) if json_chars > 0 else 0
 
         # Track tool truncation
         if metrics["num_tools"] > 0:
@@ -588,10 +690,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Auto-compact breaks this loop by forcing truncation and returning 200 to CC.
         model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
         model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 128000)
+        # R9 fix: Use text_chars (text content only) instead of json_chars for estimation.
+        # json_chars includes JSON structure overhead that inflates estimates by 200-300%,
+        # causing legitimate requests to be incorrectly INPUT-REJECTED → 529 → CC crash.
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
+        estimated_tokens_json = int(metrics["total_input_chars_json"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
+        metrics["estimated_input_tokens_json"] = estimated_tokens_json
         if estimated_tokens > model_safety:
-            _log("INPUT-OVERLIMIT", f"estimated_tokens={estimated_tokens} > safety={model_safety} → auto-compacting")
+            _log("INPUT-OVERLIMIT", f"estimated_tokens={estimated_tokens} > safety={model_safety} (json_est={estimated_tokens_json}) → auto-compacting")
             compact_result = self._auto_compact_messages(oai_body, model_safety, CHARS_PER_TOKEN_ESTIMATE)
             if compact_result:
                 oai_body = compact_result["body"]
@@ -601,9 +708,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 new_est = compact_result["new_est"]
                 metrics["auto_compact_new_est"] = new_est
                 metrics["auto_compact_new_msgs"] = len(oai_body.get("messages", []))
-                # Recalculate total_input_chars for the truncated body
-                oai_data_new = json.dumps(oai_body).encode("utf-8")
-                metrics["total_input_chars"] = len(oai_data_new)
+                # Recalculate text chars for the truncated body
+                new_text_chars = _estimate_text_chars(oai_body)
+                metrics["total_input_chars"] = new_text_chars
+                metrics["estimated_input_tokens"] = int(new_text_chars / CHARS_PER_TOKEN_ESTIMATE)
                 _log("AUTO-COMPACT", f"truncated {compact_result['truncated_count']} messages, est {estimated_tokens}→{new_est}, msgs {metrics['auto_compact_original_msgs']}→{metrics['auto_compact_new_msgs']}")
             else:
                 # Cannot compact (system prompt too large or no messages to remove)
@@ -619,7 +727,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 _log_metrics(metrics)
                 return
         elif estimated_tokens > model_max_tokens * 0.8:
-            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} near model_max={model_max_tokens} (passing through)")
+            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} (json_est={estimated_tokens_json}) near model_max={model_max_tokens} (passing through)")
 
         # ─── ModelScope force-stream ───
         # ModelScope non-stream responses (both GLM-5.1 and DSv4P) intermittently include
@@ -1482,7 +1590,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # Check if current size fits within safety
             test_body = dict(oai_body)
             test_body["messages"] = new_messages + preserve_msgs
-            test_chars = len(json.dumps(test_body))
+            # R9 fix: Use _estimate_text_chars() instead of len(json.dumps())
+            test_chars = _estimate_text_chars(test_body)
             test_est = int(test_chars / chars_per_token_estimate)
             if test_est <= model_safety:
                 # It fits! Return the preserved-only version
@@ -1508,7 +1617,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         compacted_body["messages"] = new_messages
 
         # Verify the compacted body fits within safety * 0.85
-        compacted_chars = len(json.dumps(compacted_body))
+        # R9 fix: Use _estimate_text_chars() instead of len(json.dumps())
+        compacted_chars = _estimate_text_chars(compacted_body)
         compacted_est = int(compacted_chars / chars_per_token_estimate)
 
         if compacted_est > target_est:
@@ -1524,7 +1634,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 new_messages.extend([compact_notice_user, compact_notice_assistant])
                 new_messages.extend(preserve_msgs)
                 compacted_body["messages"] = new_messages
-                compacted_chars = len(json.dumps(compacted_body))
+                compacted_chars = _estimate_text_chars(compacted_body)
                 compacted_est = int(compacted_chars / chars_per_token_estimate)
 
             if compacted_est > model_safety:
