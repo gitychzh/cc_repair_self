@@ -17,3 +17,6 @@ __pycache__/
 
 # Allow analysis data
 !logs/round_*_analysis.json
+
+# Local backups (deployment state snapshots, not for sharing)
+backups/

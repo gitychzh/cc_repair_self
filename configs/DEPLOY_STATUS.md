@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-02 by opc2_uname)
+# Deploy Status — opc_uname (updated 2026-06-03 by opc_uname R1-R6 optimization)
 
 ## Architecture
 ```
@@ -8,7 +8,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 
 ## Deploy Method
 - **docker compose**: `cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001`
-- **Docker Hub**: unreachable from China without proxy → mihomo on port 7880 configured as Docker systemd proxy (`/etc/systemd/system/docker.service.d/proxy.conf`)
+- **Docker Hub**: unreachable from China without proxy → mihomo on port **7890** configured as Docker systemd proxy (`/etc/systemd/system/docker.service.d/proxy.conf`). Note: previously misconfigured as 7880, fixed in Round 3.
 - **Legacy builder**: `DOCKER_BUILDKIT=0` required — BuildKit doesn't respect systemd proxy
 
 ## Containers (all healthy)
@@ -101,20 +101,17 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 - **Why**: Two error formats for the same problem: (1) "exceeds...token/limit" and (2) "Range of input length should be [1, N]". Both mean input overflow. CC needs overloaded_error to trigger auto-compaction, not api_error (which just retries same content).
 - **Also**: _convert_error now maps input-overflow InvalidParameter to overloaded_error (not api_error). thinking_budget InvalidParameter still maps to api_error (preflight fix adjusts params → retry works).
 
-## Router Settings (updated 2026-06-02, Round 1-6 optimizations)
-- num_retries: 3
-- cooldown_time: 30
-- routing_strategy: latency-based-routing
-- routing_strategy_args:
-  - lowest_latency_buffer: 0.1
-  - rolling_window_size: 30
-  (Previously placed directly in router_settings — LiteLLM v1.85 ignored them. Now under routing_strategy_args — actually effective.)
+## Router Settings (updated 2026-06-03, opc_uname Round 1-6 optimizations)
+- num_retries: 5 (was 3 — more retries needed when RPM windows temporarily full)
+- cooldown_time: 10 (was 30 — 429 RPM limit is 1-minute window, 30s was too long causing cascading unhealthy)
+- routing_strategy: simple-shuffle (was latency-based-routing — simple-shuffle distributes uniformly across 77 deployments, maximizing RPM utilization)
 - enable_pre_call_checks: false
 - background_health_checks: false
 - AuthenticationErrorAllowedFails: 0 (immediate cooldown on 401)
-- RateLimitErrorAllowedFails: 3 (was 1 — 1 allowed fail + 60s cooldown caused 65/77 unhealthy cascade)
+- RateLimitErrorAllowedFails: 5 (was 3 — ModelScope 429 is RPM rate-limit, not quota exhaustion; higher tolerance prevents cascading cooldown)
 - TimeoutErrorAllowedFails: 2
-- InternalServerErrorAllowedFails: 3 (NEW — prevents ModelScope null-response cooldown cascade)
+- InternalServerErrorAllowedFails: 3 (prevents ModelScope null-response cooldown cascade)
+- BadRequestErrorAllowedFails: 0 (BadRequest is client error — no tolerance)
 
 ## Proxy Changes (Round 1-6)
 - Added `import socket` — socket.timeout referenced at line 1233 but module not imported

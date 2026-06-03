@@ -645,12 +645,12 @@ general_settings:
 
 router_settings:
   num_retries: 5
-  cooldown_time: 30
+  cooldown_time: 10
   routing_strategy: simple-shuffle
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
     BadRequestErrorAllowedFails: 0
-    RateLimitErrorAllowedFails: 3
+    RateLimitErrorAllowedFails: 5
     TimeoutErrorAllowedFails: 2
     InternalServerErrorAllowedFails: 3

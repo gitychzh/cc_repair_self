@@ -40,8 +40,8 @@ Claude Code → :40001 proxy (格式转换 + metrics + input safety)
 | 参数 | 当前值 | 范围 | 所在文件 |
 |------|--------|------|----------|
 | num_retries | 5 | 2-12 | litellm config.yaml router_settings |
-| cooldown_time | 30 | 10-300 | litellm config.yaml router_settings |
-| RateLimitErrorAllowedFails | 3 | 0-10 | litellm config.yaml router_settings |
+| cooldown_time | 10 | 5-300 | litellm config.yaml router_settings |
+| RateLimitErrorAllowedFails | 5 | 0-10 | litellm config.yaml router_settings |
 | TimeoutErrorAllowedFails | 2 | 0-10 | litellm config.yaml router_settings |
 | AuthenticationErrorAllowedFails | 0 | 0-10 | litellm config.yaml router_settings |
 | InternalServerErrorAllowedFails | 3 | 0-10 | litellm config.yaml router_settings |

@@ -628,6 +628,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
             resp = conn.getresponse()
 
+            # Extract LiteLLM routing/quota headers for optimization analytics
+            # These headers reveal: which deployment was selected, quota remaining,
+            # and actual LLM provider latency — critical for routing strategy optimization.
+            for hdr_key, metrics_key in [
+                ("x-litellm-model-id", "litellm_model_id"),
+                ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
+            ]:
+                val = resp.getheader(hdr_key)
+                if val:
+                    metrics[metrics_key] = val
+
+            # Extract ModelScope quota headers from LiteLLM-passed llm_provider-* headers
+            for hdr_key, metrics_key in [
+                ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
+                ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
+            ]:
+                val = resp.getheader(hdr_key)
+                if val:
+                    metrics[metrics_key] = int(val)
+
             if resp.status >= 400:
                 error_body = resp.read()
                 try:
