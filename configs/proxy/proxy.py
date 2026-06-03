@@ -575,25 +575,49 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         litellm_url = upstream["chat_url"]
         metrics["upstream"] = upstream_key
 
-        # ─── Input token pre-check ───
-        # HARD rejection for obviously oversized requests (> safety limit).
-        # Returns 529 overloaded_error immediately, triggering CC compaction retry
-        # without wasting a full round-trip to ModelScope. Borderline requests
-        # (between warning threshold and safety limit) pass through with a soft warning.
+        # ─── Input token pre-check with auto-compact ───
+        # When estimated tokens exceed safety limit, instead of returning 529 overloaded_error
+        # (which causes CC "Repeated 529 Overloaded" crash because CC won't auto-compact when
+        # its internal token count is below contextWindow), we auto-compact the message history
+        # by removing oldest messages and forwarding the truncated request to LiteLLM.
+        # This gives CC a normal 200 response instead of a 529 that triggers the crash loop.
+        # The proxy's estimated tokens (chars/3.5) can overestimate by 2x compared to CC's
+        # internal tokenizer, so a request with est=120K tokens may actually be ~60K tokens
+        # in CC's count — well within CC's contextWindow=110K. CC won't compact because it
+        # thinks there's room, but proxy rejects → 529 → CC retries same content → 3x 529 → crash.
+        # Auto-compact breaks this loop by forcing truncation and returning 200 to CC.
         model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
         model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 128000)
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
         if estimated_tokens > model_safety:
-            _log("INPUT-REJECT", f"estimated_tokens={estimated_tokens} > safety={model_safety}")
-            self._send_json(529, {"type": "error", "error": {"type": "overloaded_error",
-                             "message": f"Input tokens (~{estimated_tokens}) exceed safe limit ({model_safety}). Auto-compact will retry."},
-                             "model": request_model})
-            metrics["status"] = 529
-            metrics["error_type"] = "InputExceedsProxyReject"
-            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-            _log_metrics(metrics)
-            return
+            _log("INPUT-OVERLIMIT", f"estimated_tokens={estimated_tokens} > safety={model_safety} → auto-compacting")
+            compact_result = self._auto_compact_messages(oai_body, model_safety, CHARS_PER_TOKEN_ESTIMATE)
+            if compact_result:
+                oai_body = compact_result["body"]
+                metrics["auto_compact_truncated_count"] = compact_result["truncated_count"]
+                metrics["auto_compact_original_est"] = estimated_tokens
+                metrics["auto_compact_original_msgs"] = len(oai_body.get("messages", [])) + compact_result["truncated_count"]
+                new_est = compact_result["new_est"]
+                metrics["auto_compact_new_est"] = new_est
+                metrics["auto_compact_new_msgs"] = len(oai_body.get("messages", []))
+                # Recalculate total_input_chars for the truncated body
+                oai_data_new = json.dumps(oai_body).encode("utf-8")
+                metrics["total_input_chars"] = len(oai_data_new)
+                _log("AUTO-COMPACT", f"truncated {compact_result['truncated_count']} messages, est {estimated_tokens}→{new_est}, msgs {metrics['auto_compact_original_msgs']}→{metrics['auto_compact_new_msgs']}")
+            else:
+                # Cannot compact (system prompt too large or no messages to remove)
+                # Last resort: return 429 rate_limit_error (NOT 529 overloaded_error)
+                # 429 triggers CC backoff retry, not "Repeated Overloaded" crash
+                _log("INPUT-REJECT-UNCOMPACTABLE", f"estimated_tokens={estimated_tokens} > safety={model_safety}, cannot auto-compact → 429 rate_limit_error")
+                self._send_json(429, {"type": "error", "error": {"type": "rate_limit_error",
+                                 "message": f"Input tokens (~{estimated_tokens}) exceed safe limit ({model_safety}). Please reduce context size."},
+                                 "model": request_model})
+                metrics["status"] = 429
+                metrics["error_type"] = "InputExceedsUncompactable"
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
+                return
         elif estimated_tokens > model_max_tokens * 0.8:
             _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} near model_max={model_max_tokens} (passing through)")
 
@@ -1404,6 +1428,115 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "created_at": "2024-01-01T00:00:00Z",
             "context_window": safety,
         })
+
+    # ─── Auto-compact messages when input exceeds safety limit ───
+    def _auto_compact_messages(self, oai_body, model_safety, chars_per_token_estimate):
+        """Auto-compact message history when estimated tokens exceed safety limit.
+
+        Instead of returning 529 overloaded_error (which triggers CC "Repeated 529
+        Overloaded" crash because CC won't auto-compact when its internal token count
+        is below contextWindow), we truncate the message history and forward the
+        compacted request to LiteLLM, giving CC a normal 200 response.
+
+        Strategy:
+        1. Preserve system prompt (always keep it)
+        2. Preserve last 5 message groups (recent context is most important for CC)
+        3. Remove oldest messages until est_tokens < safety * 0.85
+        4. Insert a compact notice at the truncation point
+
+        Returns dict with truncated body and stats, or None if compacting is impossible.
+        """
+        messages = oai_body.get("messages", [])
+        if not messages:
+            return None
+
+        # Calculate target: safety * 0.85 (leave 15% margin)
+        target_est = int(model_safety * 0.85)
+
+        # Identify system messages (always keep them)
+        system_indices = []
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                system_indices.append(i)
+
+        # Identify the last N message groups to preserve (N=5)
+        # A "group" = consecutive messages of the same role pair (user/assistant/tool)
+        # We want to keep the last 5 user→assistant exchanges
+        non_system_msgs = [msg for msg in messages if msg.get("role") != "system"]
+        preserve_count = min(10, len(non_system_msgs))  # Keep last ~5 exchanges (10 messages)
+        preserve_msgs = non_system_msgs[-preserve_count:] if preserve_count > 0 else []
+
+        # Build new message list: system + compact_notice + preserved recent
+        new_messages = []
+        for i in system_indices:
+            new_messages.append(messages[i])
+
+        # Calculate how many messages were removed
+        original_count = len(messages)
+        removed_count = original_count - len(system_indices) - preserve_count
+
+        if removed_count <= 0:
+            # Nothing to remove — system prompt + preserved messages already fit
+            # This means even with max truncation, we can't get below target
+            # Check if current size fits within safety
+            test_body = dict(oai_body)
+            test_body["messages"] = new_messages + preserve_msgs
+            test_chars = len(json.dumps(test_body))
+            test_est = int(test_chars / chars_per_token_estimate)
+            if test_est <= model_safety:
+                # It fits! Return the preserved-only version
+                new_messages = new_messages + preserve_msgs
+            else:
+                # Even minimal messages exceed safety — can't compact
+                return None
+
+        # Add compact notice at the truncation point
+        compact_notice_user = {
+            "role": "user",
+            "content": f"[Auto-compacted: {removed_count} earlier messages removed from {original_count} total. Continuing with recent context.]"
+        }
+        compact_notice_assistant = {
+            "role": "assistant",
+            "content": "Understood. I'll work with the available context and continue the task."
+        }
+        new_messages.extend([compact_notice_user, compact_notice_assistant])
+        new_messages.extend(preserve_msgs)
+
+        # Build the compacted body
+        compacted_body = dict(oai_body)
+        compacted_body["messages"] = new_messages
+
+        # Verify the compacted body fits within safety * 0.85
+        compacted_chars = len(json.dumps(compacted_body))
+        compacted_est = int(compacted_chars / chars_per_token_estimate)
+
+        if compacted_est > target_est:
+            # Still too large — try progressively removing more from preserved messages
+            # Remove from the beginning of preserved_msgs until we fit
+            while len(preserve_msgs) > 2 and compacted_est > target_est:
+                preserve_msgs = preserve_msgs[2:]  # Remove 2 messages (one exchange)
+                removed_count += 2
+                new_messages = []
+                for i in system_indices:
+                    new_messages.append(messages[i])
+                compact_notice_user["content"] = f"[Auto-compacted: {removed_count} earlier messages removed from {original_count} total. Continuing with recent context.]"
+                new_messages.extend([compact_notice_user, compact_notice_assistant])
+                new_messages.extend(preserve_msgs)
+                compacted_body["messages"] = new_messages
+                compacted_chars = len(json.dumps(compacted_body))
+                compacted_est = int(compacted_chars / chars_per_token_estimate)
+
+            if compacted_est > model_safety:
+                # Still can't fit — system prompt itself might be too large
+                return None
+
+        return {
+            "body": compacted_body,
+            "truncated_count": removed_count,
+            "new_est": compacted_est,
+            "original_msgs": original_count,
+            "new_msgs": len(new_messages),
+        }
 
     # ─── Helpers ───
     def _map_model(self, model_name):
