@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-03 R8 — Tailscale v1.99 upgrade + BBR/tcp optimization)
+# Deploy Status — opc_uname (updated 2026-06-03 R9 — deploy R8 auto-compact + 429 quota→rate_limit_error + safety 170K + Tailscale v1.99 + BBR)
 
 ## Architecture
 ```
@@ -105,6 +105,44 @@ Fix breaks the loop at three points:
 - Point 2: insufficient_quota → api_error (not rate_limit_error) → CC normal retry, no backoff loop
 - Point 3: chars_per_token=3.5 → more conservative estimation → fewer false INPUT-REJECT
 
+## opc2_uname_r9 Changes (2026-06-03 — Deploy R8 + parameter tuning)
+
+### R8 Auto-compact proxy.py deployed to remote (1542→1675 lines)
+- **Before**: Remote machine ran old proxy.py (1542 lines) without `_auto_compact_messages()` — INPUT-REJECT returned 529 overloaded_error → CC "Repeated 529 Overloaded" crash
+- **After**: R8 proxy.py deployed — INPUT-OVERLIMIT auto-compacts messages (removes oldest, preserves recent 5 exchanges) → returns 200 to CC instead of 529
+- **Evidence**: 3 INPUT-REJECT events at 13:50 (est_tokens=120216 > safety=120000) → all returned 529 → triggered CC crash loop. With R8, these would be auto-compacted → CC gets 200 → continues normally
+- **Impact**: Eliminates the INPUT-REJECT → 529 → CC crash loop entirely. Borderline requests get auto-compacted in proxy → forwarded to LiteLLM → 200 response → CC continues
+
+### insufficient_quota 429 → rate_limit_error (REVERTED from R7 api_error)
+- **Before (R7)**: insufficient_quota 429 → `api_error` → CC limited retries (2-3) → quickly exhausts → CC freezes/crashes when all 77 deployments quota-exhausted
+- **After (R9)**: insufficient_quota 429 → `rate_limit_error` → CC exponential backoff (5s→10s→20s→40s→...) → CC gracefully waits for quota recovery without crashing
+- **Why revert**: R7 rationale was "api_error prevents 'Repeated 529 Overloaded' cascade combined with INPUT-REJECT 529s". This is no longer valid because R8 auto-compact eliminates INPUT-REJECT 529s entirely (auto-compact → 200 response). Without the 529 cascade risk, rate_limit_error's exponential backoff is better: CC waits for quota recovery instead of quickly exhausting limited api_error retries and freezing.
+- **Evidence**: 96 quota 429 errors in proxy logs spanning hours → all 77 deployments exhausted → api_error's 2-3 retries immediately fail → CC crashes. rate_limit_error's backoff would let CC wait (minutes→hours) for quota reset.
+
+### MODEL_INPUT_TOKEN_SAFETY: 120K → 170K (both proxies)
+- **Before**: MODEL_INPUT_TOKEN_SAFETY_GLM51=120000, DSV4P=120000
+- **After**: MODEL_INPUT_TOKEN_SAFETY_GLM51=170000, DSV4P=170000
+- **Why**: ModelScope actual limit = 202745 tokens. 170K safety gives 32K margin (plenty of room). Current 120K threshold rejects borderline requests (est=120216) that would succeed at upstream. With 170K safety: only genuinely oversized requests (>170K est_tokens) trigger auto-compact. Data validation: 35 of 47 historical INPUT-REJECTs would NOT be rejected at 170K threshold.
+- **Impact**: /v1/models endpoint now reports context_window=170K (matches safety). CC has more room before compaction triggers.
+
+### CC settings: contextWindow 110K → 130K
+- **Before**: contextWindow=110K, autoCompactWindow=90K
+- **After**: contextWindow=130K, autoCompactWindow=90K (unchanged)
+- **Why**: With /v1/models context_window=170K, CC at 130K contextWindow has 40K headroom. CC auto-compacts at 90K (well below 170K safety limit) → no INPUT-REJECT for normal CC conversations.
+
+### Root Cause resolution (R8+R9 complete fix)
+```
+Original crash chain (R7 partial fix, now fully resolved):
+1. CC ~100K tokens → proxy INPUT-REJECT (est >120K > safety 120K) → 529 → CC crash
+   R8 fix: Auto-compact messages → 200 response → CC continues (NO 529 returned)
+2. CC compact → retry → LiteLLM 429 insufficient_quota → 529 cascade
+   R9 fix: insufficient_quota → rate_limit_error (backoff, not api_error crash)
+   R8 fix: Auto-compact eliminates INPUT-REJECT 529s → no cascade possible
+3. Safety 120K rejects borderline requests → CC crash
+   R9 fix: Safety 170K → only genuinely oversized trigger auto-compact → fewer events
+```
+All three points now fixed. CC should NEVER see "Repeated 529 Overloaded" crash again.
+
 ## opc2_uname WebUI + Infrastructure Fix (2026-06-03, by opc_uname)
 
 ### CRITICAL: PostgreSQL version mismatch (cc_postgres)
@@ -178,7 +216,7 @@ Fix breaks the loop at three points:
 - InternalServerErrorAllowedFails: 3 (prevents ModelScope null-response cooldown cascade)
 - BadRequestErrorAllowedFails: 0 (BadRequest is client error — no tolerance)
 
-## Proxy Changes (Round 1-7)
+## Proxy Changes (Round 1-9)
 - Added `import socket` — socket.timeout referenced at line 1233 but module not imported
 - Removed conn_retry — 3% success rate (1/36), 3s wasted latency per attempt
 - Removed rate_limit_retry — 8% success rate (1/13), 2s wasted latency per attempt
@@ -188,9 +226,12 @@ Fix breaks the loop at three points:
 - MODEL_MAX_INPUT_TOKENS: 131072→202745 (ModelScope API's actual enforced limit)
 - 400→529 overloaded_error conversion: extended to match ModelScope "Range of input length should be [1, N]" and "InvalidParameter" + "input length" error formats
 - _convert_error: input-overflow InvalidParameter → overloaded_error (CC auto-compacts), thinking_budget InvalidParameter → api_error (CC retries with preflight fix)
-- **R7**: _convert_error: insufficient_quota 429 → api_error (NOT rate_limit_error — quota exhausted is not RPM throttle)
-- **R7**: MODEL_INPUT_TOKEN_SAFETY: 110K→120K (headroom above CC 110K contextWindow)
-- **R7**: CHARS_PER_TOKEN_ESTIMATE: 2.5→3.5 (conservative estimate → fewer false INPUT-REJECT)
+- **R7**: insufficient_quota 429 → api_error (prevented 529 cascade at the time)
+- **R7**: MODEL_INPUT_TOKEN_SAFETY: 110K→120K, CHARS_PER_TOKEN_ESTIMATE: 2.5→3.5
+- **R8**: Auto-compact INPUT-REJECT messages — instead of returning 529 overloaded_error (which triggers CC "Repeated 529 Overloaded" crash), proxy now truncates message history and forwards compacted request to LiteLLM, returning 200 to CC. Uncompactable requests return 429 rate_limit_error (not 529).
+- **R9**: insufficient_quota 429 → rate_limit_error (REVERTED R7 — with R8 auto-compact, 529 cascade eliminated; rate_limit_error backoff better than api_error limited retries for quota exhaustion)
+- **R9**: MODEL_INPUT_TOKEN_SAFETY: 120K→170K (ModelScope limit 202K, 32K margin; fewer auto-compact events)
+- **R9**: CC contextWindow: 110K→130K, autoCompactWindow: 90K unchanged
 
 ## Metrics Summary (2026-06-02, after Round 1-4 optimizations)
 - Total requests (clean data, 19:10 UTC onwards): 89

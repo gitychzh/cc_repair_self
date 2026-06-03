@@ -4,7 +4,12 @@
 # New approach: use tailscale ping to the peer which maintains direct connection
 # Run every 1-2 minutes via cron
 
-PEER_IP=100.109.57.26  # opc2_uname tailscale IP
+# Auto-detect peer based on which machine we're running on
+if hostname | grep -q 'opc2'; then
+    PEER_IP=100.120.104.114  # opc_uname tailscale IP
+else
+    PEER_IP=100.109.57.26    # opc2_uname tailscale IP
+fi
 
 # Ping the peer to keep the direct connection alive
 tailscale ping -c 1 $PEER_IP > /dev/null 2>&1
