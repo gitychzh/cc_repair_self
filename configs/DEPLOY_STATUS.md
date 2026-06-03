@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-03 by opc2_uname R7 — 529 Overloaded crash fix)
+# Deploy Status — opc_uname (updated 2026-06-03 by opc_uname — opc2_uname WebUI + postgres fix)
 
 ## Architecture
 ```
@@ -105,6 +105,36 @@ Fix breaks the loop at three points:
 - Point 2: insufficient_quota → api_error (not rate_limit_error) → CC normal retry, no backoff loop
 - Point 3: chars_per_token=3.5 → more conservative estimation → fewer false INPUT-REJECT
 
+## opc2_uname WebUI + Infrastructure Fix (2026-06-03, by opc_uname)
+
+### CRITICAL: PostgreSQL version mismatch (cc_postgres)
+- **Before**: `postgres:14-alpine` image, data directory initialized by PG v16 → `FATAL: database files are incompatible with server`
+- **After**: `postgres:16-alpine` image — matches data directory version
+- **Impact**: cc_postgres was in infinite restart loop → LiteLLM DB connections failing (61 consecutive reconnect failures) → proxy containers `Created` (not `Up`) → 40001/40002 ports not listening → CC `ConnectionRefused`
+- **Evidence**: docker logs showed `The data directory was initialized by PostgreSQL version 16, which is not compatible with this version 14.23`
+
+### CRITICAL: Proxy containers not running (auth_to_api_40001/40002)
+- **Before**: Container status `Created` (not `Up`) — 40001/40002 ports not listening
+- **After**: `docker start` brought them up; both now `healthy`
+- **Root cause**: Proxy containers depend on LiteLLM which depends on cc_postgres. When postgres was crash-looping, proxy containers never started. After postgres fix, containers could start but had `Created` status from previous failed `docker compose up`
+- **Fix**: Manual `docker start auth_to_api_40001/40002` + postgres version fix + LiteLLM restart for DB reconnection
+
+### WebUI systemd service: ANTHROPIC_BASE_URL missing
+- **Before**: `cloudcli-webui.service` had no `ANTHROPIC_BASE_URL` or `ANTHROPIC_API_KEY` in Environment
+- **After**: Added `ANTHROPIC_BASE_URL=http://127.0.0.1:40001`, `ANTHROPIC_API_KEY=sk-litellm-local`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW=90000`
+- **Why**: Claude Agent SDK forwards `process.env` to CC subprocess. Without these env vars, CC subprocess had no API endpoint → `ConnectionRefused`
+- **Evidence**: WebUI logs showed `SDK query error: Unable to connect to API (ConnectionRefused)`
+- **Note**: CC settings.json already had these env vars, but SDK subprocess inherits from WebUI's process env, NOT from settings.json
+
+### Full recovery chain
+```
+1. postgres:14 → postgres:16 (version mismatch) → cc_postgres healthy
+2. LiteLLM restart → DB reconnection successful
+3. docker start auth_to_api_40001/40002 → proxy containers Up+healthy
+4. systemd service + ANTHROPIC env vars → WebUI CC subprocess connects to proxy
+5. All 5 containers healthy, proxy test 200, WebUI HTTP 200, WebSocket connected
+```
+
 ## opc2_uname_r6 Changes (2026-06-02)
 
 ### num_retries: 5→3 (both configs)
@@ -179,6 +209,42 @@ Fix breaks the loop at three points:
 | RL retry | 19 | 6 (50% success) |
 | Conn retry | 18 (3% success) | 0 (removed) |
 | Avg duration | 12065ms | 15241ms |
+
+## Tailscale Network Fix (2026-06-03, by opc_uname)
+
+### Root Cause: CGNAT + TCP Keepalive Timeout
+- **CGNAT**: ISP (中国电信) uses CGNAT (172.16.8.5 → 218.93.250.242). UDP hole-punching responses blocked on non-standard ports (3478/STUN, 41641/Tailscale). Only well-known ports (53/DNS, 123/NTP) work consistently.
+- **TCP Keepalive**: Default `tcp_keepalive_time=7200s` (2 hours) caused Tailscale coordination server long-poll to be terminated by router's NAT after ~2 minutes of perceived "idle" time.
+- **Cascading failures**: coord timeout → "derp does not know about peer" → 30% packet loss → 1118ms avg ping → 0-2560ms jitter
+
+### Fix: Aggressive TCP Keepalive
+```
+/etc/sysctl.d/99-tailscale-keepalive.conf:
+net.ipv4.tcp_keepalive_time = 30   (was 7200)
+net.ipv4.tcp_keepalive_intvl = 10  (was 75)
+net.ipv4.tcp_keepalive_probes = 5  (was 9)
+```
++ `sudo systemctl restart tailscaled` (fresh DERP + coordination connection)
+
+### Results
+| Metric | Before | After |
+|--------|--------|-------|
+| Packet loss | 30% | 0% |
+| Avg ping | 1118ms | 365ms |
+| Min ping | 625ms | 350ms |
+| Max ping | 1793ms | 380ms |
+| Jitter (mdev) | 425ms | 6ms |
+| Coord timeouts/10min | 5+ | 0 |
+| Peer unknown errors/10min | 4+ | 0 |
+| Connection resets/10min | 1+ | 0 |
+
+### SSH Proxy Fix
+- `~/.ssh/config`: Changed dead proxy port 7880 → 7890 (mihomo sg instance). Git push now works.
+
+### Remaining Limitation
+- Still relay through SFO DERP (360ms) — both endpoints behind CGNAT, UDP P2P impossible
+- Windows desktop (desktop-sgedrr5) also on restricted network, only SFO DERP reachable via stable WebSocket
+- **Next step**: Deploy self-hosted DERP server on Asian VPS (HKG/SIN) → would reduce to ~30-50ms
 
 ## Key Issues Found
 

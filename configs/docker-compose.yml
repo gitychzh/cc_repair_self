@@ -6,7 +6,7 @@
 
 services:
   cc_postgres:
-    image: postgres:14-alpine
+    image: postgres:16-alpine
     container_name: cc_postgres
     restart: unless-stopped
     environment:
