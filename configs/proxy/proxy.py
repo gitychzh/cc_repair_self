@@ -1601,6 +1601,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if is_quota_exhausted:
             err_type = "rate_limit_error"  # quota exhausted → CC backoff (wait for recovery)
+            _log("QUOTA-MAP", f"insufficient_quota → rate_limit_error (msg: {msg[:100]})")
         elif "rate" in msg_lower or "429" in msg_lower:
             err_type = "rate_limit_error"  # RPM throttle → CC retries with backoff
 
