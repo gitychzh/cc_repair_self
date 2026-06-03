@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-03 by opc_uname — opc2_uname WebUI + postgres fix)
+# Deploy Status — opc_uname (updated 2026-06-03 R8 — Tailscale v1.99 upgrade + BBR/tcp optimization)
 
 ## Architecture
 ```
@@ -210,41 +210,62 @@ Fix breaks the loop at three points:
 | Conn retry | 18 (3% success) | 0 (removed) |
 | Avg duration | 12065ms | 15241ms |
 
-## Tailscale Network Fix (2026-06-03, by opc_uname)
+## Tailscale Network Fix (2026-06-03, by opc_uname — R8: upgrade + TCP optimization)
 
-### Root Cause: CGNAT + TCP Keepalive Timeout
-- **CGNAT**: ISP (中国电信) uses CGNAT (172.16.8.5 → 218.93.250.242). UDP hole-punching responses blocked on non-standard ports (3478/STUN, 41641/Tailscale). Only well-known ports (53/DNS, 123/NTP) work consistently.
-- **TCP Keepalive**: Default `tcp_keepalive_time=7200s` (2 hours) caused Tailscale coordination server long-poll to be terminated by router's NAT after ~2 minutes of perceived "idle" time.
-- **Cascading failures**: coord timeout → "derp does not know about peer" → 30% packet loss → 1118ms avg ping → 0-2560ms jitter
+### Root Cause Analysis (Updated R8)
 
-### Fix: Aggressive TCP Keepalive
-```
-/etc/sysctl.d/99-tailscale-keepalive.conf:
-net.ipv4.tcp_keepalive_time = 30   (was 7200)
-net.ipv4.tcp_keepalive_intvl = 10  (was 75)
-net.ipv4.tcp_keepalive_probes = 5  (was 9)
-```
-+ `sudo systemctl restart tailscaled` (fresh DERP + coordination connection)
+**Primary issue**: opc_uname (Tailscale v1.98.2) cannot P2P direct-connect to desktop, only DERP relay (318-330ms with 10% spikes to 700-1096ms). Meanwhile opc2_uname (v1.99.129) achieves P2P direct at 9ms.
+
+**Why P2P fails for opc_uname but works for opc2_uname**:
+- opc2_uname uses v1.99.129 (unstable track) with improved Disco protocol — established P2P to desktop earlier
+- opc_uname used v1.98.2 (stable) which had weaker hole-punching capability
+- Desktop (Windows) is behind different CGNAT (218.93.215.x) vs our CGNAT (218.93.250.x)
+- UDP hole-punching requires simultaneous bidirectional punches — CGNAT blocks unsolicited inbound UDP
+- opc2_uname succeeded because its v1.99 disco exchanged "call-me-maybe" with desktop, triggering simultaneous UDP punches from both CGNATs
+- After v1.99 upgrade on opc_uname, desktop hasn't yet seen our new disco key → call-me-maybe not triggered
+
+**TCP jitter root cause (10% spikes to 700-1096ms)**:
+- TCP retransmit rate 1.3% (95088/7282643) on overseas routes
+- CUBIC congestion control reacts to single packet loss with CWND halving → sawtooth pattern
+- Small TCP buffers (rmem_max=212KB) can't accommodate BDP at 300ms RTT overseas links
+- `tcp_slow_start_after_idle=1` resets CWND after idle periods on DERP connections
+
+### Fix R8: Tailscale Upgrade + TCP Stack Optimization
+
+1. **Tailscale upgrade**: v1.98.2 → v1.99.129 (unstable track, same as opc2_uname)
+   - Added unstable apt repo: `/etc/apt/sources.list.d/tailscale.list`
+   - Better Disco protocol, improved P2P hole-punching
+   - Nearest DERP now correctly identified as Tokyo (177ms) instead of SFO (181ms)
+   - Home DERP automatically follows desktop's DERP region (SFO) for shortest relay path
+
+2. **TCP stack optimization** (`/etc/sysctl.d/99-tcp-buffer-optimization.conf`):
+   - `rmem_max/wmem_max`: 212KB → 2MB (accommodates BDP at 50Mbps/300ms)
+   - `tcp_congestion_control`: CUBIC → BBR (doesn't react to single losses, stable on lossy overseas paths)
+   - `tcp_slow_start_after_idle`: 1 → 0 (prevents CWND reset on idle DERP connections)
+   - `netdev_max_backlog`: 1000 → 5000 (better burst absorption)
+   - `tcp_bbr` module added to `/etc/modules-load.d/bbr.conf` for boot persistence
+
+3. **Previous fix still active**: `/etc/sysctl.d/99-tailscale-keepalive.conf` (tcp_keepalive 30/10/5)
 
 ### Results
-| Metric | Before | After |
-|--------|--------|-------|
-| Packet loss | 30% | 0% |
-| Avg ping | 1118ms | 365ms |
-| Min ping | 625ms | 350ms |
-| Max ping | 1793ms | 380ms |
-| Jitter (mdev) | 425ms | 6ms |
-| Coord timeouts/10min | 5+ | 0 |
-| Peer unknown errors/10min | 4+ | 0 |
-| Connection resets/10min | 1+ | 0 |
+| Metric | Before R8 (v1.98.2) | After R8 (v1.99.129+BBR) |
+|--------|---------------------|--------------------------|
+| Tailscale version | 1.98.2 (stable) | 1.99.129 (unstable) |
+| Nearest DERP | SFO (161ms) | Tokyo (177ms) |
+| Home DERP | SFO | SFO (auto-follows desktop) |
+| DERP relay to desktop | 325-580ms, 30% spikes | 303-330ms, 10% spikes to 700ms |
+| P2P to desktop | ❌ (DERP only) | ❌ (still DERP — call-me-maybe not triggered by desktop) |
+| P2P to opc2_uname | ✅ direct (1ms LAN) | ✅ direct (1ms LAN) |
+| Congestion control | CUBIC | BBR |
+| TCP buffer (rmem_max) | 212KB | 2MB |
+| tcp_slow_start_after_idle | 1 | 0 |
 
-### SSH Proxy Fix
-- `~/.ssh/config`: Changed dead proxy port 7880 → 7890 (mihomo sg instance). Git push now works.
-
-### Remaining Limitation
-- Still relay through SFO DERP (360ms) — both endpoints behind CGNAT, UDP P2P impossible
-- Windows desktop (desktop-sgedrr5) also on restricted network, only SFO DERP reachable via stable WebSocket
-- **Next step**: Deploy self-hosted DERP server on Asian VPS (HKG/SIN) → would reduce to ~30-50ms
+### P2P Still Blocked — Why and What's Next
+- Desktop (Windows, CGNAT 218.93.215.x) and opc_uname (CGNAT 218.93.250.x) are on different CGNAT pools
+- UDP hole-punching requires desktop to send "call-me-maybe" via DERP → then both sides punch UDP simultaneously
+- opc2_uname achieved P2P (9ms direct!) because its v1.99 was deployed earlier and desktop learned its disco key
+- opc_uname's v1.99 upgrade hasn't yet triggered desktop's call-me-maybe response
+- **Next steps**: (1) wait for desktop to pick up our new disco key via control server updates; (2) if still DERP-only after hours, deploy self-hosted DERP in Asian VPS for ~30-50ms relay
 
 ## Key Issues Found
 
