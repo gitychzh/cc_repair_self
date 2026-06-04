@@ -1000,13 +1000,44 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if is_input_overflow:
                     _log("OVERLOAD-CONV", f"400 input overflow → 529 overloaded_error for CC compaction retry")
                     err_msg = json.dumps(error_json)[:500]
-                    self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model})
+                    # Input overflow needs compaction → retry soon (5s) so CC can compact and retry
+                    self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model}, extra_headers={"retry-after": "5"})
                     metrics["status"] = 529
                     metrics["error_type"] = "InputExceedsOverloaded"
                     return
 
                 client_status = self._get_upstream_status_for_client(resp_status_final)
-                self._send_json(client_status, self._convert_error(error_json, request_model))
+                error_payload = self._convert_error(error_json, request_model)
+                extra_hdrs = None
+                # Add retry-after header for 429 rate_limit_error responses so CC
+                # knows how long to wait before retrying. Quota exhaustion (all
+                # deployments exhausted) needs longer recovery (30s); RPM limits
+                # recover faster (5s). Detect by checking the error message content.
+                if client_status == 429:
+                    err_msg_lower = json.dumps(error_json).lower()
+                    is_quota_exhaustion = (
+                        "quota" in err_msg_lower
+                        or "exhausted" in err_msg_lower
+                        or "insufficient" in err_msg_lower
+                        or "balance" in err_msg_lower
+                        or "limit reached" in err_msg_lower
+                    )
+                    retry_seconds = 30 if is_quota_exhaustion else 5
+                    extra_hdrs = {"retry-after": str(retry_seconds)}
+                    _log("RETRY-AFTER", f"429 rate_limit_error → retry-after={retry_seconds}s (quota={is_quota_exhaustion})")
+                # Genuine upstream 529 (overloaded) → ensure error type is overloaded_error
+                # so CC auto-compacts. Without this, _convert_error defaults to api_error,
+                # which gives CC limited retries (2-3) instead of auto-compaction recovery.
+                elif client_status == 529:
+                    # Force overloaded_error regardless of what _convert_error produced
+                    err = error_payload.get("error", {})
+                    if err.get("type") != "overloaded_error":
+                        _log("529-FIX", f"upstream 529 had type={err.get('type')} → forcing overloaded_error")
+                        err["type"] = "overloaded_error"
+                        error_payload["error"] = err
+                    extra_hdrs = {"retry-after": "5"}
+                    _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (genuine upstream overload)")
+                self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 
             if is_stream:
@@ -1751,14 +1782,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         port = parsed_url.port or 80
         return http.client.HTTPConnection(host, port, timeout=PROXY_TIMEOUT)
 
-    def _send_json(self, code, data):
+    def _send_json(self, code, data, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self._send_raw(code, body, "application/json")
+        self._send_raw(code, body, "application/json", extra_headers)
 
-    def _send_raw(self, code, body_bytes, content_type="application/json"):
+    def _send_raw(self, code, body_bytes, content_type="application/json", extra_headers=None):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body_bytes)))
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(body_bytes)
 
