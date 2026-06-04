@@ -720,7 +720,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 _log("INPUT-REJECT-UNCOMPACTABLE", f"estimated_tokens={estimated_tokens} > safety={model_safety}, cannot auto-compact → 429 rate_limit_error")
                 self._send_json(429, {"type": "error", "error": {"type": "rate_limit_error",
                                  "message": f"Input tokens (~{estimated_tokens}) exceed safe limit ({model_safety}). Please reduce context size."},
-                                 "model": request_model})
+                                 "model": request_model}, extra_headers={"retry-after": "30"})
                 metrics["status"] = 429
                 metrics["error_type"] = "InputExceedsUncompactable"
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
