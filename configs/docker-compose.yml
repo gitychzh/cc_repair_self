@@ -1,5 +1,5 @@
 # Two-model architecture: 41001 (glm5.1) + 42001 (dsv4p)
-# + 41003 test (1000 variant × 7 keys = 7000 deployments, cooldown_time=15)
+# + 41003 test (1000 variant × 7 keys = 7000 deployments, cooldown_time=7200 (2h))
 # proxy.py (40001/40002) — format conversion + metrics logging + input safety
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry
 #

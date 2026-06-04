@@ -1,7 +1,7 @@
 # 41003 TEST LiteLLM Config — GLM-5.1 (1000 variants × 7 keys = 7000 deployments, rpm=1)
 # PURPOSE: Quota exploration with 1000 case-variant model IDs × 7 keys
 # Reduced from 1024 to 1000 variants (randomly removed 24)
-# rpm=1 per deployment, cooldown_time=15 (increased from 10)
+# rpm=1 per deployment, cooldown_time=7200 (increased from 10)
 #
 # Variant IDs are case permutations of 'zhipuai/glm-5.1'
 # 10 letter positions × 2^10 = 1024, minus 24 random = 1000
@@ -56038,7 +56038,7 @@ general_settings:
 
 router_settings:
   num_retries: 5
-  cooldown_time: 15
+  cooldown_time: 7200
   routing_strategy: simple-shuffle
   enable_pre_call_checks: false
   allowed_fails_policy:
