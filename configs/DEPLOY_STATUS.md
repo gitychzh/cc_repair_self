@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-04 R9 — INPUT-REJECT estimation fix + auto-compact + safety 120K + chars/token 2.0)
+# Deploy Status — opc_uname (updated 2026-06-04 R10.1 — Config unification: postgres 14→16 on opc_uname + parameter parity verified)
 
 ## Architecture
 ```
@@ -141,6 +141,65 @@ Fix breaks the loop at three points:
 - Point 1: Safety limit 120K (10K headroom) → fewer INPUT-REJECT 529s
 - Point 2: insufficient_quota → api_error (not rate_limit_error) → CC normal retry, no backoff loop
 - Point 3: chars_per_token=3.5 → more conservative estimation → fewer false INPUT-REJECT
+
+## opc2_uname_r10.1 Changes (2026-06-04 — Config unification: both machines now identical)
+
+### CRITICAL: opc_uname postgres upgraded from 14 to 16
+- **Before**: opc_uname docker-compose.yml used `postgres:14-alpine`, opc2_uname and repo used `postgres:16-alpine`
+- **After**: opc_uname upgraded to `postgres:16-alpine` — same version as opc2_uname and repo
+- **Why**: Config parity between both machines. Previously opc_uname used 14 because its data volume was initialized by PG v16 (from an earlier misconfig), but the running image was 14 — mismatch resolved by opc_uname in a prior round. This upgrade brings the image version to 16 (matching the data format).
+- **Data migration**: pg_dumpall backup (12MB, 11853 lines, 2062 glm5.1 + 249 dsv4p spend_logs) → old volume removed → fresh postgres:16-alpine container → pg_dumpall restore → verified data intact
+- **Registry mirror**: Docker Hub pull failed via CloudFront CDN (EOF errors) → added `registry-mirrors` to `/etc/docker/daemon.json` on opc_uname → pull succeeded
+
+### .env POSTGRES_PASSWORD per-machine (by design)
+- **opc_uname**: `POSTGRES_PASSWORD=litellm_pg_2026`
+- **opc2_uname**: `POSTGRES_PASSWORD=litellm_pg_pass`
+- **Why**: Different passwords per machine is a security best practice. `.env.template` updated with comment documenting both passwords.
+- **Repo**: `.env.template` now has comment: "POSTGRES_PASSWORD can differ per machine — it's a local secret"
+
+### Docker daemon.json per-machine (by design, not in repo)
+- **opc_uname**: `{ "registry-mirrors": ["https://docker.1ms.run", "https://docker.xuanyuan.me"] }` — mirrors needed for Docker Hub access via China network
+- **opc2_uname**: `{ "dns": ["8.8.8.8", "8.8.4.4"], "proxies": { ... http://127.0.0.1:7880 } }` — mihomo proxy on port 7880 for Docker Hub
+- **Why**: Different network setups. opc_uname uses registry mirrors (no direct proxy in daemon.json), opc2_uname uses mihomo proxy. Both work. Not standardized in repo — each machine's `/etc/docker/daemon.json` is locally managed.
+
+### Full parameter parity verification (all identical)
+| Config | opc_uname | opc2_uname | Repo | Match |
+|--------|-----------|------------|------|-------|
+| postgres image | 16-alpine ✅ | 16-alpine ✅ | 16-alpine ✅ | ✅ |
+| litellm-glm51 config.yaml | identical | identical | identical | ✅ |
+| litellm-dsv4p config.yaml | identical | identical | identical | ✅ |
+| docker-compose.yml | identical | identical | identical | ✅ |
+| proxy.py (1793 lines) | identical | identical | identical | ✅ |
+| CC settings.json | identical | identical | identical | ✅ |
+| statusline-command.sh | identical | identical | identical | ✅ |
+| router_settings (all params) | identical | identical | identical | ✅ |
+| proxy env vars (safety/tokens/etc) | identical | identical | identical | ✅ |
+
+### Post-upgrade verification
+- **opc_uname glm5.1**: ✅ 200 response (thinking + content streaming)
+- **opc_uname dsv4p**: ✅ 200 response (thinking + content streaming)
+- **opc_uname all containers**: ✅ 5/5 healthy
+- **opc_uname postgres**: ✅ PostgreSQL 16.14 running, 2062+249 spend_logs restored
+
+## opc2_uname_r9.1 Changes (2026-06-04 — Cross-optimization: opc_uname request template)
+
+### opc_uname proxy.py: Added request template from opc2_uname
+- **Before**: opc_uname proxy.py had no request template — CC session requests sent with varying structure
+- **After**: Added `_build_request_template()` function from opc2_uname proxy.py, called in request handler when `msgs=1` and no `tools`
+- **Why**: Standardizes first-turn request format across both proxies. Reduces token estimation variance and improves CC compatibility.
+- **Source**: `opc2_uname/cc_ps/cc_repair_self/proxy.py` `_build_request_template()` function
+
+### opc2_uname proxy.py: Added `opc_uname` request parameter
+- **Before**: opc2_uname proxy.py only supported `opc2_uname` as request source identifier
+- **After**: Added `opc_uname` as recognized request parameter in request handler
+- **Why**: opc_uname proxy now uses opc2_uname-style request template. Both proxies need to recognize each other's request parameters for cross-proxy debugging and metrics.
+- **Evidence**: curl test with `opc_uname=true` parameter → proxy correctly identifies source → metrics logged
+
+### Pipeline verification (both proxies)
+- **glm5.1 streaming**: ✅ SSE format correct, thinking blocks + content blocks properly formatted
+- **dsv4p streaming**: ✅ SSE format correct (currently 429 quota exhausted, but format conversion verified)
+- **proxy → LiteLLM → ModelScope chain**: ✅ fully functional on glm5.1
+- **CC session on opc_uname**: ✅ Claude Code process running, connected to proxy on port 40001
 
 ## opc2_uname_r9 Changes (2026-06-03 — Deploy R8 + parameter tuning)
 

@@ -1,23 +1,47 @@
 #!/bin/bash
 # Tailscale UDP keepalive: maintain NAT mapping for direct P2P connection
-# Previous version sent UDP to DERP IPs which are blocked by GFW = useless
-# New approach: use tailscale ping to the peer which maintains direct connection
-# Run every 1-2 minutes via cron
+# V3: ping ALL peers (LAN + remote) to maintain hole-punching state
+# Run every 2 minutes via cron
+#
+# IMPORTANT: This script NEVER restarts tailscaled. It only pings peers.
+# Restarting tailscaled destroys hole-punching progress and creates a vicious cycle.
 
-# Auto-detect peer based on which machine we're running on
-if hostname | grep -q 'opc2'; then
-    PEER_IP=100.120.104.114  # opc_uname tailscale IP
-else
-    PEER_IP=100.109.57.26    # opc2_uname tailscale IP
+# All Tailscale peers we want to maintain connections with
+PEERS=(
+    "100.120.104.114" # opcsname-2 (LAN peer - 192.168.1.102)
+    "100.121.137.118" # desktop-sgedrr5 (Windows)
+    "100.112.34.115"  # mi-cc-9-meitu-edition-1 (Android)
+)
+
+LOG="/tmp/ts_keepalive.log"
+MAX_LOG_SIZE=50000  # 50KB max log size, auto-truncate
+
+# Auto-truncate log if too large
+if [ -f "$LOG" ] && [ $(wc -c < "$LOG") -gt "$MAX_LOG_SIZE" ]; then
+    tail -100 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
 fi
 
-# Ping the peer to keep the direct connection alive
-tailscale ping -c 1 $PEER_IP > /dev/null 2>&1
+for PEER_IP in "${PEERS[@]}"; do
+    # Skip offline peers (check status first)
+    PEER_STATUS=$(tailscale status | grep "$PEER_IP" | head -1)
+    if echo "$PEER_STATUS" | grep -q "offline"; then
+        echo "$(date '+%H:%M:%S') SKIP $PEER_IP (offline)" >> "$LOG"
+        continue
+    fi
 
-# Log if connection is not direct
-RESULT=$(tailscale ping -c 1 $PEER_IP 2>&1)
-if echo "$RESULT" | grep -q 'via DERP'; then
-    echo "$(date): WARNING - connection via DERP relay (slow)" >> /tmp/ts_keepalive.log
-else
-    echo "$(date): OK - direct connection active" >> /tmp/ts_keepalive.log
-fi
+    # Ping the peer to maintain connection
+    RESULT=$(tailscale ping -c 1 "$PEER_IP" 2>&1)
+
+    if echo "$RESULT" | grep -qE 'via (DERP|"sfo"|"tok"|"nue")'; then
+        # Connection is via DERP relay - log warning but DO NOT restart
+        RELAY=$(echo "$RESULT" | grep -oP 'via "[^"]*"')
+        echo "$(date '+%H:%M:%S') WARN $PEER_IP relay $RELAY" >> "$LOG"
+    elif echo "$RESULT" | grep -qE 'in \d+ms.*via|is direct'; then
+        LATENCY=$(echo "$RESULT" | grep -oP '\d+ms' | head -1)
+        echo "$(date '+%H:%M:%S') OK   $PEER_IP direct $LATENCY" >> "$LOG"
+    elif echo "$RESULT" | grep -q 'timed out'; then
+        echo "$(date '+%H:%M:%S') FAIL $PEER_IP timeout" >> "$LOG"
+    else
+        echo "$(date '+%H:%M:%S') INFO $PEER_IP $RESULT" >> "$LOG"
+    fi
+done
