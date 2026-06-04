@@ -1,8 +1,9 @@
 # Two-model architecture: 41001 (glm5.1) + 42001 (dsv4p)
+# + 41003 test (1024 variant exploration, temporary)
 # proxy.py (40001/40002) — format conversion + metrics logging + input safety
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry
 #
-# Port assignments: 41001=glm5.1, 42001=dsv4p
+# Port assignments: 41001=glm5.1, 42001=dsv4p, 41003=glm5.1-test
 
 services:
   cc_postgres:
@@ -13,7 +14,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51,litellm_dsv4p
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51,litellm_dsv4p,litellm_glm51_test
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
       - ./postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
@@ -132,6 +133,50 @@ services:
       - --port
       - "4000"
 
+  # ─── TEMPORARY TEST: 1024-variant quota exploration ───
+  # Will be removed after validation. Purpose: test whether ModelScope
+  # quota is per-(key,model_id) — each case variant gets independent 200/id/day quota.
+  glm5.1_test41003:
+    image: litellm/litellm:v1.87.0
+    container_name: glm5.1_test41003
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51_test
+      MS_BASEURL: https://api-inference.modelscope.cn/v1
+      MS_KEY1: ms-bb4e5bee-ca0e-49be-8de3-2347a57752f5
+    volumes:
+      - ./litellm-glm51-test/config.yaml:/app/config.yaml:ro
+      - ./logs/litellm-glm51-test:/app/logs
+    ports:
+      - 41003:4000
+    networks:
+      - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: "1.5"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
   auth_to_api_40001:
     build:
       context: ./proxy
@@ -139,7 +184,10 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      LITELLM_URL_GLM51: http://glm5.1_uni41001:4000/v1/chat/completions
+      # TEST: glm5.1 routing → 41003 (1024-variant test container) instead of 41001
+      # REVERT INSTRUCTION: After testing, change back to http://glm5.1_uni41001:4000/v1/chat/completions
+      LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
       LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
@@ -157,7 +205,7 @@ services:
     networks:
       - cc-net
     depends_on:
-      - glm5.1_uni41001
+      - glm5.1_test41003  # TEST: routing to 41003 instead of 41001
       - dsv4p_uni42001
     deploy:
       resources:
