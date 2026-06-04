@@ -1,5 +1,5 @@
 # Two-model architecture: 41001 (glm5.1) + 42001 (dsv4p)
-# + 41003 test (1024 variant exploration, temporary)
+# + 41003 test (1000 variant × 7 keys = 7000 deployments, cooldown_time=15)
 # proxy.py (40001/40002) — format conversion + metrics logging + input safety
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry
 #
@@ -133,7 +133,7 @@ services:
       - --port
       - "4000"
 
-  # ─── TEMPORARY TEST: 1024-variant quota exploration ───
+  # ─── TEMPORARY TEST: 1000-variant quota exploration ───
   # Will be removed after validation. Purpose: test whether ModelScope
   # quota is per-(key,model_id) — each case variant gets independent 200/id/day quota.
   glm5.1_test41003:
@@ -184,7 +184,7 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # TEST: glm5.1 routing → 41003 (1024-variant test container) instead of 41001
+      # TEST: glm5.1 routing → 41003 (1000-variant × 7 keys = 7000 dep) instead of 41001
       # REVERT INSTRUCTION: After testing, change back to http://glm5.1_uni41001:4000/v1/chat/completions
       LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
