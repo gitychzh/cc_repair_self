@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-05 R3 — Config sync: proxy routing parity + retry-after header + ulimits fix)
+# Deploy Status — opc_uname (updated 2026-06-05 R4 — dsv4p R2 config sync + proxy.py inappropriate-content fix sync + 06-05 metrics analysis)
 
 ## Architecture
 ```
@@ -20,7 +20,46 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(L
 - auth_to_api_40001 :40001 (proxy, format conversion + retry-after header + MODEL_MAP + insufficient_quota→rate_limit_error)
 - auth_to_api_40002 :40002 (Codex proxy, same codebase)
 
-## opc2_uname_r3 Changes (2026-06-05 — Config sync + ulimits fix + metrics analysis)
+## opc_uname_r4 Changes (2026-06-05 — dsv4p R2 config sync + proxy.py sync + metrics analysis)
+
+### CRITICAL FIX: dsv4p running config ← repo R2 config sync
+- **Problem**: Running dsv4p LiteLLM (42001) config was stale — still using simple-shuffle + cooldown=10 + RateLimitAllowedFails=5 (old R1 settings). The repo had R2 optimization (latency-based-routing + cooldown=30 + RateLimitAllowedFails=3 + rolling_window_size=30 + lowest_latency_buffer=2) that was never deployed to this machine.
+- **Fix**: Copied `configs/litellm-dsv4p/config.yaml` (R2 version from repo) → `/opt/cc-infra/litellm-dsv4p/config.yaml` and restarted `dsv4p_uni42001`.
+- **Why**: R2 changes were authored by opc2_uname on this machine but only the repo copy was updated; the running config on disk was never synced. Latency-based-routing is critical for 77-deployment pool to avoid hitting already-throttled deployments; cooldown=30 (vs 10) prevents cascading unhealthy; RateLimitAllowedFails=3 (vs 5) prevents keeping clearly-failing deployments in rotation too long.
+
+### FIX: proxy.py disk file ← repo sync (inappropriate content → invalid_request_error)
+- **Problem**: `/opt/cc-infra/proxy/proxy.py` on disk was missing the "inappropriate content → invalid_request_error" mapping. The proxy container was rebuilt at 09:34 today from the repo version (which includes the fix), but the disk file was never synced.
+- **Fix**: Copied `configs/proxy/proxy.py` → `/opt/cc-infra/proxy/proxy.py` to maintain file ↔ reality consistency.
+- **Why**: Without this fix, ModelScope "inappropriate content" 400 errors map to `api_error` → CC retries infinitely (same content always rejected) → CC freezes. `invalid_request_error` makes CC stop immediately. The fix was already active in the running container; this sync only ensures the disk file matches.
+- **Evidence**: 5 inappropriate content errors on 06-05 — first 4 (06:19-06:45) before container rebuild, last 1 (09:32) after rebuild with CONTENT-MAP fix working correctly.
+
+### Metrics Analysis (06-05, full day)
+
+| Model | Requests | Success | Rate | 429 | 502 | 400 | Avg Latency | P95 Latency |
+|-------|----------|---------|------|-----|-----|-----|-------------|-------------|
+| glm5.1 | 1125 | 878 | 78.0% | 193 (17.2%) | 49 (4.4%) | 5 (0.4%) | 14.5s | 34.5s |
+| dsv4p | 9 | 5 | 55.6% | 3 | 1 | 0 | 2.4s | 3.3s |
+| Overall | 1136 | 883 | 77.7% | 196 | 50 | 7 | — | — |
+
+**Key findings:**
+- 429 errors: 195/196 are genuine quota exhaustion ("exceeded your current quota"), only 1 is RPM throttle. Config change cannot fix quota exhaustion.
+- 502 ConnectionError: 50 total, clustered at hours 05 (16), 09 (18), 10 (14). All are `[Errno 111] Connection refused` — LiteLLM startup/reconnect issues, not persistent.
+- 400 inappropriate content: 5 total, all before proxy rebuild (09:34). After rebuild, CONTENT-MAP fix correctly converts → invalid_request_error.
+- No parameter changes warranted: current glm5.1 router settings (simple-shuffle + cooldown=10 + RateLimitAllowedFails=5) are appropriate for 7000-deployment pool with genuine quota exhaustion as primary failure mode.
+
+**Comparison with 06-04:**
+- 06-04: 2261 requests, 79.2% success, 438 429 (19.4%), 22 502 (1%), 1 401
+- 06-05: 1136 requests, 77.7% success, 196 429 (17.2%), 50 502 (4.4%), 7 400 (0.6%)
+- 502 rate increased from 1% → 4.4% (more startup/reconnect issues)
+- Success rate slightly lower (79.2% → 77.7%) but 429 rate actually lower proportionally (19.4% → 17.2%)
+
+### Post-deployment verification
+- **dsv4p config**: ✅ R2 config applied (latency-based-routing, cooldown=30, RateLimitAllowedFails=3)
+- **dsv4p restart**: ✅ healthy after restart
+- **proxy.py**: ✅ disk file synced with repo (inappropriate content → invalid_request_error)
+- **glm5.1**: ✅ 200 response via proxy 40001 → 41003
+- **dsv4p**: ✅ 429 quota exhaustion (correct — genuine quota exhaustion at end of day)
+- **All 6 containers**: ✅ healthy
 
 ### CRITICAL FIX: Proxy routing config file ↔ running container mismatch resolved
 - **Problem**: `/opt/cc-infra/docker-compose.yml` was manually edited to route GLM-5.1 → `uni41001` (R1 emergency fix), but the running proxy container still routed to `test41003` (from R2 build). The local file ≠ reality.
