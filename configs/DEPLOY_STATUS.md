@@ -1,9 +1,10 @@
-# Deploy Status — opc_uname (updated 2026-06-04 R10.1 — Config unification: postgres 14→16 on opc_uname + parameter parity verified)
+# Deploy Status — opc_uname (updated 2026-06-05 R1 — Emergency routing fix: proxy 40001 reverted from test41003 to production 41001 + dsv4p cooldown cleared)
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(LiteLLM glm5.1) → ModelScope
-                                                                     → 42001(LiteLLM dsv4p)  → ModelScope
+CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(LiteLLM glm5.1, 256 variants × 7 keys = 1792 deploys) → ModelScope
+                                                                     → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
+                                                                     → 41003(LiteLLM glm5.1-test, 1024 variants × KEY1 = 1024 deploys) [TEMPORARY, not routed from 40001]
 ```
 
 ## Deploy Method

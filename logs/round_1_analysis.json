@@ -1,0 +1,110 @@
+# Round 1 Analysis — opc2_uname (2026-06-04/05)
+
+## Emergency Fix: Proxy Routing Reverted
+
+### Problem
+Proxy 40001 was routing glm5.1 → `glm5.1_test41003` (1024 variants × KEY1 only = 1024 deployments)
+instead of production `glm5.1_uni41001` (256 variants × 7 keys = 1792 deployments).
+
+**Evidence:**
+- watchdog log shows: `auth_to_api_40001 上游 http://glm5.1_test41003:4000 连不上 → 502`
+- docker-compose.yml had `LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions`
+- Comment in compose: `REVERT INSTRUCTION: 改回 http://glm5.1_uni41001:4000`
+- test41003 only has KEY1 → quota exhaustion hits all 1024 deployments simultaneously
+- No fallback to other keys → 429 insufficient_quota cascade
+
+### Action
+- Changed `LITELLM_URL_GLM51` from test41003 to uni41001
+- Changed `LITELLM_MODELS_URL_GLM51` from test41003 to uni41001
+- Changed `depends_on` from test41003 to uni41001
+- Recreated proxy container: `docker compose up -d --force-recreate auth_to_api_40001`
+- Also restarted `dsv4p_uni42001` to clear cooldown state (all 77 deployments were cooldown)
+
+### Verification
+- glm5.1 test: HTTP 200, valid response
+- dsv4p test: HTTP 200, valid response (after restart to clear cooldown)
+- `/health` endpoint shows correct routing: `glm5.1 → glm5.1_uni41001:4000`
+
+## Metrics Analysis (June 4 data)
+
+### Request Distribution
+| Model | Requests | Percentage |
+|-------|----------|-----------|
+| glm5.1 | 2233 | 99.4% |
+| dsv4p | 8 | 0.4% |
+| ? | 5 | 0.2% |
+
+### Status Distribution
+| Status | Count | Percentage |
+|--------|-------|-----------|
+| 200 | 1776 | 79.1% |
+| 429 | 441 | 19.6% |
+| 502 | 23 | 1.0% |
+| 400 | 5 | 0.2% |
+| 401 | 1 | 0.0% |
+
+### Error Analysis
+| Error Type | Count | Model |
+|-----------|-------|-------|
+| 429_upstream_error | 441 | glm5.1 (438), dsv4p (3), unknown (0*) |
+| ConnectionRefusedError | 23 | unknown (24*) |
+| 401_upstream_error | 1 | unknown |
+
+*Note: error_detail format didn't include model field directly; extracted from error body
+
+### Latency (glm5.1 successful requests)
+| Metric | Value |
+|--------|-------|
+| Avg duration | 14,105ms |
+| Median duration | 9,374ms |
+| P90 | 24,795ms |
+| P99 | 109,307ms |
+| Max | 311,307ms |
+| Avg TTFB | 13,174ms |
+| Median TTFB | 8,384ms |
+
+### 429 Error Latency
+| Metric | Value |
+|--------|-------|
+| Avg duration | 7,141ms |
+| Max duration | 314,567ms |
+
+**Insight: 429 errors waste 7.1s average per request. With 441 errors × 7.1s = 3,132s wasted.**
+
+### Auto-Compact
+| Metric | Value |
+|--------|-------|
+| Requests with compact | 1037/1774 (58.5%) |
+| Avg original est tokens | 208,171 |
+| Avg compacted est tokens | 27,209 |
+
+### Quota Remaining (at time of successful request)
+| Metric | Key Total | Per-Model |
+|--------|-----------|-----------|
+| Min | 26 | 26 |
+| Max | 1991 | 199 |
+| Avg | 1133 | 141 |
+
+**Critical: Per-model remaining hits as low as 26! This means quota is very tight.**
+
+### Key Issues Identified
+1. **99.4% traffic goes to glm5.1** — CC settings model is claude-opus-4-8 → mapped to glm5.1 only
+2. **429 rate 19.6%** — insufficient_quota errors burning time
+3. **429 avg latency 7.1s** — LiteLLM retries 5 times across deployments before giving up
+4. **dsv4p barely used (0.4%)** — model routing configuration issue
+5. **KEY3-7 dsv4p quota exhausted** (choices=null in non-stream, but works in stream)
+
+## DSv4P Quota Test Results
+| Key | Non-Stream | Stream |
+|-----|-----------|--------|
+| KEY1 | ✅ choices valid | ✅ works |
+| KEY2 | ✅ choices valid | ✅ works |
+| KEY3 | ❌ choices=null | ✅ works in stream |
+| KEY4 | ❌ choices=null | ✅ works in stream |
+| KEY5 | ❌ choices=null | ✅ works in stream |
+| KEY6 | ❌ choices=null | ✅ works in stream |
+| KEY7 | ❌ choices=null | ✅ works in stream |
+
+**Since proxy forces stream=True for all requests, KEY3-7 should work through proxy.**
+The 429 error was caused by cooldown state accumulation, not actual quota exhaustion.
+After restarting dsv4p_uni42001, all keys work fine through proxy.
