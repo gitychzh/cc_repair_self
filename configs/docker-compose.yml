@@ -45,7 +45,7 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: glm5.1_uni41001
     restart: unless-stopped
-    ulimit:
+    ulimits:
       nofile:
         soft: 4096
         hard: 65536
@@ -96,7 +96,7 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: dsv4p_uni42001
     restart: unless-stopped
-    ulimit:
+    ulimits:
       nofile:
         soft: 4096
         hard: 65536
@@ -152,7 +152,7 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: glm5.1_test41003
     restart: unless-stopped
-    ulimit:
+    ulimits:
       nofile:
         soft: 8192
         hard: 65536
