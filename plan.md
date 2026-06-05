@@ -1,71 +1,89 @@
-# R9: Systematic 529 Overloaded Crash Fix — Deploy R8 + Parameter Tuning
+# Plan: 修复 ModelScope "inappropriate content" 400 错误导致 CC 卡死
 
-## Root Cause Analysis
+## 根本原因
 
-The "Repeated 529 Overloaded" crash has TWO independent causes:
+ModelScope 内容审核返回 400 `BadRequestError: "Input data may contain inappropriate content"`。
+当前 proxy 的 `_convert_error()` 将此错误映射为 `api_error` → CC 无限 retry 相同内容 → 永远被审核拦截 → **卡死**。
 
-### Cause 1: INPUT-REJECT 529 — R8 auto-compact NOT deployed (47 occurrences/day)
-- **Repository** has R8 proxy.py (1675 lines) with `_auto_compact_messages()` that converts INPUT-REJECT from 529 → auto-compact + forward
-- **Remote machine** still runs OLD proxy.py (1542 lines) that returns 529 on INPUT-REJECT
-- Result: borderline requests (est_tokens=120088, barely over 120K) → 529 → CC retries 3 times → crash
-- Data: 47 INPUT-REJECT events, ALL with est_tokens just barely over 120K threshold
-- ModelScope actual limit = 202745, these borderline requests could succeed at upstream
+### 链路追踪
 
-### Cause 2: 429 quota-exhausted → CC immediate retry (119 occurrences/day)
-- ALL 429 errors are "exceeded your current quota" (account-level quota exhaustion)
-- Currently mapped to `api_error` → CC retries immediately (no backoff)
-- CC generates more 429s in a tight loop → 12.5% of all requests wasted
-- Should be `rate_limit_error` → CC exponential backoff (seconds→minutes→hours)
+```
+ModelScope 内容审核 → 400 BadRequestError "inappropriate content"
+→ LiteLLM: BadRequestErrorAllowedFails=0, deployment 立即 cooldown 10s, 但 num_retries=5 换 deployment retry
+→ Proxy: _convert_error() → 不匹配 is_input_overflow, 不匹配 thinking_budget → 默认 api_error
+→ CC: api_error → retry 相同内容 → 再次被审核拦截 → 无限循环 → 卡死
+```
 
-### Why CC crashes on 529:
-- CC gets 529 overloaded_error → retries 3 times with SAME context (no auto-compact)
-- 3 consecutive 529s → CC shows "Repeated 529 Overloaded" and freezes/crashes
-- CC only auto-compacts AFTER the 3rd 529 (too late, already crashed)
-- The R8 auto-compact approach breaks this loop by compacting IN THE PROXY
+### 核心矛盾
 
-## Fix Plan (4 changes)
+"inappropriate content" 不像其他 400 错误：
+- 不是参数错误（retry 同内容永远失败）
+- 不是 token 超限（不能靠 compact 解决）
+- 不是限速（不会自动恢复）
+- CC 对 api_error 会无限 retry → **永远卡死**
 
-### Fix A: Deploy R8 auto-compact proxy.py to remote machine
-- Copy repo proxy.py (with `_auto_compact_messages`) to `/opt/cc-infra/proxy/proxy.py`
-- Rebuild proxy container: `docker compose up -d --build --force-recreate auth_to_api_40001`
-- This eliminates the INPUT-REJECT → 529 → CC crash loop entirely
-- Borderline requests get auto-compacted in proxy → forwarded to LiteLLM → 200 response → CC continues
+## 解决方案：将 "inappropriate content" 映射为 `invalid_request_error`
 
-### Fix B: Map 429 quota-exhausted to rate_limit_error (not api_error)
-- Change `_convert_error()` mapping for "exceeded your current quota" from `api_error` to `rate_limit_error`
-- CC gets 429 + rate_limit_error → exponential backoff (5s→10s→20s→40s→...)
-- This stops CC from immediately retrying on quota exhaustion
-- Reduces wasted 429 retries from tight loop to graceful backoff
+- **CC 行为**：`invalid_request_error` → CC 立即停止，不 retry，不卡死
+- **理由**：内容审核是 ModelScope 的不可恢复错误，retry 同内容永远不会通过审核。
+  映射为 `invalid_request_error` 让 CC 立即知道这个请求无法完成，停止重试。
+- **优点**：CC 不卡死，不浪费 quota（不 retry 5 次 × 无效请求）
+- **缺点**：CC 会停止当前任务，但这比卡死好得多
 
-### Fix C: Raise MODEL_INPUT_TOKEN_SAFETY from 120K to 170K
-- docker-compose.yml: `MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"` and `MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"`
-- ModelScope actual limit = 202K, so 170K safety gives 32K margin (plenty of room)
-- Current 120K threshold rejects borderline 120K requests that could succeed at upstream
-- With 170K: only genuinely oversized requests (>170K est_tokens) trigger auto-compact
-- Data validation: 35 of 47 INPUT-REJECTs would NOT be rejected at 170K threshold
-- Remaining 12 genuinely oversized requests get auto-compacted → succeed at ~50K est_tokens
+对比其他方案：
+- 映射为 overloaded_error → CC auto-compact → compact 后内容可能仍触发审核 → 反复循环 → 危险
+- 映射为 rate_limit_error → CC backoff retry → retry 同内容永远失败 → 卡死
 
-### Fix D: Adjust CC settings and /v1/models context_window
-- settings: `contextWindow: 130000`, `autoCompactWindow: 90000` (unchanged)
-- /v1/models endpoint: report `context_window: 170000` (matching safety)
-- Current context_window reporting = 120K (too small, causes CC to compact unnecessarily early)
-- With context_window=170K: CC has more room, compacts when truly needed
+## 实施步骤
 
-## Deployment Steps
+### Step 1: 修改 proxy.py `_convert_error()`
 
-1. Update configs/proxy/proxy.py — Fix B (quota→rate_limit_error) + Fix C context_window
-2. Update configs/docker-compose.yml — Fix C (safety 120K→170K)
-3. Update configs/claude/settings-opc_uname.json — Fix D (contextWindow 110K→130K)
-4. Push to GitHub
-5. SSH to opc_uname: git pull, copy configs to /opt/cc-infra/
-6. Rebuild proxy container (docker compose up -d --build --force-recreate auth_to_api_40001)
-7. Copy settings to ~/.claude/settings.json, restart CC
-8. Test with curl (glm5.1 + dsv4p)
-9. Verify new metrics — INPUT-REJECT/INPUT-OVERLIMIT drops to near-zero
+在 `_convert_error()` 中添加 "inappropriate content" → `invalid_request_error` 映射：
 
-## Validation
+```python
+# "inappropriate content" (ModelScope content safety filter) → invalid_request_error
+# ModelScope content audit rejects input as inappropriate. This is NOT recoverable:
+# retrying the same content will always fail (content audit is deterministic).
+# Mapping to invalid_request_error lets CC stop immediately instead of infinite retry → freeze.
+elif "inappropriate content" in msg_lower:
+    err_type = "invalid_request_error"
+```
 
-- Before: 47 INPUT-REJECT/day, 119 quota 429/day, CC crashes multiple times
-- After: ~12 INPUT-OVERLIMIT/day (only genuinely oversized), auto-compact handles them gracefully
-- CC should NEVER see "Repeated 529 Overloaded" crash again
-- 429 quota errors get CC exponential backoff → fewer wasted requests
+位置：在 `is_quota_exhausted` 和 `rate` 检查之后，`range of input length` 检查之前。
+
+### Step 2: 确保 is_input_overflow 不会误匹配 "inappropriate"
+
+当前 `is_input_overflow` 检查不含 "inappropriate"关键词，无需修改。
+
+### Step 3: 修复 proxy 容器路由指向（R1遗留）
+
+当前 proxy 容器内环境变量仍指向 `glm5.1_test41003:4000`，
+但 docker-compose.yml 已改为 `glm5.1_uni41001:4000`。
+需要重建 proxy 容器使配置生效：
+```bash
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+```
+
+### Step 4: 部署并测试
+
+1. 备份配置
+2. 同步 proxy.py 到 opc_uname /opt/cc-infra/proxy/
+3. 重建 proxy 容器（应用新 error mapping + 正确路由）
+4. 测试正常请求 200 OK
+5. 测试错误场景（发送含审核触发词的请求验证返回 invalid_request_error）
+
+## 修复后 CC 的行为变化
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| "inappropriate content" 400 | CC api_error → 无限retry → 卡死 | CC invalid_request_error → 立即停止 → 用户可继续 |
+| "Range of input length" 400 | CC overloaded → auto-compact ✅ | 不变 ✅ |
+| thinking_budget 400 | proxy resilience retry → ✅ | 不变 ✅ |
+| 429 quota exhausted | CC rate_limit → backoff ✅ | 不变 ✅ |
+
+## 风险评估
+
+- 修改 `_convert_error()` 添加一个 `elif` 分支，风险低
+- 映射为 `invalid_request_error`：CC 会停止，但比卡死好得多
+- proxy 路由指向修正：R1 遗留问题，必须修复
+- dsv4p 也使用 ModelScope API，同样受益于此修改

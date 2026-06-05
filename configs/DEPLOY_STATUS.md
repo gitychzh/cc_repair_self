@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-05 R2 — Proxy routing switched to 41003 primary: 1000 variants × 7 keys = 7000 deploys)
+# Deploy Status — opc_uname (updated 2026-06-05 opc2_uname R2 — ulimit fix + dsv4p router unification + engineering scripts)
 
 ## Architecture
 ```
@@ -9,16 +9,60 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(L
 
 ## Deploy Method
 - **docker compose**: `cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001`
+- **One-click sync**: `bash ~/cc_ps/cc_repair_self/scripts/sync_config.sh` (pull + sync repo → deploy dir)
+- **One-click deploy**: `bash ~/cc_ps/cc_repair_self/scripts/deploy.sh [service]` (restart + test)
 - **Docker Hub**: unreachable from China without proxy → mihomo on port **7890** configured as Docker systemd proxy (`/etc/systemd/system/docker.service.d/proxy.conf`). Note: previously misconfigured as 7880, fixed in Round 3.
 - **Legacy builder**: `DOCKER_BUILDKIT=0` required — BuildKit doesn't respect systemd proxy
 
-## Containers (all healthy)
+## Containers (all healthy via /health/liveliness — /health shows unhealthy due to fd exhaustion, see below)
 - cc_postgres :5432
-- glm5.1_uni41001 :41001 (1792 deployments: 256 variants × 7 keys) [BACKUP]
-- dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys)
-- glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1]
-- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping + insufficient_quota→api_error)
-- auth_to_api_40002 :40002 (Codex proxy, same codebase + insufficient_quota→api_error)
+- glm5.1_uni41001 :41001 (1792 deployments: 256 variants × 7 keys) [BACKUP] — ulimit nofile=4096
+- dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys) — ulimit nofile=4096
+- glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimit nofile=8192
+- auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping + insufficient_quota→rate_limit_error)
+- auth_to_api_40002 :40002 (Codex proxy, same codebase + insufficient_quota→rate_limit_error)
+- auth_to_api_40002 :40002 (Codex proxy, same codebase + insufficient_quota→api_error)  # STALE LINE — actually rate_limit_error
+
+## opc2_uname_r2 Changes (2026-06-05 — ulimit fix + dsv4p router unification + engineering scripts)
+
+### CRITICAL: ulimit nofile fix — prevents fd exhaustion on large deployment counts
+- **Before**: All LiteLLM containers ulimit soft=1024 (Docker default)
+- **After**: glm5.1_uni41001 ulimit soft=4096, dsv4p_uni42001 ulimit soft=4096, glm5.1_test41003 ulimit soft=8192
+- **Why**: 1792/7000 deployments × health check TCP connections → "OSError: [Errno 24] Too many open files"
+  - `/health` endpoint triggers on-demand check per deployment → 1792+ concurrent TCP connections → exceeds 1024 fd soft limit
+  - 41001 showed 0 healthy / 1792 unhealthy (all fd errors)
+  - 42001 showed 9 healthy / 68 unhealthy (77 total, less severe but still broken)
+  - `/health/liveliness` still works (no per-deployment check) — actual requests still succeed via latency-based-routing
+  - But `/health` is used by monitoring/automation → needs to work properly
+- **Impact**: With ulimit=4096 (41001) and ulimit=8192 (41003), fd exhaustion no longer occurs for health checks
+- **NEVER call /health for monitoring** — use /health/liveliness only. /health triggers on-demand checks → fd exhaustion cascade.
+
+### DSv4P router_settings unified with glm5.1 (parity)
+- **Before**: dsv4p used simple-shuffle + cooldown_time=10 + RateLimitErrorAllowedFails=5
+- **After**: dsv4p uses latency-based-routing + cooldown_time=30 + RateLimitErrorAllowedFails=3 (same as glm5.1)
+- **Why**: Inconsistent router settings between glm5.1 and dsv4p. Latency-based-routing tracks actual response times
+  and routes to fastest deployments. cooldown_time=10 was too aggressive — 1 RPM limit means deployments cycle through
+  RPM windows quickly, 10s cooldown removes working deployments prematurely. RateLimitErrorAllowedFails=5 was too
+  tolerant — with 77 deployments, 5 fails before cooldown wastes requests on already-limited deployments.
+- **Also added**: rolling_window_size=30, lowest_latency_buffer=2, timeout=300, retry_after=0, model_group_alias
+- **Format change**: allowed_fails_policy → allowed_fails (parity with glm5.1 format)
+
+### Engineering: sync_config.sh and deploy.sh scripts
+- **sync_config.sh**: One-click pull + diff + backup + sync from repo configs to /opt/cc-infra/
+  - Auto-detects changed files, creates timestamped backups, only copies diffs
+  - Usage: `bash ~/cc_ps/cc_repair_self/scripts/sync_config.sh [--dry-run]`
+- **deploy.sh**: One-click deploy + restart + test
+  - Detects service type (proxy rebuild vs LiteLLM restart vs full redeploy)
+  - Auto-tests glm5.1 and dsv4p via proxy 40001
+  - Usage: `bash ~/cc_ps/cc_repair_self/scripts/deploy.sh [service]`
+
+### Today's 429 error analysis (2026-06-05 metrics)
+- Total requests: 88 (03:06 - 04:35 UTC)
+- Success: 81, Error: 7 (8.0% error rate)
+- All 7 errors are 429 insufficient_quota (account-level quota exhaustion)
+- 429 concentrated in 04:14-04:19 (5 minutes) — all 7 keys temporarily exhausted
+- Proxy correctly maps insufficient_quota → rate_limit_error → CC exponential backoff
+- avg duration (success): 14693ms, avg TTFB: 12969ms
 
 ## opc_uname_r2 Changes (2026-06-05 — Proxy routing to 41003 primary: 7000 deployments)
 

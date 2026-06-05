@@ -1,8 +1,11 @@
-# Three-model architecture: 41003 (glm5.1, 7000 dep) + 42001 (dsv4p) + 41001 (glm5.1 backup)
+# Two-model architecture: 41001 (glm5.1, 256var×7key=1792) + 42001 (dsv4p, 11var×7key=77)
+# + 41003 test (glm5.1, 1000var×7key=7000) — quota exploration, temporary
 # proxy.py (40001/40002) — format conversion + metrics logging + input safety
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry
 #
-# Port assignments: 41001=glm5.1-backup, 42001=dsv4p, 41003=glm5.1-primary
+# Port assignments: 41001=glm5.1, 42001=dsv4p, 41003=glm5.1-test
+# ulimit nofile: 4096 soft / 65536 hard — prevents fd exhaustion with large deployment counts
+# (1792 deployments on 41001, 7000 on 41003 need more than default 1024 soft limit)
 
 services:
   cc_postgres:
@@ -42,6 +45,10 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: glm5.1_uni41001
     restart: unless-stopped
+    ulimit:
+      nofile:
+        soft: 4096
+        hard: 65536
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51
@@ -89,6 +96,10 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: dsv4p_uni42001
     restart: unless-stopped
+    ulimit:
+      nofile:
+        soft: 4096
+        hard: 65536
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_dsv4p
@@ -132,14 +143,19 @@ services:
       - --port
       - "4000"
 
-  # ─── PRIMARY: glm5.1 production (1000 variants × 7 keys = 7000 deployments) ───
-  # 1000 case-permutation variants each get independent 200/id/day quota from ModelScope.
-  # 7 keys provide fallback on quota exhaustion — KEY1 exhausted → KEY2-7 still active.
-  # 7000 deployments at rpm=1 = 7000 RPM capacity.
+  # ─── TEMPORARY TEST: 1000-variant quota exploration ───
+  # Purpose: test whether ModelScope quota is per-(key,model_id)
+  # — each case variant gets independent 200/id/day quota.
+  # 1000 variants × 7 keys = 7000 deployments, rpm=1 each = 7000 RPM capacity.
+  # Will be evaluated after quota validation and removed if not beneficial.
   glm5.1_test41003:
     image: litellm/litellm:v1.87.0
     container_name: glm5.1_test41003
     restart: unless-stopped
+    ulimit:
+      nofile:
+        soft: 8192
+        hard: 65536
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51_test
@@ -190,7 +206,7 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # glm5.1 routing → 41003 (primary, 7 keys × 1000 variants = 7000 dep)
+      # glm5.1 routing → 41003 (primary, 1000var×7keys=7000 deploys)
       LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
       LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
