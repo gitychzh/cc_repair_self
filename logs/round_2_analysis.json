@@ -1,0 +1,80 @@
+{
+  "round": "R2",
+  "date": "2026-06-05",
+  "machine": "opc_uname",
+  "summary": {
+    "total_requests": 164,
+    "success_rate": 95.1,
+    "success_count": 156,
+    "429_count": 8,
+    "429_type": "all insufficient_quota",
+    "529_count": 0,
+    "avg_duration_ms": 19341,
+    "p90_duration_ms": 31561,
+    "median_duration_ms": 12116,
+    "avg_ttfb_ms": 14312,
+    "p90_ttfb_ms": 26623,
+    "avg_litellm_ms": 9796,
+    "p90_litellm_ms": 15529,
+    "avg_proxy_overhead_ms": 1474,
+    "ms_requests_remaining_range": [
+      1096,
+      1870
+    ],
+    "ms_model_remaining_range": [
+      195,
+      199
+    ],
+    "auto_compact_rate": 11.2,
+    "tool_truncation_reduction_pct": 70.3
+  },
+  "429_pattern": {
+    "total": 8,
+    "all_insufficient_quota": true,
+    "timestamps": [
+      "2026-06-05T03:08:47",
+      "2026-06-05T04:14:17",
+      "2026-06-05T04:16:35",
+      "2026-06-05T04:17:23",
+      "2026-06-05T04:18:12",
+      "2026-06-05T04:18:35",
+      "2026-06-05T04:19:05",
+      "2026-06-05T04:45:00"
+    ],
+    "pattern": "6x concentrated in 04:14-04:19 (5min burst), 1x isolated at 03:08, 1x isolated at 04:45"
+  },
+  "changes": {
+    "primary_routing_switch": {
+      "before": "40001 proxy \u2192 41001 (uni41001, 256\u00d77=1792 dep)",
+      "after": "40001 proxy \u2192 41003 (test41003, 1000\u00d77=7000 dep)",
+      "why": "41003 has 7000 deployments (1000 variants \u00d7 7 keys) vs 41001's 1792. More deployments = more RPM capacity = less likely all exhaust simultaneously. Data shows 429 insufficient_quota at 04:14-04:19 where all 7 keys quota temporarily exhausted \u2014 7000 dep pool reduces this risk."
+    },
+    "config_expansion": {
+      "before": "41003 config: 1024 variants \u00d7 KEY1 = 1024 deployments",
+      "after": "41003 config: 1000 variants \u00d7 KEY1-7 = 7000 deployments",
+      "why": "Single key (KEY1) means no fallback when KEY1 quota exhausted. 7 keys provide 7\u00d7 fallback depth. Each key has independent quota \u2014 KEY1 exhausted \u2192 LiteLLM routes to KEY2-7 variants."
+    },
+    "41003_resource_increase": {
+      "before": "memory=1536M, cpus=1.5, start_period=120s",
+      "after": "memory=2048M, cpus=2.0, start_period=180s",
+      "why": "7000 deployments require more memory for router state tracking. 2048M provides 33% more headroom. start_period=180s allows slower startup for 7\u00d7 larger config."
+    },
+    "router_settings_unchanged": {
+      "strategy": "simple-shuffle (kept \u2014 7000 dep pool, latency-based-routing overhead not justified)",
+      "num_retries": 5,
+      "cooldown_time": 10,
+      "RateLimitErrorAllowedFails": 5,
+      "why": "Data evidence: 429 pattern shows insufficient_quota (not RPM). RateLimitErrorAllowedFails=5 tolerates RPM 429 without cascading cooldown. cooldown_time=10 proportional to RPM window. simple-shuffle distributes uniformly across 7000 dep, maximizing quota utilization."
+    }
+  },
+  "optimization_rationale": {
+    "latency_based_routing_vs_simple_shuffle": {
+      "observation": "latency-based-routing on 1792 dep avg overhead 1.5s (proxy overhead avg 1474ms, median 2ms)",
+      "conclusion": "latency tracking overhead not justified for 7000 dep pool. simple-shuffle gives uniform distribution \u2192 better quota utilization across all 7 keys."
+    },
+    "429_insufficient_quota_handling": {
+      "observation": "8x 429 all insufficient_quota, 6 concentrated in 04:14-04:19 5-min burst",
+      "conclusion": "All 7 keys quota temporarily exhausted. With 7000 dep, exhaustion takes longer (7\u00d7 more quota per variant). RateLimitErrorAllowedFails=5 prevents premature cooldown on RPM 429."
+    }
+  }
+}

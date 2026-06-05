@@ -1,10 +1,10 @@
-# Deploy Status — opc_uname (updated 2026-06-05 R1 — Emergency routing fix: proxy 40001 reverted from test41003 to production 41001 + dsv4p cooldown cleared)
+# Deploy Status — opc_uname (updated 2026-06-05 R2 — Proxy routing switched to 41003 primary: 1000 variants × 7 keys = 7000 deploys)
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(LiteLLM glm5.1, 256 variants × 7 keys = 1792 deploys) → ModelScope
+CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
                                                                      → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
-                                                                     → 41003(LiteLLM glm5.1-test, 1024 variants × KEY1 = 1024 deploys) [TEMPORARY, not routed from 40001]
+                                                                     → 41001(LiteLLM glm5.1-backup, 256 variants × 7 keys = 1792 deploys) [BACKUP, not routed from 40001]
 ```
 
 ## Deploy Method
@@ -14,10 +14,47 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41001(L
 
 ## Containers (all healthy)
 - cc_postgres :5432
-- glm5.1_uni41001 :41001 (77 deployments: 11 variants × 7 keys)
+- glm5.1_uni41001 :41001 (1792 deployments: 256 variants × 7 keys) [BACKUP]
 - dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys)
+- glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1]
 - auth_to_api_40001 :40001 (proxy, format conversion + MODEL_MAP + DSv4P force-stream + proper error mapping + insufficient_quota→api_error)
 - auth_to_api_40002 :40002 (Codex proxy, same codebase + insufficient_quota→api_error)
+
+## opc_uname_r2 Changes (2026-06-05 — Proxy routing to 41003 primary: 7000 deployments)
+
+### CRITICAL: Proxy 40001 routing switched from 41001 → 41003
+- **Before**: 40001 proxy → 41001 (uni41001, 256 variants × 7 keys = 1792 deployments)
+- **After**: 40001 proxy → 41003 (test41003, 1000 variants × 7 keys = 7000 deployments)
+- **Why**: Data evidence (2026-06-05 metrics):
+  - 429 insufficient_quota concentrated at 04:14-04:19 (6x in 5 min) — all 7 keys temporarily exhausted
+  - 41001 1792 dep pool exhausted faster than 41003 7000 dep would
+  - 7000 dep = 7000 RPM capacity × 200/id/day quota per variant = 1,400,000 requests/day theoretical max
+  - More keys × more variants = longer before all exhaust simultaneously
+- **Evidence**: 164 requests, 95.1% success, 8x 429 (all insufficient_quota), 0x 529
+
+### 41003 config expanded from KEY1-only to KEY1-7
+- **Before**: 41003 config = 1024 variants × KEY1 = 1024 deployments (no key fallback)
+- **After**: 41003 config = 1000 variants × KEY1-7 = 7000 deployments (7-key fallback)
+- **Why**: KEY1-only means when KEY1 quota exhausted → ALL 1024 deployments 429 → no fallback → proxy 429 → CC freeze. KEY1-7 provides 7× fallback depth — KEY1 exhausted → LiteLLM routes to KEY2-7 variants.
+- **Previous R1 mistake**: Routing proxy → 41003(KEY1 only) caused quota exhaustion cascade. This is now fixed by expanding to 7 keys.
+
+### 41003 container resources increased
+- **Before**: memory=1536M, cpus=1.5, start_period=120s
+- **After**: memory=2048M, cpus=2.0, start_period=180s
+- **Why**: 7000 deployments need more memory for router state. 2048M provides 33% headroom above 1536M. start_period=180s allows slower startup for 7× larger config.
+
+### Router settings (unchanged, optimized for 7000 dep pool)
+- `routing_strategy`: simple-shuffle (latency-based-routing overhead 1.5s avg not justified for 7000 dep pool)
+- `num_retries`: 5 (finds healthy deployment in 7000 dep pool faster)
+- `cooldown_time`: 10 (proportional to RPM 1-min window)
+- `RateLimitErrorAllowedFails`: 5 (429 can be RPM + insufficient_quota, high tolerance prevents cascading cooldown)
+- `drop_params`: true (added for parity with glm51 config — drops unsupported params gracefully)
+
+### Post-deployment verification
+- **glm5.1 via proxy → 41003**: ✅ 200 response (thinking + content, Anthropic format)
+- **glm5.1 streaming via proxy**: ✅ SSE format correct
+- **dsv4p via proxy → 42001**: ✅ 200 response (thinking + content)
+- **All 6 containers**: ✅ healthy (41001 backup, 41003 primary, 42001, postgres, 40001, 40002)
 
 ## opc2_uname_r3 Changes (2026-06-02)
 
