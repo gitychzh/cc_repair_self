@@ -1,0 +1,76 @@
+{
+  "round": "R3",
+  "date": "2026-06-05",
+  "machine": "opc2_uname",
+  "trigger": "Framework sync — local configs were out of sync with remote repo",
+  "summary": {
+    "total_requests": 1139,
+    "success_rate": 92.7,
+    "success_count": 1056,
+    "429_count": 70,
+    "429_type": "all insufficient_quota (quota-level, not RPM)",
+    "502_count": 13,
+    "502_type": "all from initial restart period (09:31-09:35), Connection refused",
+    "529_count": 0,
+    "400_count": 0,
+    "avg_duration_ms": 14087,
+    "p90_duration_ms": 27597,
+    "p99_duration_ms": 50032,
+    "median_duration_ms": 11906,
+    "avg_ttfb_ms": 12420,
+    "avg_litellm_ms": 10497,
+    "proxy_overhead_avg_ms": 3597,
+    "proxy_overhead_median_ms": 577,
+    "ms_requests_remaining_range": [2, 1999],
+    "ms_model_remaining_range": [2, 199],
+    "auto_compact_rate": 99.0,
+    "tool_truncation_reduction_pct": 70,
+    "glm5_requests_pct": 99.9,
+    "dsv4p_requests_pct": 0.1
+  },
+  "429_pattern": {
+    "total": 70,
+    "all_insufficient_quota": true,
+    "avg_duration_ms": 3948,
+    "total_waste_seconds": 280,
+    "hourly_rate": {
+      "09: 8.1%": "8/99",
+      "10: 3.2%": "3/94",
+      "12: 7.8%": "20/258",
+      "13: 4.5%": "11/244",
+      "14: 5.9%": "13/221",
+      "15: 6.8%": "12/177",
+      "16: 6.0%": "3/50"
+    },
+    "pattern": "Spread across all hours, not bursty. Avg ~6%. NOT RPM-related — all are quota exhaustion from ModelScope (shared across both machines)."
+  },
+  "latency_analysis": {
+    "input_size_vs_latency": {
+      "chars>100K": "avg 18900ms vs chars<=100K avg 6846ms (2.76x penalty)",
+      "chars>120K": "avg 19040ms vs chars<=120K avg 8308ms",
+      "chars>200K": "avg 18936ms vs chars<=200K avg 13164ms",
+      "max_input_chars_observed": "~240K (no requests exceed safety threshold)"
+    }
+  },
+  "framework_sync": {
+    "description": "Local /opt/cc-infra configs were out of sync with remote repo. All 4 config files were copied from remote (correct) to local.",
+    "files_synced": [
+      "litellm-glm51-test/config.yaml (41003) — cooldown_time 7200→10, anchor zhipuai→ZHIPUAI, header TEST→Production, variant list identical",
+      "litellm-dsv4p/config.yaml (42001) — routing simple-shuffle→latency-based-routing, cooldown 10→30, RateLimitFails 5→3, +rolling_window/buffer",
+      "proxy/proxy.py — +429 retry-after=30s header, +inappropriate content→invalid_request_error mapping",
+      "docker-compose.yml — +KEY2-7 for 41003, +ulimits nofile, memory 1536→2048M, 40001/40002 routing→41003, postgres expose not ports"
+    ],
+    "extra_fix": "ulimit→ulimits (docker compose v5 syntax)"
+  },
+  "R3_change": {
+    "description": "41003 num_retries: 5 → 8",
+    "why": {
+      "evidence": "Post-sync metrics: 70 429 insufficient_quota out of 1139 req (6.1%). 429 avg latency = 3948ms (= ~5×800ms per retry attempt). With 7000 deployments (1000 variants × 7 keys), 8 retries gives more chances to find a deployment where that specific variant+key combo has remaining quota.",
+      "logic": "Both machines share the same 7 keys and 1000 variant IDs → ModelScope quota is shared → faster per-variant exhaustion. Each retry tries a different (variant, key) combination. More retries = higher probability of hitting a combo with remaining quota.",
+      "risk": "8 retries worst case = ~6400ms latency if all fail. Currently 5 retries = ~3948ms avg. 8 retries adds ~2.4s worst case per 429, but could reduce 429 rate by finding available deployments."
+    }
+  },
+  "docker_compose_changes": {
+    "ulimits_fix": "ulimit→ulimits (compose v5 syntax) — applied to both local and repo"
+  }
+}

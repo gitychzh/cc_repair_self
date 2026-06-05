@@ -10,7 +10,9 @@
 #   128 × 8 = 1024, take first 1000
 #
 # Router settings (optimized based on June 5 metrics data):
-#   - num_retries: 5 (more retries for large pool, finds healthy deployment faster)
+#   - num_retries: 8 (R3: 6% 429 insufficient_quota; 7000 dep pool, more retries finds healthy dep faster)
+#     Evidence: post-sync metrics 1139 req, 70 429 (6.1%), avg 429 latency 3948ms (= 5×800ms)
+#     8 retries → ~6400ms worst case, but higher probability of hitting fresh variant+key combo
 #   - RateLimitErrorAllowedFails: 5 (429 is RPM + insufficient_quota, high tolerance prevents cascading cooldown)
 #   - cooldown_time: 10 (429 RPM is 1-min window, 10s cooldown is proportional)
 #   - routing_strategy: simple-shuffle (7000 dep pool — latency-based-routing overhead too high)
@@ -71037,7 +71039,7 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 5
+  num_retries: 8
   cooldown_time: 10
   routing_strategy: simple-shuffle
   enable_pre_call_checks: false
