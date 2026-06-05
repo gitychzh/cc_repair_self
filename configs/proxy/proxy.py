@@ -1717,6 +1717,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
           Reason: This is input token overflow. Retrying with the same content never
           works. CC's auto-compaction truncates conversation history, which is the
           correct recovery strategy. overloaded_error triggers compaction specifically.
+        - 400 "inappropriate content" → invalid_request_error (NOT api_error)
+          Reason: ModelScope content safety filter rejects input as inappropriate.
+          This is NOT recoverable by retrying — the same content will always be
+          rejected (content audit is deterministic). CC retries api_error infinitely
+          → infinite loop → CC freezes/crashes. invalid_request_error makes CC
+          stop immediately, which is better than freezing forever.
         - Everything else → api_error (CC retries)
         """
         err = error_json.get("error", error_json)
@@ -1745,6 +1751,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _log("QUOTA-MAP", f"insufficient_quota → rate_limit_error (msg: {msg[:100]})")
         elif "rate" in msg_lower or "429" in msg_lower:
             err_type = "rate_limit_error"  # RPM throttle → CC retries with backoff
+
+        # ModelScope content safety filter "inappropriate content" → invalid_request_error
+        # NOT api_error! CC retries api_error infinitely → same content always rejected → freeze.
+        # invalid_request_error makes CC stop immediately (better than freezing forever).
+        elif "inappropriate content" in msg_lower:
+            err_type = "invalid_request_error"
+            _log("CONTENT-MAP", f"inappropriate content → invalid_request_error (msg: {msg[:100]})")
 
         # Input token overflow from ModelScope → overloaded_error (CC auto-compacts)
         # ModelScope format: "Range of input length should be [1, 202745]"
