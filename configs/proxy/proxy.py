@@ -93,13 +93,12 @@ MODEL_MAP = {
 
 # Input token safety limits — read from env vars, fallback to 128000
 # docker-compose passes MODEL_INPUT_TOKEN_SAFETY_GLM51/DSV4P env vars.
-# Previously these env vars were ignored (hardcoded 130000). Fixed to read env.
 # ModelScope GLM-5.1 and DSv4P actual API input token limit is 202745 (confirmed by
-# ModelScope error: "Range of input length should be [1, 202745]"). The previous value
-# 131072 was the model's native context window, but ModelScope's API enforces a
-# different (larger) limit. This affects the OpenAI-format /v1/models endpoint.
-# Anthropic-format model endpoints use MODEL_INPUT_TOKEN_SAFETY (128000) for
-# context_window, which is deliberately lower to trigger CC auto-compaction early.
+# ModelScope error: "Range of input length should be [1, 202745]").
+# MODEL_INPUT_TOKEN_SAFETY is used for reporting context_window to CC via
+# /v1/models endpoint. This tells CC the effective capacity, so CC's built-in
+# auto-compact (settings.json autoCompactWindow) triggers at the right time.
+# Proxy no longer truncates/compacts messages — that's CC's job exclusively.
 MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745, "dsv4p": 202745}
 MODEL_INPUT_TOKEN_SAFETY = {
     "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "128000")),
@@ -677,57 +676,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         litellm_url = upstream["chat_url"]
         metrics["upstream"] = upstream_key
 
-        # ─── Input token pre-check with auto-compact ───
-        # When estimated tokens exceed safety limit, instead of returning 529 overloaded_error
-        # (which causes CC "Repeated 529 Overloaded" crash because CC won't auto-compact when
-        # its internal token count is below contextWindow), we auto-compact the message history
-        # by removing oldest messages and forwarding the truncated request to LiteLLM.
-        # This gives CC a normal 200 response instead of a 529 that triggers the crash loop.
-        # The proxy's estimated tokens (chars/3.5) can overestimate by 2x compared to CC's
-        # internal tokenizer, so a request with est=120K tokens may actually be ~60K tokens
-        # in CC's count — well within CC's contextWindow=110K. CC won't compact because it
-        # thinks there's room, but proxy rejects → 529 → CC retries same content → 3x 529 → crash.
-        # Auto-compact breaks this loop by forcing truncation and returning 200 to CC.
-        model_max_tokens = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
-        model_safety = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, 128000)
-        # R9 fix: Use text_chars (text content only) instead of json_chars for estimation.
-        # json_chars includes JSON structure overhead that inflates estimates by 200-300%,
-        # causing legitimate requests to be incorrectly INPUT-REJECTED → 529 → CC crash.
+        # ─── Input token estimation (metrics only, no proxy-level truncation) ───
+        # Proxy no longer auto-compacts/truncates messages. CC's built-in auto-compact
+        # (triggered by autoCompactWindow in settings.json) handles compression.
+        # Proxy-level truncation caused catastrophic context loss ("completely forgets
+        # everything"). Let CC's native mechanism handle it — same outcome quality-wise
+        # but at least it's CC's own decision, not a silent brutal truncation.
+        # If input truly exceeds ModelScope's 202745 limit, it will fail at ModelScope
+        # and we return invalid_request_error → CC stops (no compression loop, no retry).
         estimated_tokens = int(metrics["total_input_chars"] / CHARS_PER_TOKEN_ESTIMATE)
         estimated_tokens_json = int(metrics["total_input_chars_json"] / CHARS_PER_TOKEN_ESTIMATE)
         metrics["estimated_input_tokens"] = estimated_tokens
         metrics["estimated_input_tokens_json"] = estimated_tokens_json
-        if estimated_tokens > model_safety:
-            _log("INPUT-OVERLIMIT", f"estimated_tokens={estimated_tokens} > safety={model_safety} (json_est={estimated_tokens_json}) → auto-compacting")
-            compact_result = self._auto_compact_messages(oai_body, model_safety, CHARS_PER_TOKEN_ESTIMATE)
-            if compact_result:
-                oai_body = compact_result["body"]
-                metrics["auto_compact_truncated_count"] = compact_result["truncated_count"]
-                metrics["auto_compact_original_est"] = estimated_tokens
-                metrics["auto_compact_original_msgs"] = len(oai_body.get("messages", [])) + compact_result["truncated_count"]
-                new_est = compact_result["new_est"]
-                metrics["auto_compact_new_est"] = new_est
-                metrics["auto_compact_new_msgs"] = len(oai_body.get("messages", []))
-                # Recalculate text chars for the truncated body
-                new_text_chars = _estimate_text_chars(oai_body)
-                metrics["total_input_chars"] = new_text_chars
-                metrics["estimated_input_tokens"] = int(new_text_chars / CHARS_PER_TOKEN_ESTIMATE)
-                _log("AUTO-COMPACT", f"truncated {compact_result['truncated_count']} messages, est {estimated_tokens}→{new_est}, msgs {metrics['auto_compact_original_msgs']}→{metrics['auto_compact_new_msgs']}")
-            else:
-                # Cannot compact (system prompt too large or no messages to remove)
-                # Last resort: return 429 rate_limit_error (NOT 529 overloaded_error)
-                # 429 triggers CC backoff retry, not "Repeated Overloaded" crash
-                _log("INPUT-REJECT-UNCOMPACTABLE", f"estimated_tokens={estimated_tokens} > safety={model_safety}, cannot auto-compact → 429 rate_limit_error")
-                self._send_json(429, {"type": "error", "error": {"type": "rate_limit_error",
-                                 "message": f"Input tokens (~{estimated_tokens}) exceed safe limit ({model_safety}). Please reduce context size."},
-                                 "model": request_model}, extra_headers={"retry-after": "30"})
-                metrics["status"] = 429
-                metrics["error_type"] = "InputExceedsUncompactable"
-                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                _log_metrics(metrics)
-                return
-        elif estimated_tokens > model_max_tokens * 0.8:
-            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} (json_est={estimated_tokens_json}) near model_max={model_max_tokens} (passing through)")
+        if estimated_tokens > 120000:
+            _log("INPUT-WARN", f"estimated_tokens={estimated_tokens} (json_est={estimated_tokens_json}) — large context, CC auto-compact may trigger soon")
 
         # ─── ModelScope force-stream ───
         # ModelScope non-stream responses (both GLM-5.1 and DSv4P) intermittently include
@@ -978,14 +940,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                 _log_metrics(metrics)
 
-# Convert upstream input-token-overflow 400 errors to overloaded_error (529).
-                # When ModelScope returns 400 "exceeds model limit / token limit" OR
-                # "Range of input length should be [1, 202745]", CC treats it as a
-                # client error and stops without retry. Convert to overloaded_error so
-                # CC retries with auto-compaction (the correct recovery strategy).
-                # ModelScope uses two distinct error formats for the same problem:
-                #   1. "exceeds ... token/limit" (quota/context exceeds)
-                #   2. "InternalError.Algo.InvalidParameter: Range of input length should be [1, N]"
+# Convert upstream input-token-overflow 400 errors to invalid_request_error (400).
+                # When ModelScope returns 400 "Range of input length should be [1, 202745]",
+                # the conversation is too long for the backend. Previously we converted to
+                # 529 overloaded_error → CC auto-compact → catastrophic context loss.
+                # Now: invalid_request_error → CC stops immediately. User sees the error
+                # message and can start a new conversation manually. This is better than
+                # CC silently destroying context via auto-compact.
                 # Guard: thinking_budget errors are handled separately by resilience retry.
                 err_lower = json.dumps(error_json).lower()
                 is_input_overflow = (
@@ -998,12 +959,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     and "thinking_budget" not in err_lower
                 )
                 if is_input_overflow:
-                    _log("OVERLOAD-CONV", f"400 input overflow → 529 overloaded_error for CC compaction retry")
+                    _log("INPUT-OVERFLOW", f"400 input overflow → invalid_request_error (CC stops, no compact)")
                     err_msg = json.dumps(error_json)[:500]
-                    # Input overflow needs compaction → retry soon (5s) so CC can compact and retry
-                    self._send_json(529, {"type": "error", "error": {"type": "overloaded_error", "message": err_msg}, "model": request_model}, extra_headers={"retry-after": "5"})
-                    metrics["status"] = 529
-                    metrics["error_type"] = "InputExceedsOverloaded"
+                    self._send_json(400, {"type": "error", "error": {"type": "invalid_request_error",
+                                     "message": f"Input tokens exceed ModelScope limit. Please start a new conversation. Detail: {err_msg}"},
+                                     "model": request_model})
+                    metrics["status"] = 400
+                    metrics["error_type"] = "InputExceedsInvalidRequest"
                     return
 
                 client_status = self._get_upstream_status_for_client(resp_status_final)
@@ -1025,18 +987,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     retry_seconds = 30 if is_quota_exhaustion else 5
                     extra_hdrs = {"retry-after": str(retry_seconds)}
                     _log("RETRY-AFTER", f"429 rate_limit_error → retry-after={retry_seconds}s (quota={is_quota_exhaustion})")
-                # Genuine upstream 529 (overloaded) → ensure error type is overloaded_error
-                # so CC auto-compacts. Without this, _convert_error defaults to api_error,
-                # which gives CC limited retries (2-3) instead of auto-compaction recovery.
+                # Genuine upstream 529 (overloaded) → pass through as api_error (CC retries a few times then stops).
+                # Previously forced overloaded_error to trigger CC auto-compact, but auto-compact
+                # causes catastrophic context loss. Now: let _convert_error produce api_error →
+                # CC retries 2-3 times then stops. User sees error and can start a new conversation.
                 elif client_status == 529:
-                    # Force overloaded_error regardless of what _convert_error produced
-                    err = error_payload.get("error", {})
-                    if err.get("type") != "overloaded_error":
-                        _log("529-FIX", f"upstream 529 had type={err.get('type')} → forcing overloaded_error")
-                        err["type"] = "overloaded_error"
-                        error_payload["error"] = err
                     extra_hdrs = {"retry-after": "5"}
-                    _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (genuine upstream overload)")
+                    _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 
@@ -1500,9 +1457,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
                         upstream_key = MODEL_MAP.get(model_id, model_id)
-                        # Use safety limit (120000) as context_length so CC sees the effective
-                        # context window, not the raw model max (131072). This ensures CC's
-                        # auto-compaction triggers early enough.
+                        # Report ModelScope actual limit as context_length so CC knows
+                        # the backend capacity. CC's settings.json contextWindow controls
+                        # when CC's built-in compact triggers.
                         context_len = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
                         all_models.append({
                             "id": model_id,
@@ -1519,11 +1476,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ─── Anthropic-format /v1/models endpoints ───
     def _anthropic_models_list(self):
         """Return Anthropic-format model list with context_window.
-        Critical for Claude Code auto-compaction: CC uses this context_window
-        to decide when to compact. If CC thinks it has 200K context (hardcoded
-        for known Claude models), it won't compact before our backend limit.
-        Reporting context_window=safety limit (170K) forces CC to compact early enough.
-        With safety=170K and ModelScope limit=202745, there's 32K margin — plenty of room.
+        CC uses this context_window to decide when to trigger built-in auto-compact.
+        Reporting context_window=MODEL_INPUT_TOKEN_SAFETY (120K) tells CC the
+        effective capacity, so CC's auto-compact (settings.json autoCompactWindow=110K)
+        triggers before hitting ModelScope's actual 202745 limit.
         """
         all_models = []
         seen_ids = set()
@@ -1554,12 +1510,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _anthropic_model_detail(self, model_id):
         """Return Anthropic-format model detail for a specific model ID.
-        Reports context_window=safety limit (170K) to ensure CC auto-compaction
-        triggers before the backend's capacity, regardless of model name.
+        Reports context_window=MODEL_INPUT_TOKEN_SAFETY so CC's built-in
+        auto-compact triggers at the right time, before hitting ModelScope limit.
         """
         mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
-        # Use the safety limit as context_window, not the model max (131072)
-        # This ensures CC compacts early enough to stay within the backend's capacity
+        # Use safety limit as context_window so CC compact triggers before backend overflow
         safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
         self._send_json(200, {
             "id": model_id,
@@ -1568,117 +1523,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "created_at": "2024-01-01T00:00:00Z",
             "context_window": safety,
         })
-
-    # ─── Auto-compact messages when input exceeds safety limit ───
-    def _auto_compact_messages(self, oai_body, model_safety, chars_per_token_estimate):
-        """Auto-compact message history when estimated tokens exceed safety limit.
-
-        Instead of returning 529 overloaded_error (which triggers CC "Repeated 529
-        Overloaded" crash because CC won't auto-compact when its internal token count
-        is below contextWindow), we truncate the message history and forward the
-        compacted request to LiteLLM, giving CC a normal 200 response.
-
-        Strategy:
-        1. Preserve system prompt (always keep it)
-        2. Preserve last 5 message groups (recent context is most important for CC)
-        3. Remove oldest messages until est_tokens < safety * 0.85
-        4. Insert a compact notice at the truncation point
-
-        Returns dict with truncated body and stats, or None if compacting is impossible.
-        """
-        messages = oai_body.get("messages", [])
-        if not messages:
-            return None
-
-        # Calculate target: safety * 0.85 (leave 15% margin)
-        target_est = int(model_safety * 0.85)
-
-        # Identify system messages (always keep them)
-        system_indices = []
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "system":
-                system_indices.append(i)
-
-        # Identify the last N message groups to preserve (N=5)
-        # A "group" = consecutive messages of the same role pair (user/assistant/tool)
-        # We want to keep the last 5 user→assistant exchanges
-        non_system_msgs = [msg for msg in messages if msg.get("role") != "system"]
-        preserve_count = min(10, len(non_system_msgs))  # Keep last ~5 exchanges (10 messages)
-        preserve_msgs = non_system_msgs[-preserve_count:] if preserve_count > 0 else []
-
-        # Build new message list: system + compact_notice + preserved recent
-        new_messages = []
-        for i in system_indices:
-            new_messages.append(messages[i])
-
-        # Calculate how many messages were removed
-        original_count = len(messages)
-        removed_count = original_count - len(system_indices) - preserve_count
-
-        if removed_count <= 0:
-            # Nothing to remove — system prompt + preserved messages already fit
-            # This means even with max truncation, we can't get below target
-            # Check if current size fits within safety
-            test_body = dict(oai_body)
-            test_body["messages"] = new_messages + preserve_msgs
-            # R9 fix: Use _estimate_text_chars() instead of len(json.dumps())
-            test_chars = _estimate_text_chars(test_body)
-            test_est = int(test_chars / chars_per_token_estimate)
-            if test_est <= model_safety:
-                # It fits! Return the preserved-only version
-                new_messages = new_messages + preserve_msgs
-            else:
-                # Even minimal messages exceed safety — can't compact
-                return None
-
-        # Add compact notice at the truncation point
-        compact_notice_user = {
-            "role": "user",
-            "content": f"[Auto-compacted: {removed_count} earlier messages removed from {original_count} total. Continuing with recent context.]"
-        }
-        compact_notice_assistant = {
-            "role": "assistant",
-            "content": "Understood. I'll work with the available context and continue the task."
-        }
-        new_messages.extend([compact_notice_user, compact_notice_assistant])
-        new_messages.extend(preserve_msgs)
-
-        # Build the compacted body
-        compacted_body = dict(oai_body)
-        compacted_body["messages"] = new_messages
-
-        # Verify the compacted body fits within safety * 0.85
-        # R9 fix: Use _estimate_text_chars() instead of len(json.dumps())
-        compacted_chars = _estimate_text_chars(compacted_body)
-        compacted_est = int(compacted_chars / chars_per_token_estimate)
-
-        if compacted_est > target_est:
-            # Still too large — try progressively removing more from preserved messages
-            # Remove from the beginning of preserved_msgs until we fit
-            while len(preserve_msgs) > 2 and compacted_est > target_est:
-                preserve_msgs = preserve_msgs[2:]  # Remove 2 messages (one exchange)
-                removed_count += 2
-                new_messages = []
-                for i in system_indices:
-                    new_messages.append(messages[i])
-                compact_notice_user["content"] = f"[Auto-compacted: {removed_count} earlier messages removed from {original_count} total. Continuing with recent context.]"
-                new_messages.extend([compact_notice_user, compact_notice_assistant])
-                new_messages.extend(preserve_msgs)
-                compacted_body["messages"] = new_messages
-                compacted_chars = _estimate_text_chars(compacted_body)
-                compacted_est = int(compacted_chars / chars_per_token_estimate)
-
-            if compacted_est > model_safety:
-                # Still can't fit — system prompt itself might be too large
-                return None
-
-        return {
-            "body": compacted_body,
-            "truncated_count": removed_count,
-            "new_est": compacted_est,
-            "original_msgs": original_count,
-            "new_msgs": len(new_messages),
-        }
 
     # ─── Helpers ───
     def _map_model(self, model_name):
@@ -1692,19 +1536,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         - invalid_request_error → CC stops (client error, won't retry)
         - rate_limit_error → CC retries with backoff
         - api_error → CC retries (server error, recoverable)
-        - overloaded_error → CC retries with auto-compaction
+
+        NO longer using overloaded_error — it triggers CC auto-compact which
+        causes catastrophic context loss ("completely forgets everything").
+        Input overflow now maps to invalid_request_error → CC stops → user
+        starts new conversation manually (better than losing all context).
 
         Mapping strategy:
         - 429 insufficient_quota → rate_limit_error (NOT api_error)
-          Reason: insufficient_quota means ModelScope account quota is genuinely
-          exhausted (token/month limit). With R8 auto-compact, INPUT-REJECT 529s
-          are now auto-compacted (not returned as 529), so the "Repeated 529
-          Overloaded" cascade no longer occurs. rate_limit_error gives CC exponential
-          backoff, which gracefully handles quota exhaustion periods instead of CC
-          failing immediately on api_error with limited retries (2-3 attempts).
-          When all 77 deployments are quota-exhausted, api_error's limited retries
-          quickly exhaust → CC freezes/crashes. rate_limit_error's backoff lets
-          CC wait for quota recovery (daily/monthly reset) without crashing.
+          Reason: quota exhaustion needs CC to wait for recovery (backoff), not
+          fail immediately. rate_limit_error's backoff (5s→10s→20s→40s) gracefully
+          handles quota recovery periods without CC freezing/crashing.
         - 429 RPM rate-limit → rate_limit_error (CC retries with backoff)
           These are temporary RPM throttles that recover in seconds — correct.
         - 401/403 auth → api_error (NOT authentication_error, to prevent CC freeze)
@@ -1713,16 +1555,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
           its own parameter constraints (e.g. thinking_budget > max_completion_tokens).
           This is a server-side compatibility issue, not a client error. CC should
           retry (preflight fix handles the conversion on next attempt).
-        - 400 InvalidParameter "Range of input length" → overloaded_error (NOT api_error)
-          Reason: This is input token overflow. Retrying with the same content never
-          works. CC's auto-compaction truncates conversation history, which is the
-          correct recovery strategy. overloaded_error triggers compaction specifically.
+        - 400 InvalidParameter "Range of input length" → invalid_request_error
+          Reason: Input token overflow. Retrying same content never works. CC
+          auto-compact (triggered by overloaded_error) destroys context entirely.
+          invalid_request_error → CC stops → user starts new conversation.
         - 400 "inappropriate content" → invalid_request_error (NOT api_error)
           Reason: ModelScope content safety filter rejects input as inappropriate.
           This is NOT recoverable by retrying — the same content will always be
-          rejected (content audit is deterministic). CC retries api_error infinitely
-          → infinite loop → CC freezes/crashes. invalid_request_error makes CC
-          stop immediately, which is better than freezing forever.
+          rejected. CC retries api_error infinitely → freeze. invalid_request_error
+          makes CC stop immediately (better than freezing forever).
         - Everything else → api_error (CC retries)
         """
         err = error_json.get("error", error_json)
@@ -1731,11 +1572,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         err_type = "api_error"
 
         # 429 insufficient_quota → rate_limit_error (NOT api_error)
-        # With R8 auto-compact, INPUT-REJECT 529s are auto-compacted → no "Repeated 529
-        # Overloaded" cascade. rate_limit_error gives CC exponential backoff, which
-        # gracefully handles quota exhaustion. When all deployments are quota-exhausted,
-        # api_error's limited retries (2-3) quickly exhaust → CC freezes/crashes.
-        # rate_limit_error's backoff (5s→10s→20s→40s) lets CC wait for quota recovery.
+        # quota exhaustion needs CC to wait for recovery (backoff), not fail immediately.
+        # rate_limit_error's backoff (5s→10s→20s→40s) gracefully handles quota recovery.
         # Check for "insufficient_quota" or "quota" + "exceeded" pattern from ModelScope/Aliyun
         err_code = ""
         if isinstance(err, dict):
@@ -1759,12 +1597,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             err_type = "invalid_request_error"
             _log("CONTENT-MAP", f"inappropriate content → invalid_request_error (msg: {msg[:100]})")
 
-        # Input token overflow from ModelScope → overloaded_error (CC auto-compacts)
+        # Input token overflow from ModelScope → invalid_request_error (CC stops, no compact)
         # ModelScope format: "Range of input length should be [1, 202745]"
-        # Retrying the same oversized content never works — CC must compact first.
+        # Retrying the same oversized content never works. Previously mapped to
+        # overloaded_error → CC auto-compact → catastrophic context loss. Now:
+        # invalid_request_error → CC stops → user sees error, starts new conversation.
         elif ("range of input length" in msg_lower
               or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))):
-            err_type = "overloaded_error"
+            err_type = "invalid_request_error"
         # Intentionally NOT mapping other 400 InvalidParameter to invalid_request_error.
         # CC stops on invalid_request_error, but ModelScope InvalidParameter is a
         # server-side constraint mismatch (e.g. thinking_budget vs max_completion_tokens),
@@ -1775,15 +1615,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _get_upstream_status_for_client(self, upstream_status):
         """Map upstream HTTP status to client-facing status.
 
-        DO NOT convert 429 → 529. Data proves 529 causes CC to show "Repeated 529
-        Overloaded errors" and attempt auto-compaction, which is wrong for RPM rate
-        limits. CC should see 429 + rate_limit_error → retries with backoff (correct
-        behavior for rate limits). Only genuine overloaded/overflow errors should be 529.
-
-        insufficient_quota 429 is also NOT converted to 529 — _convert_error() maps
-        it to rate_limit_error, so CC retries with exponential backoff.
-        With R8 auto-compact, INPUT-REJECT 529s are auto-compacted, so
-        the "Repeated 529 Overloaded" cascade no longer occurs.
+        DO NOT convert 429 → 529. 529 causes CC auto-compact → catastrophic context loss.
+        CC should see 429 + rate_limit_error → retries with backoff (correct for rate limits).
+        Input overflow errors use 400 + invalid_request_error → CC stops (no compact).
         """
         # 429 passes through as-is — _convert_error() maps both types to rate_limit_error
         # RPM 429 → rate_limit_error (CC backoff retry, correct for RPM)

@@ -9,13 +9,13 @@
 ## 架构
 
 ```
-Claude Code → :40001 proxy (格式转换 + metrics + input safety)
+Claude Code → :40001 proxy (格式转换 + metrics)
             → :41001 LiteLLM (glm5.1, 11变体×7keys=77 deployments)
             → :42001 LiteLLM (dsv4p, 11变体×7keys=77 deployments)
             → ModelScope API
 ```
 
-核心原则：**proxy.py 只做格式转换和 metrics logging，LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实现。proxy 不做 retry。**
+核心原则：**proxy.py 只做格式转换和 metrics logging，不做 retry、不做压缩、不做截断。LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实现。压缩完全由 CC 内置 auto-compact 控制。**
 
 ## 不可变更约束（NEVER CHANGE）
 
@@ -56,6 +56,9 @@ Claude Code → :40001 proxy (格式转换 + metrics + input safety)
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 120000 | - | docker-compose.yml env |
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 120000 | - | docker-compose.yml env |
 | CHARS_PER_TOKEN_ESTIMATE | 2.0 | 1.5-6 | docker-compose.yml env |
+| contextWindow | 120000 | - | claude/settings-*.json |
+| autoCompactWindow | 110000 | 90000-120000 | claude/settings-*.json |
+| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 110000 | 90000-120000 | claude/settings-*.json env |
 
 ## 项目文件结构
 
@@ -160,3 +163,5 @@ git push  # 自动走代理
 **删除资源前必须验证其独立价值。** 曾删除11个变体model ID以为是"不支持的混合大小写"，但每个变体有独立的200/id/day额度。删除=删除额度容量。正确流程：观察→测试→验证→决定。
 
 **proxy-level retry增加37%延迟。** 数据证明：有proxy_retry的请求avg=15963ms vs 正常11635ms。proxy只做格式转换，retry由LiteLLM负责。
+
+**proxy auto-compact导致彻底忘记上下文。** proxy截断消息历史（保留最近5组+砍掉其余）→用户完全丢失早期对话。CC内置auto-compact也会丢上下文但至少是CC自己的摘要。更糟的是：三层压缩机制（proxy截断、400→529 overloaded触发CC compact、CC内置compact）互相叠加，复杂且效果差。正确做法：删除proxy层面所有压缩干预，只靠CC内置auto-compact（autoCompactWindow尽量高=110K/120K减少触发频率），如果真的超过ModelScope上限返回invalid_request_error让CC直接停止→用户手动开新对话。
