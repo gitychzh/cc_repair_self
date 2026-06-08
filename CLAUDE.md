@@ -53,12 +53,12 @@ Claude Code → :40001 proxy (格式转换 + metrics)
 | MAX_TOOL_DESC | 2000 | 800-4000 | docker-compose.yml env |
 | MAX_SCHEMA_DESC | 600 | 300-1200 | docker-compose.yml env |
 | PROXY_TIMEOUT | 300 | 120-600 | docker-compose.yml env |
-| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 190000 | 120000-190000 | docker-compose.yml env |
-| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 190000 | 120000-190000 | docker-compose.yml env |
+| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | docker-compose.yml env |
+| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | docker-compose.yml env |
 | CHARS_PER_TOKEN_ESTIMATE | 2.0 | 1.5-6 | docker-compose.yml env |
-| contextWindow | 190000 | 120000-190000 | claude/settings-*.json |
-| autoCompactWindow | 180000 | 90000-180000 | claude/settings-*.json |
-| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 180000 | 90000-180000 | claude/settings-*.json env |
+| contextWindow | 170000 | 120000-190000 | claude/settings-*.json |
+| autoCompactWindow | 150000 | 90000-180000 | claude/settings-*.json |
+| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 150000 | 90000-180000 | claude/settings-*.json env |
 
 ## 项目文件结构
 
