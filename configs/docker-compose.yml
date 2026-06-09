@@ -1,7 +1,7 @@
 # Two-model architecture: 41001 (glm5.1, 256var×7key=1792) + 42001 (dsv4p, 11var×7key=77)
 # + 41003 test (glm5.1, 1000var×7key=7000) — quota exploration, temporary
-# proxy.py (40001/40002) — format conversion + metrics logging + input safety
-# LiteLLM handles all retry/fallback/routing — proxy does NOT retry
+# proxy.py (40001/40002) — format conversion + metrics logging
+# LiteLLM handles all retry/fallback/routing — proxy does NOT retry, compact, or truncate
 #
 # Port assignments: 41001=glm5.1, 42001=dsv4p, 41003=glm5.1-test
 # ulimit nofile: 4096 soft / 65536 hard — prevents fd exhaustion with large deployment counts
@@ -17,9 +17,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
       POSTGRES_MULTIPLE_DATABASES: litellm_glm51,litellm_dsv4p,litellm_glm51_test
+      TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
       - ./postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+      - /etc/localtime:/etc/localtime:ro
     expose:
       - "5432"
     networks:
@@ -40,6 +42,12 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging: &id001
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: '5'
+        tag: container/{{.Name}}
 
   glm5.1_uni41001:
     image: litellm/litellm:v1.87.0
@@ -60,8 +68,10 @@ services:
       MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
       MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
+      TZ: Asia/Shanghai
     volumes:
       - ./litellm-glm51/config.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-glm51:/app/logs
     ports:
       - 41001:4000
@@ -86,6 +96,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    logging: *id001
     command:
       - --config
       - /app/config.yaml
@@ -111,8 +122,10 @@ services:
       MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
       MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
+      TZ: Asia/Shanghai
     volumes:
       - ./litellm-dsv4p/config.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-dsv4p:/app/logs
     ports:
       - 42001:4000
@@ -137,6 +150,7 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    logging: *id001
     command:
       - --config
       - /app/config.yaml
@@ -167,8 +181,10 @@ services:
       MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
       MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
+      TZ: Asia/Shanghai
     volumes:
       - ./litellm-glm51-test/config.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-glm51-test:/app/logs
     ports:
       - 41003:4000
@@ -193,6 +209,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 180s
+    logging: *id001
     command:
       - --config
       - /app/config.yaml
@@ -219,8 +236,10 @@ services:
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
       MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
       LOG_DIR: /app/logs
+      TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy:/app/logs
+      - /etc/localtime:/etc/localtime:ro
     ports:
       - 40001:40001
     networks:
@@ -244,6 +263,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    logging: *id001
 
   auth_to_api_40002:
     build:
@@ -263,8 +283,10 @@ services:
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
       MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
       LOG_DIR: /app/logs
+      TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy-40002:/app/logs
+      - /etc/localtime:/etc/localtime:ro
     ports:
       - 40002:40002
     networks:
@@ -288,6 +310,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    logging: *id001
 
 networks:
   cc-net:

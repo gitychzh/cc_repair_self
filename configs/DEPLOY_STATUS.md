@@ -1,8 +1,8 @@
-# Deploy Status — opc_uname (updated 2026-06-05 R4 — dsv4p R2 config sync + proxy.py inappropriate-content fix sync + 06-05 metrics analysis)
+# Deploy Status — opc_uname (updated 2026-06-09 R5 — R12 config sync + proxy auto-compact removal + context window/compact window adjustment)
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
+CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics logging) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
                                                                      → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
                                                                      → 41001(LiteLLM glm5.1-backup, 256 variants × 7 keys = 1792 deploys) [BACKUP, not routed from 40001]
 ```
@@ -17,8 +17,64 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(L
 - glm5.1_uni41001 :41001 (1792 deployments: 256 variants × 7 keys) [BACKUP] — ulimits nofile=4096
 - dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys) — ulimits nofile=4096
 - glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimits nofile=8192
-- auth_to_api_40001 :40001 (proxy, format conversion + retry-after header + MODEL_MAP + insufficient_quota→rate_limit_error)
-- auth_to_api_40002 :40002 (Codex proxy, same codebase)
+- auth_to_api_40001 :40001 (proxy, format conversion + metrics logging + retry-after headers, NO auto-compact/NO truncation)
+- auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
+
+## opc_uname_r5 Changes (2026-06-09 — R12 config sync + proxy auto-compact removal + context window adjustment)
+
+### CRITICAL: proxy.py auto-compact removed (R12 sync from opc2_uname)
+- **Before**: proxy auto-compacts messages when estimated_tokens > safety (120K) → truncates oldest messages, inserts compact notice → returns 200 to CC. Also has INPUT-REJECT-UNCOMPACTABLE fallback → returns 429 with retry-after=30.
+- **After**: proxy NO longer truncates/compacts messages. If estimated_tokens > 120K, only logs INPUT-WARN. If ModelScope returns 400 "Range of input length should be [1, 202745]", returns invalid_request_error → CC stops (user starts new conversation manually).
+- **Why**: Proxy-level auto-compact caused catastrophic context loss — CC "completely forgets everything" because proxy silently truncates conversation history. Even worse, three compression mechanisms (proxy truncation, 529→overloaded_error triggering CC compact, CC built-in compact) stacked unpredictably. Removing proxy truncation means only CC's built-in auto-compact (controlled by autoCompactWindow) handles compression — same quality outcome but at least CC's own decision.
+- **Evidence**: 47 InputExceedsProxyReject 529 errors on 06-03/06-04 from proxy rejecting requests with est_tokens 110K-182K. These requests likely would have succeeded at ModelScope (limit=202745). After R12 sync, these errors will not recur.
+
+### CRITICAL: MODEL_INPUT_TOKEN_SAFETY 120K→170K (R12 sync)
+- **Before**: MODEL_INPUT_TOKEN_SAFETY=120000 (proxy reported context_window=120K to CC, triggering CC compact too early)
+- **After**: MODEL_INPUT_TOKEN_SAFETY=170000 (proxy reports context_window=170K, giving CC more room before compact triggers)
+- **Why**: ModelScope actual limit=202745. With safety=120K, CC auto-compact triggered at 90K (autoCompactWindow=90K) — only 90K usable context out of 202.7K available capacity = massive waste. With safety=170K and autoCompactWindow=150K, CC uses up to 150K before compacting = 74% capacity utilization (vs 44% previously).
+
+### CRITICAL: contextWindow=120K→170K, autoCompactWindow=90K→150K (R12 sync)
+- **Before**: CC settings contextWindow=120000, autoCompactWindow=90000
+- **After**: CC settings contextWindow=170000, autoCompactWindow=150000, env CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000
+- **Why**: Matches MODEL_INPUT_TOKEN_SAFETY=170K. CC uses contextWindow to decide internal token tracking and autoCompactWindow to trigger compact. With 170K context, CC won't falsely think it's "over capacity" until ~150K tokens = more usable context.
+
+### CRITICAL: Input overflow error mapping changed (R12 sync)
+- **Before**: ModelScope 400 "Range of input length should be [1, 202745]" → proxy converts to 529 overloaded_error → CC retries with auto-compact (catastrophic context loss)
+- **After**: ModelScope 400 "Range of input length should be [1, 202745]" → proxy returns 400 invalid_request_error → CC stops → user starts new conversation manually (better than losing all context)
+- **Why**: Retrying the same oversized content never works. CC's auto-compact triggered by overloaded_error destroys context. invalid_request_error makes CC stop immediately so user can decide to start a new conversation.
+
+### CRITICAL: 529 overloaded_error no longer forced (R12 sync)
+- **Before**: Upstream 529 → proxy forces error type to overloaded_error → CC auto-compact (catastrophic context loss)
+- **After**: Upstream 529 → proxy lets _convert_error produce api_error → CC retries 2-3 times then stops
+- **Why**: Same reasoning as above — no more overloaded_error that triggers CC auto-compact destroying context.
+
+### docker-compose.yml local enhancements preserved
+- TZ: Asia/Shanghai, /etc/localtime mount, json-file logging (max-size=50m, max-file=5) added to all services — these are local-only enhancements not in the repo. Merged back into repo docker-compose.yml.
+
+### Metrics Analysis (06-02 through 06-09, pre-R12 sync)
+
+| Day | Total | Success | Rate | 429 | 529 | 502 | 400 | Avg Latency |
+|-----|-------|---------|------|-----|-----|-----|-----|-------------|
+| 06-02 | 243 | 195 | 80.2% | 23 | 3 | 22 | 0 | ~14s |
+| 06-03 | 1214 | 1022 | 84.2% | 130 | 47 | 14 | 1 | ~14s |
+| 06-04 | 2261 | 1791 | 79.2% | 441 | 0 | 23 | 5 | ~14s |
+| 06-05 | 1558 | 1257 | 80.7% | 244 | 0 | 50 | 7 | ~14s |
+
+**Overall 40001**: 5290 requests, 80.9% success, 838 429 (762 quota + 76 RPM), 50 529 (InputExceedsProxyReject), 109 502
+
+**Key findings (pre-R12)**:
+- 529 InputExceedsProxyReject errors (47 total, 06-03/06-04): proxy rejected requests it estimated as over safety=120K. With R12 removal of auto-compact, these will pass through to ModelScope (which accepts up to 202.7K tokens). Expected improvement: ~1-2% success rate boost.
+- 429 quota errors (762 total, 90.9% of all 429): genuine ModelScope quota exhaustion. Cannot be fixed by config changes.
+- 429 RPM errors (76 total, 9.1%): LiteLLM handles RPM retry/fallback internally.
+
+### Post-deployment verification
+- **proxy.py**: ✅ R12 version deployed (auto-compact removed, INPUT-WARN only, invalid_request_error for overflow)
+- **MODEL_INPUT_TOKEN_SAFETY**: ✅ 170000 (verified docker inspect env)
+- **CC settings**: ✅ contextWindow=170000, autoCompactWindow=150000, env=150000
+- **glm5.1**: ✅ 200 response via proxy → 41003
+- **dsv4p**: ✅ 200 response via proxy → 42001
+- **/v1/models context_window**: ✅ 170000 reported for both models
+- **All 6 containers**: ✅ healthy
 
 ## opc_uname_r4 Changes (2026-06-05 — dsv4p R2 config sync + proxy.py sync + metrics analysis)
 
@@ -167,15 +223,17 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream) → 41003(L
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
 
-## Proxy Changes (Round 1-9)
+## Proxy Changes (Round 1-12)
 - Removed conn_retry — 3% success rate
 - Removed rate_limit_retry — 8% success rate
 - Removed glm→dsv4p FALLBACK — always fails
 - R7: insufficient_quota 429 → api_error
-- R8: Auto-compact INPUT-REJECT messages → 200 response instead of 529
 - R9: INPUT-REJECT estimation fixed — `_estimate_text_chars()` + chars_per_token=2.0
 - R9: insufficient_quota 429 → rate_limit_error (REVERTED R7, exponential backoff better than api_error)
-- R12.3: retry-after=30 header on INPUT-REJECT-UNCOMPACTABLE 429 response
+- R12: **Removed proxy auto-compact entirely** — proxy-level truncation causes catastrophic context loss
+- R12: Input overflow 400 → invalid_request_error (NOT 529 overloaded_error) — CC stops, user starts new conversation
+- R12: 529 → api_error (NOT forced overloaded_error) — CC retries then stops, no auto-compact
+- R12: retry-after headers on 429 (quota=30s, rpm=5s) and 529 (5s)
 
 ## Key Issues
 

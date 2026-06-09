@@ -1,0 +1,69 @@
+{
+  "round": "R5",
+  "date": "2026-06-09",
+  "machine": "opc_uname",
+  "trigger": "R12 config sync from opc2_uname (remote push) \u2014 proxy auto-compact removal + MODEL_INPUT_TOKEN_SAFETY/contextWindow/autoCompactWindow adjustments",
+  "summary": {
+    "total_requests_pre_r12": 5276,
+    "success_rate_pre_r12": "80.8%",
+    "success_count": 4265,
+    "429_count": 838,
+    "429_quota_pct": "90.9%",
+    "429_rpm_pct": "9.1%",
+    "529_count": 50,
+    "529_type": "all InputExceedsProxyReject (proxy auto-compact rejection)",
+    "502_count": 109,
+    "400_count": 13,
+    "avg_duration_ms": 13842,
+    "p50_duration_ms": 10498,
+    "p90_duration_ms": 25341,
+    "p99_duration_ms": 77938,
+    "avg_ttfb_ms": 12521,
+    "model_distribution": {
+      "claude-opus-4-8": 4335,
+      "glm5.1": 863,
+      "dsv4p": 68,
+      "$model": 2,
+      "?": 8
+    }
+  },
+  "R5_changes": {
+    "description": "R12 config sync from opc2_uname \u2014 3 critical changes",
+    "changes": [
+      {
+        "name": "proxy auto-compact removed",
+        "before": "proxy auto-compacts messages when est_tokens > safety, INPUT-REJECT-UNCOMPACTABLE fallback -> 429",
+        "after": "proxy no longer truncates/compacts. INPUT-WARN only logs. ModelScope overflow -> invalid_request_error -> CC stops",
+        "why": "proxy-level truncation causes catastrophic context loss. Three compression mechanisms stacked unpredictably. CC built-in auto-compact is the only mechanism now.",
+        "expected_impact": "eliminate 47 InputExceedsProxyReject 529 errors, +1-2% success rate"
+      },
+      {
+        "name": "MODEL_INPUT_TOKEN_SAFETY 120K->170K",
+        "before": "MODEL_INPUT_TOKEN_SAFETY=120000 (context_window=120K reported to CC)",
+        "after": "MODEL_INPUT_TOKEN_SAFETY=170000 (context_window=170K reported to CC)",
+        "why": "ModelScope limit=202745. With safety=120K, only 90K usable (autoCompactWindow=90K) = 44% capacity. With safety=170K, 150K usable = 74% capacity utilization",
+        "expected_impact": "more usable context before CC auto-compact triggers, fewer premature compactions"
+      },
+      {
+        "name": "contextWindow/autoCompactWindow 120K/90K->170K/150K",
+        "before": "contextWindow=120000, autoCompactWindow=90000, env CLAUDE_CODE_AUTO_COMPACT_WINDOW=90000",
+        "after": "contextWindow=170000, autoCompactWindow=150000, env CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000",
+        "why": "Matches MODEL_INPUT_TOKEN_SAFETY=170K. CC uses contextWindow for internal tracking and autoCompactWindow for trigger threshold",
+        "expected_impact": "CC can use 150K tokens before compacting = 74% of ModelScope capacity (vs 44% before)"
+      }
+    ]
+  },
+  "529_error_analysis": {
+    "total": 50,
+    "all_InputExceedsProxyReject": true,
+    "est_tokens_range": "110070-182466",
+    "chars_range": "275175-456166",
+    "fix": "R12 removes proxy auto-compact entirely \u2014 these errors eliminated"
+  },
+  "429_error_analysis": {
+    "total": 838,
+    "quota_pct": 90.9,
+    "rpm_pct": 9.1,
+    "note": "quota exhaustion cannot be fixed by config changes"
+  }
+}
