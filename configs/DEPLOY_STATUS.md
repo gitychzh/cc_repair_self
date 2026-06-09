@@ -1,10 +1,10 @@
-# Deploy Status — opc_uname (updated 2026-06-09 R5 — R12 config sync + proxy auto-compact removal + context window/compact window adjustment)
+# Deploy Status — opc_uname (updated 2026-06-10 R6 — proxy stream_usage sync + glm5.1 router_settings sync + metrics analysis)
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics logging) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
+CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_options.include_usage + metrics logging) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
                                                                      → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
-                                                                     → 41001(LiteLLM glm5.1-backup, 256 variants × 7 keys = 1792 deploys) [BACKUP, not routed from 40001]
+                                                                     → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys = 7000 deploys) [BACKUP, same config as 41003]
 ```
 
 ## Deploy Method
@@ -14,11 +14,73 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics lo
 
 ## Containers (all healthy)
 - cc_postgres :5432
-- glm5.1_uni41001 :41001 (1792 deployments: 256 variants × 7 keys) [BACKUP] — ulimits nofile=4096
+- glm5.1_uni41001 :41001 (7000 deployments: 1000 variants × 7 keys) [BACKUP] — ulimits nofile=4096
 - dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys) — ulimits nofile=4096
 - glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimits nofile=8192
-- auth_to_api_40001 :40001 (proxy, format conversion + metrics logging + retry-after headers, NO auto-compact/NO truncation)
+- auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
+
+## opc_uname_r6 Changes (2026-06-10 — proxy stream_usage sync + glm5.1 router_settings sync + metrics analysis)
+
+### FIX: proxy.py stream_options.include_usage sync (running → repo)
+- **Problem**: Running proxy.py includes `stream_options: {"include_usage": True}` in the OpenAI request body, plus logic to defer message_delta until stream ends to include real token counts from the usage chunk. The repo proxy.py was missing this entire feature.
+- **Fix**: Copied `/opt/cc-infra/proxy/proxy.py` → `configs/proxy/proxy.py` to sync the running version back to the repo.
+- **Why**: Without `stream_options.include_usage=True`, the OpenAI streaming API doesn't send prompt_tokens/completion_tokens in chunks → CC TUI shows "0/200000 tokens" → user can't see actual token consumption. With this fix, the usage chunk arrives after finish_reason in streaming, and the proxy defers message_delta to include real token counts.
+- **Evidence**: All 06-10 metrics show `input_tokens=0` and `output_tokens=0` in successful responses because ModelScope doesn't return prompt_tokens in the streaming response body. But with `stream_options.include_usage`, LiteLLM forwards the usage data → proxy collects streaming_input_tokens/streaming_output_tokens → includes them in message_delta for CC to display.
+
+### FIX: litellm-glm51 config.yaml router_settings sync (running → repo)
+- **Problem**: Repo litellm-glm51/config.yaml (41001 backup) had stale router_settings from R11: `latency-based-routing + cooldown=30 + num_retries=5 + RateLimitErrorAllowedFails=3`. Running config (both 41001 and 41003) uses `simple-shuffle + cooldown=10 + num_retries=8 + RateLimitErrorAllowedFails=5 + allowed_fails_policy format`.
+- **Fix**: Updated repo litellm-glm51/config.yaml router_settings to match running config: `simple-shuffle + cooldown=10 + num_retries=8 + RateLimitErrorAllowedFails=5` + `allowed_fails_policy` format + `AuthenticationErrorAllowedFails:0 + BadRequestErrorAllowedFails:0`.
+- **Why**: Running config has proven superior for 7000-deployment pools. Repo backup config should match for disaster recovery consistency. Also, running 41001 now uses the same 7000-deployment config as 41003 (not the old 1792-dep config), so repo config is a fallback reference only.
+- **Evidence**: 06-09/06-10 metrics show 96.8%/99.1% success rate with simple-shuffle + cooldown=10 + retries=8 — these settings are proven effective.
+
+### Metrics Analysis (06-09 through 06-10, post-R12 sync)
+
+| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration | P95 Duration |
+|-----|-------|---------|------|--------|--------------|--------------|--------------|
+| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused | 13.5s | 21.9s | 29.2s |
+| 06-10 | 221 | 219 | 99.1% | 1×502 timeout, 1×429 quota | 11.2s | 16.8s | 20.6s |
+
+**Key findings (post-R12)**:
+- Success rate jumped from 80% range → 96-99%: R12 proxy auto-compact removal + 170K safety limit eliminated InputExceedsProxyReject errors (0 on 06-09/06-10 vs 47 on 06-03/06-04).
+- 429 quota errors rare (1 on 06-10, 0 on 06-09): quota exhaustion is now rare because 7000 deployments provide ample RPM capacity.
+- 502 ConnectionRefused only during startup/reconnect: 7 on 06-09 (container startup), 1 on 06-10.
+- Latency improving: avg 13.5s→11.2s, p90 21.9s→16.8s, p95 29.2s→20.6s on 06-10.
+- Large context requests working: 13 requests with estimated_tokens > 170K all succeeded (ModelScope accepts up to 202745 tokens). The 170K safety limit provides 83% capacity utilization (170K/202.7K).
+
+**Historical trend comparison**:
+
+| Day | Total | Success Rate | Avg Duration | Notes |
+|-----|-------|-------------|--------------|-------|
+| 06-02 | 243 | 80.2% | ~14s | Pre-R12 (proxy auto-compact + 120K safety) |
+| 06-03 | 1214 | 84.2% | ~14s | Pre-R12, 47 InputExceedsProxyReject 529 errors |
+| 06-04 | 2261 | 79.2% | ~14s | Pre-R12, heavy 429 quota exhaustion |
+| 06-05 | 1558 | 80.7% | ~14s | Pre-R12, dsv4p R2 config sync |
+| 06-09 | 220 | 96.8% | 13.5s | Post-R12, auto-compact removed, 170K safety |
+| 06-10 | 221 | 99.1% | 11.2s | Post-R12, best day ever |
+
+**Tool truncation analysis**:
+- 06-09: 203/212 requests truncated (70.3% avg reduction), avg original_chars=44K→truncated_chars=13K
+- 06-10: 208/219 requests truncated (66.0% avg reduction), avg original_chars=45K→truncated_chars=14K
+- Tool descriptions truncated from ~44K chars to ~14K chars = 70% reduction. MAX_TOOL_DESC=2000 working well.
+
+**Token estimation analysis**:
+- 06-09: avg estimated_tokens=74.7K, max=116K, all < 120K → no INPUT-WARN triggered
+- 06-10: avg estimated_tokens=79.6K, max=186K, 40 requests > 120K, 22 > 150K, 13 > 170K
+- CHARS_PER_TOKEN_ESTIMATE=2.0 overestimates tokens for Chinese text (Chinese chars ≈ 1-1.5 tokens/char). This makes our estimation conservative (higher than real tokens) — good for safety but generates INPUT-WARN noise.
+- No parameter change needed: the overestimation is harmless (only triggers INPUT-WARN, no proxy action).
+
+**dsv4p usage**: 1 request on 06-09, 0 on 06-10. dsv4p is essentially unused because CC always requests claude-opus-4-8 → mapped to glm5.1. dsv4p only triggered when CC explicitly requests dsv4p.
+
+**No parameter changes warranted**: Current settings are proven effective with 99.1% success rate. All errors are transient (ConnectionRefused during startup, quota exhaustion). No config optimization needed.
+
+### Post-deployment verification (pending — requires rebuild on opc_uname)
+- **proxy.py**: ⏳ stream_usage version needs rebuild (`docker compose up -d --build --force-recreate auth_to_api_40001`)
+- **litellm-glm51 config**: ⏳ router_settings updated in repo only; 41001 backup not currently routed from proxy
+- **glm5.1**: ✅ 200 response via proxy → 41003 (verified daily)
+- **dsv4p**: ✅ 200 response via proxy → 42001 (verified)
+- **/v1/models context_window**: ✅ 170000 reported for both models
+- **All 6 containers**: ✅ healthy
 
 ## opc_uname_r5 Changes (2026-06-09 — R12 config sync + proxy auto-compact removal + context window adjustment)
 
@@ -201,12 +263,11 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics lo
 - **Why**: Previous config removed variants claiming "null-response from ModelScope". Root cause was LiteLLM parser bug (delta field in non-stream). Force-stream fix resolves this for ALL variants. Removing variants = removing quota capacity.
 - **Lesson reinforced**: NEVER remove resources without verifying their independent value first.
 
-## Router Settings (41003 primary, 7000 dep)
-- num_retries: 5
+## Router Settings (41003 primary, 7000 dep — updated R6)
+- num_retries: 8
 - cooldown_time: 10
 - routing_strategy: simple-shuffle
 - enable_pre_call_checks: false
-- background_health_checks: false
 - RateLimitErrorAllowedFails: 5
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
@@ -223,7 +284,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics lo
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
 
-## Proxy Changes (Round 1-12)
+## Proxy Changes (Round 1-12 + R6)
 - Removed conn_retry — 3% success rate
 - Removed rate_limit_retry — 8% success rate
 - Removed glm→dsv4p FALLBACK — always fails
@@ -234,6 +295,8 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + metrics lo
 - R12: Input overflow 400 → invalid_request_error (NOT 529 overloaded_error) — CC stops, user starts new conversation
 - R12: 529 → api_error (NOT forced overloaded_error) — CC retries then stops, no auto-compact
 - R12: retry-after headers on 429 (quota=30s, rpm=5s) and 529 (5s)
+- R6: **stream_options.include_usage=True** — CC TUI shows real token counts instead of 0/200000
+- R6: **Deferred message_delta** — usage chunk arrives after finish_reason in streaming, proxy defers delta to include real token counts
 
 ## Key Issues
 

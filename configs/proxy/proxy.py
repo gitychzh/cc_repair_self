@@ -419,6 +419,9 @@ def anth_to_openai(body, target_model=None):
         "model": model,
         "messages": oai_messages,
         "stream": body.get("stream", False),
+        # Request usage data in streaming chunks so we can report real token counts
+        # to Claude Code CLI (otherwise TUI shows 0/200000 tokens)
+        "stream_options": {"include_usage": True},
     }
     # Anthropic uses max_tokens for output limit; newer versions also accept max_completion_tokens
     # OpenAI uses max_completion_tokens (new) or max_tokens (legacy) for output limit
@@ -1057,9 +1060,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         next_block_idx = 0
         # Track active content blocks by type to emit content_block_stop at transitions
         active_block_type = None  # "thinking", "text", or "tool_use"
+        # With stream_options.include_usage=True, litellm sends usage in a SEPARATE chunk
+        # (after the finish_reason chunk), so we must collect it independently.
+        streaming_input_tokens = 0
+        streaming_output_tokens = 0
+        # Defer message_delta until stream ends so we can include real token counts
+        # from the usage chunk (which arrives AFTER finish_reason in OpenAI streaming format).
+        pending_stop_reason = None
 
-        def _emit_message_start(msg_id=None):
-            """Helper to emit message_start event."""
+        def _emit_message_start(msg_id=None, input_tokens_est=0):
+            """Helper to emit message_start event.
+            input_tokens_est: estimated input tokens from request content analysis.
+            Since OpenAI streaming doesn't provide prompt_tokens until the final chunk,
+            we use the proxy's own estimation for input_tokens in message_start.
+            Claude Code SDK accumulates message_start.usage + message_delta.usage.
+            """
             nonlocal message_start_sent
             self._send_sse("message_start", {
                 "type": "message_start",
@@ -1068,27 +1083,44 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "type": "message", "role": "assistant",
                     "model": request_model, "content": [],
                     "stop_reason": None, "stop_sequence": None,
-                    "usage": {"input_tokens": 0, "output_tokens": 0,
+                    "usage": {"input_tokens": input_tokens_est, "output_tokens": 0,
                               "cache_creation_input_tokens": 0,
                               "cache_read_input_tokens": 0},
                 },
             })
             message_start_sent = True
 
-        def _emit_graceful_end(stop_reason="end_turn", output_tokens=0):
-            """Close any active blocks, emit message_delta + message_stop."""
-            nonlocal message_start_sent, message_delta_sent, active_block_type
+        def _emit_graceful_end(stop_reason="end_turn", output_tokens=0, input_tokens_real=0):
+            """Close any active blocks, emit message_delta + message_stop.
+            Uses streaming_input_tokens/streaming_output_tokens collected from
+            the usage chunk (which arrives after finish_reason in OpenAI streaming).
+            If those are 0, falls back to provided output_tokens/input_tokens_real.
+            """
+            nonlocal message_start_sent, message_delta_sent, active_block_type, pending_stop_reason
             if active_block_type is not None:
                 self._send_sse("content_block_stop",
                                {"type": "content_block_stop", "index": next_block_idx - 1})
                 active_block_type = None
             if not message_start_sent:
-                _emit_message_start()
+                _emit_message_start(input_tokens_est=metrics.get("estimated_input_tokens", 0))
             if not message_delta_sent:
+                # Use the best available token counts:
+                # 1. streaming_*_tokens from the usage chunk (most accurate)
+                # 2. Fall back to parameters (for error cases)
+                # 3. Fall back to metrics dict
+                real_output = streaming_output_tokens or output_tokens or metrics.get("output_tokens", 0)
+                real_input = streaming_input_tokens or input_tokens_real or metrics.get("input_tokens", 0)
+                metrics["output_tokens"] = real_output
+                metrics["input_tokens"] = real_input
+                # Use pending_stop_reason if finish_reason was already received
+                final_stop = pending_stop_reason or stop_reason
+                usage_delta = {"output_tokens": real_output}
+                if real_input > 0:
+                    usage_delta["input_tokens"] = real_input
                 self._send_sse("message_delta", {
                     "type": "message_delta",
-                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                    "usage": {"output_tokens": output_tokens},
+                    "delta": {"stop_reason": final_stop, "stop_sequence": None},
+                    "usage": usage_delta,
                 })
                 message_delta_sent = True
             self._send_sse("message_stop", {"type": "message_stop"})
@@ -1138,9 +1170,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                     finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
+                    # ── Collect usage from streaming chunks ──
+                    # With stream_options.include_usage=True, litellm sends usage data in
+                    # a SEPARATE final chunk (after the finish_reason chunk).
+                    # We must collect it here regardless of finish_reason.
+                    chunk_usage = chunk_data.get("usage", {})
+                    if chunk_usage:
+                        pt = chunk_usage.get("prompt_tokens", 0)
+                        ct = chunk_usage.get("completion_tokens", 0)
+                        if pt > 0:
+                            streaming_input_tokens = pt
+                            metrics["input_tokens"] = pt
+                        if ct > 0:
+                            streaming_output_tokens = ct
+                            metrics["output_tokens"] = ct
+
                     # Emit message_start on first real content
                     if not message_start_sent:
-                        _emit_message_start(chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"))
+                        _emit_message_start(chunk_data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
+                                           input_tokens_est=metrics.get("estimated_input_tokens", 0))
 
                     # Record TTFB on first meaningful delta
                     if not ttfb_recorded and (delta.get("content") or delta.get("reasoning_content") or delta.get("tool_calls")):
@@ -1221,6 +1269,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             })
 
                     # ── Finish ──
+                    # With stream_options.include_usage=True, the usage chunk arrives AFTER
+                    # the finish_reason chunk in OpenAI streaming format. So we must NOT send
+                    # message_delta here — we save stop_reason and let _emit_graceful_end
+                    # (called at stream end / [DONE]) send it with real token counts.
                     if finish_reason:
                         # Close the last active content block
                         if active_block_type is not None:
@@ -1232,16 +1284,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             stop_reason = "max_tokens"
                         elif finish_reason == "tool_calls":
                             stop_reason = "tool_use"
+                        pending_stop_reason = stop_reason
                         metrics["finish_reason"] = finish_reason
-                        chunk_usage = chunk_data.get("usage", {})
-                        metrics["output_tokens"] = chunk_usage.get("completion_tokens", 0) or metrics.get("output_tokens", 0)
-                        metrics["input_tokens"] = chunk_usage.get("prompt_tokens", 0) or metrics.get("input_tokens", 0)
-                        self._send_sse("message_delta", {
-                            "type": "message_delta",
-                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                            "usage": {"output_tokens": chunk_usage.get("completion_tokens", 0) or 0},
-                        })
-                        message_delta_sent = True
 
         except (http.client.RemoteDisconnected, socket.timeout, ConnectionResetError,
                 OSError, http.client.IncompleteRead) as e:

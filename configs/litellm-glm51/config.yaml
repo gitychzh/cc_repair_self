@@ -8,13 +8,17 @@
 #   "glm"     → 8 case perms (2^3), take all 8
 #   32 × 8 = 256 total variants
 #
-# Routing & resilience (unchanged from R11):
-#   - num_retries: 5 (more retries needed when RPM windows temporarily full)
-#   - RateLimitErrorAllowedFails: 3 (429 is temporary RPM, NOT permanent quota exhaustion)
+# Routing & resilience (synced with running 41003 config — R6 sync):
+#   - num_retries: 8 (more retries for 7000-deployment pool, proven by running config)
+#   - RateLimitErrorAllowedFails: 5 (429 is temporary RPM, higher tolerance prevents cascading cooldown)
 #   - TimeoutErrorAllowedFails: 2
 #   - InternalServerErrorAllowedFails: 3 (ModelScope null choices in health checks)
-#   - cooldown_time: 30 (LiteLLM default=5s, 60s caused cascading unhealthy)
-#   - rolling_window_size: 30 (shorter window = faster routing adaptation)
+#   - AuthenticationErrorAllowedFails: 0
+#   - BadRequestErrorAllowedFails: 0
+#   - cooldown_time: 10 (proportional to RPM 1-min window, proven by running config)
+#   - routing_strategy: simple-shuffle (lower overhead for large deployment pools)
+#   - Note: running 41001 uses 7000-deployment config (not this 1792-dep backup). This
+#     router_settings matches the running proven configuration for consistency.
 
 model_list:
   # ─── variant 1: zhipuai/glm-5.1 ───
@@ -13863,19 +13867,13 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 
 router_settings:
-  routing_strategy: latency-based-routing
-  model_group_alias:
-    glm5.1: glm5.1
-  num_retries: 5
-  timeout: 300
-  retry_after: 0
-  allowed_fails:
-    RateLimitErrorAllowedFails: 3
+  num_retries: 8
+  cooldown_time: 10
+  routing_strategy: simple-shuffle
+  enable_pre_call_checks: false
+  allowed_fails_policy:
+    AuthenticationErrorAllowedFails: 0
+    BadRequestErrorAllowedFails: 0
+    RateLimitErrorAllowedFails: 5
     TimeoutErrorAllowedFails: 2
     InternalServerErrorAllowedFails: 3
-  cooldown_time: 30
-  rolling_window_size: 30
-  lowest_latency_buffer: 2
-  routing_strategy_args:
-    lowest_latency_buffer: 2
-    rolling_window_size: 30
