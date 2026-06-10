@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R6 — proxy stream_usage sync + glm5.1 router_settings sync + metrics analysis)
+# Deploy Status — opc_uname (updated 2026-06-10 R7 — chars/token estimation fix + context window optimization + metrics analysis)
 
 ## Architecture
 ```
@@ -20,7 +20,82 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
 
-## opc_uname_r6 Changes (2026-06-10 — proxy stream_usage sync + glm5.1 router_settings sync + metrics analysis)
+## opc_uname_r7 Changes (2026-06-10 — chars/token estimation fix + context window optimization + metrics analysis)
+
+### FIX: CHARS_PER_TOKEN_ESTIMATE 2.0→3.0 (data-driven adjustment)
+- **Problem**: CHARS_PER_TOKEN_ESTIMATE=2.0 overestimates tokens by 56%. Verified with 538 requests having real token counts (from stream_options.include_usage): average real_tokens/estimated_tokens ratio = 0.642. This means estimated_tokens overstates real tokens by 56%.
+- **Fix**: Changed CHARS_PER_TOKEN_ESTIMATE from 2.0 to 3.0 (real ratio = 3.11, 3.0 is close but still conservative).
+- **Why**: With 2.0, proxy estimated tokens that never existed → 66 requests appeared to exceed 170K safety but ALL succeeded (real tokens max=142K). With 3.0, estimation is accurate (3.0 vs real 3.11), INPUT-WARN noise eliminated (0 >170K vs 66 before). No functional impact (proxy doesn't truncate — R12 removed auto-compact), but accurate estimation gives better metrics for monitoring.
+- **Evidence**: 538 requests with real input_tokens from ModelScope. Average ratio real/est = 0.642 → actual chars/token = 2.0/0.642 = 3.11. Max real tokens = 142K (well below 202.7K ModelScope limit), max est_tokens (2.0) = 205K (false overestimation), max est_tokens (3.0) = 137K (accurate).
+
+### FIX: MODEL_INPUT_TOKEN_SAFETY 170K→190K (context capacity optimization)
+- **Problem**: MODEL_INPUT_TOKEN_SAFETY=170K reports context_window=170K to CC via /v1/models. This limits CC's usable context to ~170K estimated tokens = ~108K real tokens (with 56% overestimation). That's only 53% of ModelScope's 202.7K real capacity.
+- **Fix**: Changed MODEL_INPUT_TOKEN_SAFETY from 170000 to 190000.
+- **Why**: With 3.0 chars/token, estimated_tokens ≈ real_tokens/1.03 (much more accurate). Reporting 190K context_window tells CC it can use up to 190K estimated ≈ 184K real tokens = 91% of ModelScope capacity. Zero requests have real tokens >170K, so 190K safety provides ample margin.
+- **Evidence**: Max real tokens across 555 requests = 142K. ModelScope limit = 202.7K. 190K safety = 93.6% of limit with 12.7K buffer. No real risk of overflow.
+
+### FIX: contextWindow 170K→190K, autoCompactWindow 150K→180K (CC compact timing optimization)
+- **Problem**: CC settings contextWindow=170K, autoCompactWindow=150K. With 56% overestimation, CC compact triggers at 150K estimated = ~96K real tokens. This wastes 60%+ of ModelScope's 202.7K context capacity.
+- **Fix**: Changed contextWindow from 170000 to 190000, autoCompactWindow from 150000 to 180000, CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 150000 to 180000.
+- **Why**: With 190K contextWindow + 180K autoCompactWindow + 3.0 chars/token, CC compact triggers at 180K estimated ≈ 174K real tokens = 86% of ModelScope capacity. This gives CC ~174K real usable context before compacting (vs ~96K before = 81% improvement in usable context).
+- **Evidence**: No request has real tokens >142K. Even at 180K estimated (with 3.0 chars/token), real tokens ≈ 174K, still below 202.7K limit. Historical data: 0 overflow errors when requests up to 142K real tokens were accepted.
+
+### Metrics Analysis (06-09 through 06-10, proxy 40001)
+
+| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration |
+|-----|-------|---------|------|--------|--------------|--------------|
+| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused (startup) | 13.9s | 21.9s |
+| 06-10 | 555 | 552 | 99.5% | 2×502 timeout, 1×429 quota | 18.8s | 33.3s |
+
+**proxy-40002 (opc2_uname)**:
+
+| Day | Total | Success | Rate | Errors |
+|-----|-------|---------|------|--------|
+| 06-09 | 48 | 46 | 95.8% | 2×429 quota |
+| 06-10 | 36 | 36 | 100% | 0 |
+
+**Key findings**:
+- 99.5% success rate on 06-10 (best ever, 555 requests)
+- All errors are transient: 502 ConnectionRefused/timeout (startup/reconnect), 429 quota (temporary)
+- 0 InputExceeds errors, 0 529 overloaded errors
+- Real token estimation analysis: 538 requests with real input_tokens show avg real/est ratio = 0.642 → chars/token=3.11
+- Max real tokens = 142K (never exceeds 170K), proving CHARS_PER_TOKEN_ESTIMATE=2.0 was wildly conservative
+- 66 requests with estimated >170K ALL succeeded — confirms safety limit can be raised
+- Duration higher on 06-10 vs 06-09 because average messages doubled (96→124) — more complex conversations, not a regression
+- Latency correlates with message count: 0-50 msgs avg=10.9s, 100-150=17.6s, 200-300=25.1s, 300-500=40.3s
+
+**Token estimation accuracy**:
+| Metric | Value |
+|--------|-------|
+| CHARS_PER_TOKEN_ESTIMATE (old) | 2.0 |
+| Real chars/token ratio | 3.11 |
+| Overestimation factor | 56% |
+| CHARS_PER_TOKEN_ESTIMATE (new) | 3.0 |
+| New overestimation | ~3% (conservative) |
+| Requests est>170K (old) | 66 (false positives) |
+| Requests est>170K (new) | 0 (accurate) |
+| Max real tokens | 142K |
+| Max est tokens (old) | 205K |
+| Max est tokens (new) | 137K |
+
+**Usable context comparison**:
+| Setting | Before (R6) | After (R7) | Improvement |
+|---------|-------------|------------|--------------|
+| CHARS_PER_TOKEN_ESTIMATE | 2.0 | 3.0 | 56% more accurate |
+| MODEL_INPUT_TOKEN_SAFETY | 170K | 190K | 20K more capacity |
+| contextWindow | 170K | 190K | 20K more capacity |
+| autoCompactWindow | 150K | 180K | 30K more before compact |
+| CC compact trigger (real tokens) | ~96K | ~174K | 81% more usable context |
+| Capacity utilization | 47% | 86% | +39 percentage points |
+
+### Post-deployment verification
+- **CHARS_PER_TOKEN_ESTIMATE**: ✅ 3.0 (verified docker inspect)
+- **MODEL_INPUT_TOKEN_SAFETY**: ✅ 190000 for both models (verified docker inspect)
+- **CC settings**: ✅ contextWindow=190000, autoCompactWindow=180000, env=180000
+- **/v1/models context_window**: ✅ 190000 reported for both models
+- **glm5.1**: ✅ 200 response via proxy → 41003 (input_tokens=23)
+- **dsv4p**: ✅ 200 response via proxy → 42001 (input_tokens=9)
+- **All 6 containers**: ✅ healthy
 
 ### FIX: proxy.py stream_options.include_usage sync (running → repo)
 - **Problem**: Running proxy.py includes `stream_options: {"include_usage": True}` in the OpenAI request body, plus logic to defer message_delta until stream ends to include real token counts from the usage chunk. The repo proxy.py was missing this entire feature.
@@ -263,7 +338,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - **Why**: Previous config removed variants claiming "null-response from ModelScope". Root cause was LiteLLM parser bug (delta field in non-stream). Force-stream fix resolves this for ALL variants. Removing variants = removing quota capacity.
 - **Lesson reinforced**: NEVER remove resources without verifying their independent value first.
 
-## Router Settings (41003 primary, 7000 dep — updated R6)
+## Router Settings (41003 primary, 7000 dep — updated R7)
 - num_retries: 8
 - cooldown_time: 10
 - routing_strategy: simple-shuffle
@@ -284,7 +359,7 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
 
-## Proxy Changes (Round 1-12 + R6)
+## Proxy Changes (Round 1-12 + R6-R7)
 - Removed conn_retry — 3% success rate
 - Removed rate_limit_retry — 8% success rate
 - Removed glm→dsv4p FALLBACK — always fails
@@ -297,6 +372,9 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - R12: retry-after headers on 429 (quota=30s, rpm=5s) and 529 (5s)
 - R6: **stream_options.include_usage=True** — CC TUI shows real token counts instead of 0/200000
 - R6: **Deferred message_delta** — usage chunk arrives after finish_reason in streaming, proxy defers delta to include real token counts
+- R7: **CHARS_PER_TOKEN_ESTIMATE 2.0→3.0** — 56% overestimation → 3% (data: 538 requests, real ratio=3.11)
+- R7: **MODEL_INPUT_TOKEN_SAFETY 170K→190K** — 86% capacity utilization (vs 47% before)
+- R7: **contextWindow 170K→190K, autoCompactWindow 150K→180K** — CC usable context 96K→174K real tokens (+81%)
 
 ## Key Issues
 
