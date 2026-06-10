@@ -33,6 +33,11 @@ sleep 1
 # Start Claude Code in screen session
 # Use full path for claude binary — screen's bash -c runs non-interactive shell,
 # which doesn't source .bashrc, so PATH won't include ~/.npm-global/bin.
+# R13 fix: CC v2.1.170+ startup connectivity check requires shell env vars.
+# screen's bash -c is non-interactive → doesn't source .bashrc.
+# But .bashrc now sets env vars BEFORE non-interactive return, so sourcing
+# .bashrc from login shell (.profile) ensures env vars are available.
+# For screen sessions, we use bash --login to ensure .profile is sourced.
 CLAUDE_BIN="$HOME/.npm-global/bin/claude"
 if [ ! -x "$CLAUDE_BIN" ]; then
   echo "  ERROR: claude binary not found at $CLAUDE_BIN"
@@ -51,7 +56,10 @@ if [ $# -gt 0 ]; then
   RESUME_ARG="--resume $1"
 fi
 
-screen -dmS claude bash -c "${CLAUDE_BIN} --permission-mode bypassPermissions ${RESUME_ARG} 2>&1 | tee ${PROJECT_DIR}/claude_output.log"
+# Use bash --login so .profile is sourced → .bashrc sourced → env vars available
+# This ensures ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY etc
+# are set before CC's startup connectivity check runs.
+screen -dmS claude bash --login -c "${CLAUDE_BIN} --permission-mode bypassPermissions ${RESUME_ARG} 2>&1 | tee ${PROJECT_DIR}/claude_output.log"
 
 sleep 3
 

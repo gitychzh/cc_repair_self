@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R8 — metrics analysis + overhead deep dive + no parameter changes needed)
+# Deploy Status — opc_uname (updated 2026-06-10 R14 — R13 env vars sync + shell env vars fix for CC v2.1.170 startup connectivity check + metrics analysis)
 
 ## Architecture
 ```
@@ -20,7 +20,41 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
 
-## opc_uname_r8 Analysis (2026-06-10 — metrics deep dive + overhead investigation + no parameter changes)
+## opc_uname_r14 Changes (2026-06-10 — R13 env vars sync + shell env vars fix + metrics analysis)
+
+### FIX: R13 CC v2.1.170 startup connectivity check — shell env vars (synced from opc2_uname)
+- **Problem**: CC v2.1.170+ startup connectivity check connects to api.anthropic.com using **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json env vars. settings.json env vars only take effect AFTER startup check passes. Without shell env vars, CC tries api.anthropic.com → 401/403 → ERR_BAD_REQUEST → refuses to start.
+- **Fix (from opc2_uname R13)**: Added HTTPS_PROXY, HTTP_PROXY, NO_PROXY to settings-opc_uname.json. Port 7880 = mihomo mixed-port on opc_uname (verified: mihomo running, `curl -x http://127.0.0.1:7880 https://www.google.com` returns 200).
+- **Why**: Without HTTPS_PROXY in settings.json, CC's internal tools (WebFetch, WebSearch) can't reach external sites. Without HTTPS_PROXY in shell env, CC startup check can't pass if it needs to reach api.anthropic.com.
+- **Evidence**: R13 commit afb9c9d from opc2_uname — discovered CC v2.1.170 behavior change, added proxy vars to settings.json.
+
+### FIX: Shell env vars for CC startup — .bashrc + .profile + restart_claude.sh (local)
+- **Problem**: On opc_uname, ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY were in shell env but NOT in any config file (not in .bashrc, .profile, /etc/environment). They were set by the current CC process but not persisted. `restart_claude.sh` uses `screen -dmS claude bash -c` (non-interactive shell → doesn't source .bashrc → no env vars → CC startup check fails). Also, `.bashrc` line 125 had `unset HTTP_PROXY HTTPS_PROXY` which would clear any proxy vars.
+- **Fix**: Three-layer shell env vars persistence (as documented in R13):
+  1. **.bashrc**: Added ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY, HTTP_PROXY, NO_PROXY **before** the non-interactive return check. Changed `unset HTTP_PROXY HTTPS_PROXY` to only unset lowercase `http_proxy https_proxy all_proxy` (preserve uppercase for CC).
+  2. **.profile**: Added same env vars for login shells (SSH login, systemd user services).
+  3. **restart_claude.sh**: Changed `bash -c` to `bash --login -c` so .profile is sourced → env vars available for CC startup check.
+- **Why**: CC v2.1.170 uses shell env vars for startup connectivity check. Without persistent shell env vars, CC won't start after a restart. The three-layer approach (.bashrc + .profile + script) ensures env vars survive all shell types (interactive, login, non-interactive via screen).
+- **Evidence**: `bash -c` (non-interactive) now has env vars: `ANTHROPIC_BASE_URL=http://127.0.0.1:40001 HTTPS_PROXY=http://127.0.0.1:7880`. `bash --login -c` also works. CC connectivity test passes via local proxy.
+
+### Metrics Analysis (06-10, 806 total requests)
+
+| Day | Total | Success | Rate | Errors | Post-R7 |
+|-----|-------|---------|------|--------|---------|
+| 06-10 | 806 | 803 | 99.6% | 3×pre-R7 transient | 195 reqs, 100% success |
+
+**Post-R7 token estimation accuracy**: n=195, real/est ratio=0.976, overestimation=2.4% (improved from 55.4% to 2.4%). max_real_tokens=150K (context growing), max_est=143K. 0 requests est>=150K or real>=170K.
+
+**No parameter changes warranted**: All R7 settings (chars/token=3.0, safety=190K, compact=180K) performing well. R13/14 is about env vars fix, not parameter tuning.
+
+### Post-deployment verification
+- **settings.json**: ✅ synced from repo (HTTPS_PROXY/HTTP_PROXY/NO_PROXY added)
+- **.bashrc**: ✅ env vars before non-interactive return, proxy unset fixed
+- **.profile**: ✅ env vars added for login shells
+- **restart_claude.sh**: ✅ `bash --login -c` for env vars in screen sessions
+- **Shell env vars**: ✅ verified in both non-interactive and login shells
+- **CC connectivity**: ✅ 200 response via proxy
+- **All 6 containers**: ✅ healthy
 
 ### R8 Metrics Analysis (06-09 through 06-10, proxy 40001)
 
@@ -437,7 +471,7 @@ Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs mornin
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
 
-## Proxy Changes (Round 1-12 + R6-R7)
+## Proxy Changes (Round 1-12 + R6-R7 + R13-R14)
 - Removed conn_retry — 3% success rate
 - Removed rate_limit_retry — 8% success rate
 - Removed glm→dsv4p FALLBACK — always fails
@@ -453,6 +487,8 @@ Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs mornin
 - R7: **CHARS_PER_TOKEN_ESTIMATE 2.0→3.0** — 56% overestimation → 3% (data: 538 requests, real ratio=3.11)
 - R7: **MODEL_INPUT_TOKEN_SAFETY 170K→190K** — 86% capacity utilization (vs 47% before)
 - R7: **contextWindow 170K→190K, autoCompactWindow 150K→180K** — CC usable context 96K→174K real tokens (+81%)
+- R13/R14: **HTTPS_PROXY/HTTP_PROXY/NO_PROXY in settings.json** — CC v2.1.170 startup connectivity check requires shell env vars
+- R14: **Shell env vars persistence (.bashrc + .profile + restart_claude.sh)** — three-layer guarantee for CC startup in all shell types
 
 ## Key Issues
 
