@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R7 — chars/token estimation fix + context window optimization + metrics analysis)
+# Deploy Status — opc_uname (updated 2026-06-10 R8 — metrics analysis + overhead deep dive + no parameter changes needed)
 
 ## Architecture
 ```
@@ -19,6 +19,84 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimits nofile=8192
 - auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
+
+## opc_uname_r8 Analysis (2026-06-10 — metrics deep dive + overhead investigation + no parameter changes)
+
+### R8 Metrics Analysis (06-09 through 06-10, proxy 40001)
+
+| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration | P95 Duration |
+|-----|-------|---------|------|--------|--------------|--------------|--------------|
+| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused (startup burst) | 13.9s | 21.9s | 29.2s |
+| 06-10 | 707 | 704 | 99.6% | 2×502 timeout, 1×429 quota | 19.3s | 34.8s | 48.5s |
+
+**proxy-40002 (opc2_uname)**:
+
+| Day | Total | Success | Rate | Errors |
+|-----|-------|---------|------|--------|
+| 06-09 | 48 | 46 | 95.8% | 2×429 quota |
+| 06-10 | 37 | 37 | 100% | 0 |
+
+### Key findings (06-10 full day, 707 requests):
+
+**Success rate**: 99.6% — best ever. All errors transient:
+- 2×502 timeout (ConnectionRefused at 00:00 and 17:31 — isolated, not systemic)
+- 1×429 quota (at 00:17 — single key exhaustion, LiteLLM rotated to other keys)
+
+**Zero InputReject/529 errors**: Current safety settings (190K context) are working perfectly.
+
+**Streaming overhead analysis**:
+| Request type | % of requests | Avg overhead after TTFB | Avg total overhead |
+|-------------|--------------|------------------------|--------------------|
+| tool_calls | 95.5% (672/704) | 1.3s | 4.1s (21% of avg_dur=17.7s) |
+| stop | 2.8% (20/704) | 29.2s | varies widely |
+| length | 1.7% (12/704) | 0.5s | 3.5s |
+
+**Important discovery: `litellm_response_duration_ms` interpretation**:
+- litellm_response_duration_ms measures LiteLLM routing/dispatch time (time from request receipt to first response byte), NOT total streaming duration
+- Evidence: for tool_calls, litellm/ttfb avg ratio = 81.7%, litellm/dur avg ratio = 79.0% — litellm_dur ≈ ttfb, not total duration
+- For stop requests, litellm_dur varies from 8% to 95% of total_dur — inconsistent, confirming it's not total processing time
+- Proxy overhead for tool_calls (1.3s after TTFB) is excellent — format conversion + SSE forwarding is efficient
+
+**Stop request overhead explanation**:
+- finish_reason=stop requests (text responses, not tool calls) have extreme overhead_after_ttfb (up to 130s)
+- This is NOT a proxy buffering issue — it's the model taking long to generate text tokens
+- Evidence: tool_calls in same est_tokens range (100-170K) have overhead 5s vs stop 44-99s
+- The model generates tool_calls as structured JSON (fast, bounded), but stop as free-form text (slow, unbounded)
+- Only 20/704 = 2.8% of requests are stop type → impact is limited
+- No proxy parameter change can make the model generate text faster
+
+**Tool truncation**: 686/704 requests truncated, avg reduction 69.1%, original 50.7K chars → truncated 15.3K chars
+
+**Model mapping distribution**: claude-opus-4-8→glm5.1: 88%, glm5.1→glm5.1: 11%, dsv4p→dsv4p: 0.3%
+
+**Estimated tokens**: avg=90.3K, max=205.3K. With CHARS_PER_TOKEN_ESTIMATE=3.0, estimation is accurate (~3% conservative vs real ratio 3.11).
+
+**Context window utilization**: CC compact triggers at 180K estimated ≈ 174K real tokens = 86% of 202.7K ModelScope capacity. No overflow events observed.
+
+### Latency by time-of-day (06-10):
+| Hour | Requests | Success | Avg Duration | Avg TTFB |
+|------|----------|---------|-------------|----------|
+| 00:00 | 119 | 98.3% | 10.9s | 9.6s |
+| 01:00 | 40 | 100% | 14.4s | 9.6s |
+| 02:00 | 181 | 100% | 11.6s | 10.6s |
+| 14:00 | 91 | 100% | 29.3s | 28.1s |
+| 15:00 | 6 | 100% | 34.7s | 31.8s |
+| 16:00 | 52 | 100% | 30.8s | 29.0s |
+| 17:00 | 121 | 99.2% | 25.2s | 20.8s |
+| 23:00 | 1 | 100% | 12.7s | 12.7s |
+
+Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs morning (avg 10-14s). This correlates with conversation complexity (higher est_tokens in afternoon), not ModelScope congestion.
+
+### Historical trend:
+| Day | Total | Success Rate | Avg Duration | P90 Duration | Notes |
+|-----|-------|-------------|--------------|--------------|-------|
+| 06-02 | 243 | 80.2% | ~14s | ~22s | Pre-R12 |
+| 06-03 | 1214 | 84.2% | ~14s | ~22s | Pre-R12, 47 InputExceedsProxyReject |
+| 06-05 | 1558 | 80.7% | ~14s | ~25s | Pre-R12 |
+| 06-09 | 220 | 96.8% | 13.9s | 21.9s | Post-R12, startup errors |
+| 06-10 | 707 | 99.6% | 19.3s | 34.8s | Post-R7, best success rate ever |
+
+**No parameter changes warranted**: System is performing optimally. 99.6% success rate, zero InputReject/529 errors, proxy overhead minimal for 95.5% of requests (tool_calls). All errors are transient. Current settings proven effective.
 
 ## opc_uname_r7 Changes (2026-06-10 — chars/token estimation fix + context window optimization + metrics analysis)
 
