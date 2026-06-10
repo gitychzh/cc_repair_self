@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R14 — R13 env vars sync + shell env vars fix for CC v2.1.170 startup connectivity check + metrics analysis)
+# Deploy Status — opc_uname (updated 2026-06-10 R15 — GLM IQ preservation: autoCompactWindow 180K→140K + contextWindow/safety 190K→170K)
 
 ## Architecture
 ```
@@ -19,6 +19,65 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimits nofile=8192
 - auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
+
+## opc_uname_r15 Changes (2026-06-10 — GLM IQ preservation: conservative autoCompactWindow + context window reduction)
+
+### FIX: autoCompactWindow 180K→140K (GLM IQ preservation)
+- **Problem**: Community research and user experience confirm that GLM-5.1 (and all LLMs) exhibit intelligence degradation at high context (>100K real tokens). Stanford's "Lost in the Middle" paper shows 20-30% accuracy drop for information in middle of long context. Reddit/V2EX users report GLM series becomes "stupid" above 100K+ tokens — reasoning quality drops, instruction following degrades, hallucinations increase. With autoCompactWindow=180K, CC compact triggers at ~174K-190K real tokens — far past the point where GLM IQ degrades significantly.
+- **Fix**: Changed autoCompactWindow from 180000 to 140000. Changed CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 180000 to 140000.
+- **Why**: Target is to trigger CC auto-compact BEFORE 150K real tokens. With worst-case ratio (old conv, ratio=1.058): 140K est → ~148K real → just below 150K. With better-case ratio (new conv, ratio=0.865): 140K est → ~117-121K real → conservatively below 150K. This guarantees ALL conversation types compact before GLM IQ degrades past recoverable point.
+- **Evidence**: 06-10 post-R7 data (n=531): old conv 150-180K ratio=1.058, new conv 150-180K ratio=0.865. 140K est → 148K real (worst case) < 150K target. Stanford "Lost in the Middle" paper (Liu et al. 2023) quantifies 20-30% accuracy degradation. Reddit r/LocalLLaMA and V2EX community reports confirm GLM IQ drop above ~100K tokens.
+
+### FIX: contextWindow 190K→170K, MODEL_INPUT_TOKEN_SAFETY 190K→170K (alignment)
+- **Problem**: contextWindow and MODEL_INPUT_TOKEN_SAFETY must be aligned. If contextWindow=170K but safety=190K, CC thinks it can use 170K est tokens while proxy reports 190K context_window → contradiction. Also, with autoCompactWindow=140K, having contextWindow=190K provides too much headroom (50K buffer above compact trigger) → CC may not compact aggressively enough.
+- **Fix**: Changed contextWindow from 190000 to 170000. Changed MODEL_INPUT_TOKEN_SAFETY_GLM51 and MODEL_INPUT_TOKEN_SAFETY_DSV4P from 190000 to 170000 in docker-compose.yml (both proxy containers).
+- **Why**: contextWindow=170K aligns with safety=170K → proxy /v1/models reports 170K context_window → CC understands 170K max → compact triggers at 140K (30K buffer before hard limit). This 30K buffer gives CC time to auto-compact before hitting context ceiling. At 170K est: old conv → ~179K real, new conv → ~147K real — both below ModelScope 202.7K limit.
+- **Evidence**: Max real tokens observed=159.7K. 170K est → worst case 179K real → still 23.7K below ModelScope 202.7K limit. No overflow risk.
+
+### Token estimation ratio data (06-10, post-R7, chars/token=3.0)
+| Context (real) | Old conv ratio | New conv ratio | Est trigger (140K) |
+|---------------|----------------|----------------|---------------------|
+| 0-50K | 1.078 | 1.047 | ~47-53K real |
+| 50-100K | 0.995 | 0.976 | ~97-116K real |
+| 100-150K | 1.033 | 0.896 | ~117-148K real |
+| 150-180K | 1.058 | 0.865 | ~121-148K real |
+
+**Conservative guarantee**: autoCompactWindow=140K → compact triggers at ≤148K real tokens (worst case old conv ratio=1.058) → GLM IQ preserved.
+
+### Usable context comparison
+| Setting | Before (R7) | After (R15) | Change |
+|---------|-------------|-------------|---------|
+| autoCompactWindow | 180K | 140K | -40K (earlier compact) |
+| contextWindow | 190K | 170K | -20K (aligned with safety) |
+| MODEL_INPUT_TOKEN_SAFETY | 190K | 170K | -20K (aligned with context) |
+| CC compact trigger (worst case) | ~190K real | ~148K real | -42K real (GLM IQ safe) |
+| CC compact trigger (new conv) | ~156K real | ~121K real | -35K real (conservative) |
+| Context ceiling (worst case) | ~201K real | ~179K real | -22K (still 23.7K margin to limit) |
+
+### opc2_uname sync
+- autoCompactWindow: 150K→140K (reduced by 10K)
+- contextWindow: 170K (unchanged, already aligned)
+- CLAUDE_CODE_AUTO_COMPACT_WINDOW env: 150K→140K
+
+### Metrics Analysis (06-10, 1188 total requests)
+
+| Day | Total | Success | Rate | Errors | Post-R7 |
+|-----|-------|---------|------|--------|---------|
+| 06-10 | 1188 | 1185 | 99.7% | 3×transient | 531 reqs, 99.7% success |
+
+**Post-R7 token estimation (chars/token=3.0)**: n=531, real/est ratio=0.980 (2% avg overestimation). max_real=159.7K. Context buckets: 0-50K ratio=1.066, 50-100K ratio=0.918, 100-150K ratio=0.958, 150-180K ratio=1.039.
+
+**New vs old conversation ratio profiles**: Old conv (pre-20:00) ratio=1.031 (3.1% underestimation), avg_tools=24.6, chars/real_token=3.02. New conv (post-20:00) ratio=0.922 (8% overestimation), avg_tools=28.6, chars/real_token=3.60. New conversations have more tool definitions → higher JSON ratio → more overestimation → safer (CC compacts earlier).
+
+**Safety margin**: At 170K est (new context ceiling), worst case old conv → 179K real (23.7K below ModelScope 202.7K). New conv → 147K real (55.7K below limit). Both safe.
+
+### Post-deployment verification (pending)
+- **settings.json**: ⏳ needs sync from repo + CC restart
+- **docker-compose.yml**: ⏳ needs proxy rebuild + recreate
+- **glm5.1**: ⏳ curl test
+- **dsv4p**: ⏳ curl test
+- **/v1/models context_window**: ⏳ verify 170K reported
+- **All 6 containers**: ⏳ health check
 
 ## opc_uname_r14 Changes (2026-06-10 — R13 env vars sync + shell env vars fix + metrics analysis)
 
@@ -471,7 +530,7 @@ Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs mornin
 - TimeoutErrorAllowedFails: 2
 - InternalServerErrorAllowedFails: 3
 
-## Proxy Changes (Round 1-12 + R6-R7 + R13-R14)
+## Proxy Changes (Round 1-12 + R6-R7 + R13-R15)
 - Removed conn_retry — 3% success rate
 - Removed rate_limit_retry — 8% success rate
 - Removed glm→dsv4p FALLBACK — always fails
@@ -487,6 +546,8 @@ Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs mornin
 - R7: **CHARS_PER_TOKEN_ESTIMATE 2.0→3.0** — 56% overestimation → 3% (data: 538 requests, real ratio=3.11)
 - R7: **MODEL_INPUT_TOKEN_SAFETY 170K→190K** — 86% capacity utilization (vs 47% before)
 - R7: **contextWindow 170K→190K, autoCompactWindow 150K→180K** — CC usable context 96K→174K real tokens (+81%)
+- R15: **autoCompactWindow 180K→140K** — GLM IQ preservation: compact before 150K real tokens (worst case ~148K)
+- R15: **contextWindow 190K→170K, MODEL_INPUT_TOKEN_SAFETY 190K→170K** — aligned, 30K buffer between compact(140K) and ceiling(170K)
 - R13/R14: **HTTPS_PROXY/HTTP_PROXY/NO_PROXY in settings.json** — CC v2.1.170 startup connectivity check requires shell env vars
 - R14: **Shell env vars persistence (.bashrc + .profile + restart_claude.sh)** — three-layer guarantee for CC startup in all shell types
 
