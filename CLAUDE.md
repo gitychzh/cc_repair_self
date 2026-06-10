@@ -9,10 +9,11 @@
 ## 架构
 
 ```
-Claude Code → :40001 proxy (格式转换 + metrics)
-            → :41001 LiteLLM (glm5.1, 11变体×7keys=77 deployments)
-            → :42001 LiteLLM (dsv4p, 11变体×7keys=77 deployments)
-            → ModelScope API
+Claude Code → :40001/40002 proxy (格式转换 + metrics)
+             → :41003 LiteLLM (glm5.1, 1000变体×7keys=7000 dep) [PRIMARY]
+             → :42001 LiteLLM (dsv4p, 11变体×7keys=77 dep)
+             → :41001 LiteLLM (glm5.1, 1000变体×7keys=7000 dep) [BACKUP]
+             → ModelScope API
 ```
 
 核心原则：**proxy.py 只做格式转换和 metrics logging，不做 retry、不做压缩、不做截断。LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实现。压缩完全由 CC 内置 auto-compact 控制。**
@@ -21,90 +22,115 @@ Claude Code → :40001 proxy (格式转换 + metrics)
 
 | 约束 | 原因 |
 |------|------|
-| **11 variant model IDs** | 每个变体model ID有独立额度200/id/天，11×200=2200>账户总限额2000。删减变体=删减额度，**绝对禁止修改** |
-| **rpm=1 per deployment** | 每个deployment限速1 RPM，7key×11variant=77 RPM/model。**绝对禁止修改** |
+| **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改** |
+| **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
 | frontend model_name | `glm5.1`, `dsv4p` — proxy/LiteLLM使用这两个名字 |
-| Docker container names | `glm5.1_uni41001`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
-| port assignments | 41001=glm5.1, 42001=dsv4p |
+| Docker container names | `glm5.1_uni41001`, `glm5.1_test41003`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
+| port assignments | 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p |
 
-### 11 Variant Model IDs（禁止增删改）
-
-**GLM-5.1 (11 variants, 在 41001):**
-`zhipuai/glm-5.1`, `ZHipuAI/GlM-5.1`, `ZhIpuAI/GLm-5.1`, `ZhiPuAI/gLM-5.1`, `ZhipUAI/GlM-5.1`, `ZhipuAi/GLM-5.1`, `ZhipuaI/GLm-5.1`, `zhipuAI/gLM-5.1`, `ZHIPUAI/GLM-5.1`, `zhipuai/GLM-5.1`, `ZhiPUAI/glm-5.1`
+### 11 Variant Model IDs（DSv4P，禁止增删改）
 
 **DSv4P (11 variants, 在 42001):**
 `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
 
+**GLM-5.1: 1000 variants on 41003（详见 configs/litellm-glm51-test/config.yaml，禁止增删改）**
+
+## 关键原则（长期知识）
+
+- **删除资源前必须验证其独立价值** — 曾删除11个变体model ID以为是"不支持的混合大小写"，但每个变体有独立200/id/day额度。正确流程：观察→测试→验证→决定。
+- **proxy-level retry增加37%延迟** — 有proxy_retry的请求avg=15963ms vs 正常11635ms。proxy只做格式转换，retry由LiteLLM负责。
+- **proxy绝不做截断/压缩** — proxy-level auto-compact导致灾难性上下文丢失。压缩只由CC内置auto-compact控制。
+- **429→529 转换会导致CC崩溃** — 429=rate_limit(backoff retry)，529=overloaded(CC auto-compact→灾难性上下文丢失)。绝不转换。
+- **CC v2.1.170+ startup check用shell env vars** — CC启动时的connectivity check用shell环境变量（ANTHROPIC_BASE_URL等），不读settings.json。必须三层保障：.bashrc（在non-interactive return之前）+.profile+restart_claude.sh用bash --login。
+- **CC auto-compact质量远低于手动/compact** — 自动compact用stripNonEssential=true（截断tool输出，tools=[]），手动/compact用stripNonEssential=false（完整上下文）。CC提示compact时，主动/compact加自定义指令可获得更好的摘要。
+- **/health endpoint会触发fd耗尽** — 用/health/liveliness监控，绝不调/health（触发per-deployment checks→OSError Too many open files）。
+- **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
+
 ## 可调整参数（有数据支撑才能改）
 
-| 参数 | 当前值 | 范围 | 所在文件 |
-|------|--------|------|----------|
-| num_retries | 5 | 2-12 | litellm config.yaml router_settings |
-| cooldown_time | 10 | 5-300 | litellm config.yaml router_settings |
-| RateLimitErrorAllowedFails | 5 | 0-10 | litellm config.yaml router_settings |
-| TimeoutErrorAllowedFails | 2 | 0-10 | litellm config.yaml router_settings |
-| AuthenticationErrorAllowedFails | 0 | 0-10 | litellm config.yaml router_settings |
-| InternalServerErrorAllowedFails | 3 | 0-10 | litellm config.yaml router_settings |
-| BadRequestErrorAllowedFails | 0 | 0-10 | litellm config.yaml router_settings |
-| routing_strategy | simple-shuffle | simple-shuffle/latency-based-routing/random | litellm config.yaml |
-| timeout (glm5.1) | 300 | - | litellm config.yaml |
-| timeout (dsv4p) | 300 | - | litellm config.yaml |
-| request_timeout | 300 | - | litellm config.yaml |
-| MAX_TOOL_DESC | 2000 | 800-4000 | docker-compose.yml env |
-| MAX_SCHEMA_DESC | 600 | 300-1200 | docker-compose.yml env |
-| PROXY_TIMEOUT | 300 | 120-600 | docker-compose.yml env |
-| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | docker-compose.yml env |
-| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | docker-compose.yml env |
-| CHARS_PER_TOKEN_ESTIMATE | 2.0 | 1.5-6 | docker-compose.yml env |
-| contextWindow | 170000 | 120000-190000 | claude/settings-*.json |
-| autoCompactWindow | 155000 | 90000-180000 | claude/settings-*.json |
-| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | claude/settings-*.json env |
+### Proxy / Docker-compose.yml env
+
+| 参数 | 当前值 | 范围 | 说明 |
+|------|--------|------|------|
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 (docker-compose) / **2.0 (running)** | 1.5-6 | 实际chars/token=3.11，3.0保守。**注意：运行容器=2.0（需force-recreate才生效），仅影响metrics日志不影响CC行为** |
+| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的context_window |
+| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | 同上 |
+| MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
+| MAX_SCHEMA_DESC | 600 | 300-1200 | Schema描述截断上限chars |
+| PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒 |
+
+### CC settings (claude/settings-*.json)
+
+| 参数 | 当前值 | 范围 | 说明 |
+|------|--------|------|------|
+| contextWindow | 170000 | 120000-190000 | CC认知的上下文容量上限 |
+| autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
+| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
+
+### LiteLLM router_settings (41003 glm5.1-primary, 7000 dep)
+
+| 参数 | 当前值 | 说明 |
+|------|--------|------|
+| num_retries | 8 | 大pool需要更多retry找健康deployment |
+| cooldown_time | 10 | RPM 1-min窗口，10s proportional |
+| routing_strategy | simple-shuffle | 7000 dep时latency-based-routing开销过高 |
+| RateLimitErrorAllowedFails | 5 | 429容忍度高，防止cascading cooldown |
+| TimeoutErrorAllowedFails | 2 | |
+| InternalServerErrorAllowedFails | 3 | ModelScope null choices |
+| AuthenticationErrorAllowedFails | 0 | |
+| BadRequestErrorAllowedFails | 0 | |
+
+### LiteLLM router_settings (42001 dsv4p, 77 dep)
+
+| 参数 | 当前值 | 说明 |
+|------|--------|------|
+| num_retries | 5 | 小pool，5次retry足够 |
+| cooldown_time | 30 | 小pool需要更长cooldown避免循环 |
+| routing_strategy | latency-based-routing | 77 dep小pool，latency routing有效 |
+| RateLimitErrorAllowedFails | 3 | |
+| TimeoutErrorAllowedFails | 2 | |
+| InternalServerErrorAllowedFails | 3 | |
+| rolling_window_size | 30 | latency routing窗口 |
+| lowest_latency_buffer | 2 | latency routing缓冲 |
 
 ## 项目文件结构
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（5个容器）
+  docker-compose.yml       # Docker编排（6个容器）
   .env.template             # 环境变量模板
-  litellm-glm51/config.yaml # 41001 LiteLLM配置（11变体×7keys）
-  litellm-dsv4p/config.yaml # 42001 LiteLLM配置（11变体×7keys）
-  postgres/init-db.sh       # PostgreSQL初始化脚本
+  litellm-glm51/config.yaml       # 41001 LiteLLM配置（1000变体×7keys，BACKUP）
+  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（1000变体×7keys，PRIMARY）
+  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（11变体×7keys）
+  postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
-    Dockerfile              # proxy容器构建
-    proxy.py                # 格式转换代理（仅格式转换）
+    Dockerfile / proxy.py         # 格式转换代理（仅格式转换+metrics）
   claude/
-    settings-opc_uname.json  # opc_uname CC settings → ~/.claude/settings.json
-    settings-opc2_uname.json # opc2_uname CC settings → ~/.claude/settings.json
-    statusline-command-opc_uname.sh  # opc_uname statusline → ~/.claude/statusline-command.sh
-    statusline-command.sh            # opc2_uname statusline → ~/.claude/statusline-command.sh
-  DEPLOY_STATUS.md          # 当前部署状态
+    settings-opc_uname.json        # → ~/.claude/settings.json
+    settings-opc2_uname.json       # → ~/.claude/settings.json
+    statusline-command-opc_uname.sh / statusline-command.sh
+  DEPLOY_STATUS.md                 # 当前部署状态
 scripts/
-  backup_config.sh          # 配置备份
-  health_check.sh           # 健康检查
-  restart_claude.sh         # Claude重启
-  rollback.sh               # 配置回滚
-logs/
-  round_*_analysis.json     # 轮次分析数据
+  backup_config.sh / health_check.sh / restart_claude.sh / rollback.sh
 ```
 
 ## 关键文件路径（opc_uname 本机）
 
 | 文件 | 路径 | 修改后需 |
 |------|------|----------|
-| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart glm5.1_uni41001` |
+| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51-test/config.yaml` | `docker restart glm5.1_test41003` |
 | LiteLLM 配置 | `/opt/cc-infra/litellm-dsv4p/config.yaml` | `docker restart dsv4p_uni42001` |
 | 转换代理 | `/opt/cc-infra/proxy/proxy.py` | rebuild + recreate proxy容器 |
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
 | Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
 | Shell env vars | `.bashrc` + `.profile` + `/etc/environment` | 新终端生效 |
-| CC startup check | shell env vars only（不读settings.json） | 必须 .bashrc+/.profile |
 
 ## 重启命令
 
 ```bash
 # LiteLLM 配置变更
-docker restart glm5.1_uni41001
+docker restart glm5.1_test41003
 docker restart dsv4p_uni42001
 
 # proxy.py 变更（需要重建镜像）
@@ -119,15 +145,15 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 ## 每轮优化协议
 
-1. **拉取** — `git pull` 拉取对方push的变更
-2. **分析** — 读metrics/error_detail日志，统计错误类型、频率、延迟
-3. **计划** — 决定有数据支撑的变更（必须说明WHY，附日志证据）
+1. **拉取** — `git pull`
+2. **分析** — 读metrics/error_detail日志
+3. **计划** — 必须说明WHY，附日志证据
 4. **备份** — `bash scripts/backup_config.sh`
 5. **执行** — 修改配置，重启受影响容器
-6. **测试** — 发curl测试请求验证返回200，测试glm5.1和dsv4p
-7. **验证** — 读新metrics，对比前后错误率
-8. **记录** — 更新README轮次历史和logs/分析数据
-9. **Push** — 推送到GitHub，让对方拉取继续优化
+6. **测试** — curl验证glm5.1和dsv4p返回200
+7. **验证** — 读新metrics，对比前后
+8. **记录** — 更新DEPLOY_STATUS.md
+9. **Push** — 推送到GitHub
 
 ## 测试请求
 
@@ -145,11 +171,6 @@ curl -s -X POST http://127.0.0.1:40001/v1/messages \
   -H "x-api-key: sk-litellm-local" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"dsv4p","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
-
-# OpenAI格式
-curl -s http://127.0.0.1:41001/v1/chat/completions \
-  -H "Authorization: Bearer sk-litellm-local" \
-  -d '{"model":"glm5.1","max_tokens":50,"messages":[{"role":"user","content":"test"}]}'
 ```
 
 ## 网络代理（opc_uname端如需）
@@ -159,11 +180,3 @@ systemctl --user start mihomo-sg.service
 # SSH已配置~/.ssh/config自动通过443端口+代理
 git push  # 自动走代理
 ```
-
-## 反思教训
-
-**删除资源前必须验证其独立价值。** 曾删除11个变体model ID以为是"不支持的混合大小写"，但每个变体有独立的200/id/day额度。删除=删除额度容量。正确流程：观察→测试→验证→决定。
-
-**proxy-level retry增加37%延迟。** 数据证明：有proxy_retry的请求avg=15963ms vs 正常11635ms。proxy只做格式转换，retry由LiteLLM负责。
-
-**CC v2.1.170+ startup connectivity check不读settings.json env vars。** CC v2.1.170交互模式启动时，connectivity check连接api.anthropic.com用的是shell env vars（ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY、HTTPS_PROXY），不是settings.json里的env vars。settings.json的env vars只在startup check通过后才生效。这意味着：即使settings.json配置正确，如果shell env里没有ANTHROPIC_BASE_URL和ANTHROPIC_API_KEY，CC会直接连接api.anthropic.com → 401/403 → ERR_BAD_REQUEST → 拒绝启动。修复方法：确保shell env vars始终可用（.bashrc + .profile + /etc/environment 三层保障）。没有.profile → 登录shell不source .bashrc → env vars缺失 → CC启动失败。

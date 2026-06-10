@@ -1,636 +1,137 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R16 — autoCompactWindow 140K→155K: reduce premature compaction + CC overestimation 1.7x data evidence)
+# Deploy Status — opc_uname (R17, 2026-06-11)
 
 ## Architecture
 ```
-CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_options.include_usage + metrics logging) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
-                                                                     → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
-                                                                     → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys = 7000 deploys) [BACKUP, same config as 41003]
+CC → 40001(proxy) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
+                    → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
+                    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys) [BACKUP]
 ```
 
-## Deploy Method
-- **docker compose**: `cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001`
-- **Docker Hub**: unreachable from China without proxy → mihomo on port **7890** configured as Docker systemd proxy (`/etc/systemd/system/docker.service.d/proxy.conf`)
-- **Legacy builder**: `DOCKER_BUILDKIT=0` required — BuildKit doesn't respect systemd proxy
+Proxy does **format conversion + force-stream + stream_usage + metrics logging only**. No retry, no truncation, no auto-compact. LiteLLM handles retry/fallback/routing/cooldown.
 
 ## Containers (all healthy)
-- cc_postgres :5432
-- glm5.1_uni41001 :41001 (7000 deployments: 1000 variants × 7 keys) [BACKUP] — ulimits nofile=4096
-- dsv4p_uni42001 :42001 (77 deployments: 11 variants × 7 keys) — ulimits nofile=4096
-- glm5.1_test41003 :41003 (7000 deployments: 1000 variants × 7 keys) [PRIMARY glm5.1] — ulimits nofile=8192
-- auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
-- auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
-
-## opc_uname_r16 Changes (2026-06-10 — autoCompactWindow 140K→155K: reduce premature compaction based on overestimation data)
-
-### FIX: autoCompactWindow 140K→155K (reduce premature compaction)
-- **Problem**: CC uses Anthropic tokenizer internally, which over-estimates tokens for Chinese+code+JSON mixed content by ~1.7x. Data evidence: at autoCompactWindow=140K trigger, median REAL input_tokens from ModelScope = 82,808 — only 40.8% of ModelScope 202,745 capacity. CC compacts WAY TOO EARLY, triggering 135 compacts in a single day. Each auto-compact uses `stripNonEssential=true` (truncates tool output, removes tool definitions from summary request), producing lower-quality summaries that cause CC to "forget what it was doing". Manual `/compact` works fine because it uses `stripNonEssential=false` (full context + all tools available).
-- **Fix**: Changed autoCompactWindow from 140000 to 155000. Changed CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 140000 to 155000.
-- **Why**: With CC overestimation factor 1.7x, autoCompactWindow=155K triggers compact at real ~91K tokens (45% capacity) instead of real ~82K (41%). This gives CC ~10% more usable context before compacting, reducing the number of auto-compacts per session and improving context preservation. The 15K buffer (155K→170K contextWindow = 8.8%) is sufficient for CC to handle responses. No INPUT-REJECT risk: at 155K est, real ≈ 91K, well under ModelScope 202K limit. At worst case 170K est, real ≈ 100K, still 102K below limit.
-- **Evidence**: June 10 metrics analysis: 1651 glm5.1 requests, 99.8% success, 135 compact events. At compact trigger: median real_tokens=82,808, median est_json=118,261, CC overestimation=1.7x. Capacity utilization=40.8%. With 155K: real at trigger ≈ 91K, utilization ≈ 45%, fewer compacts = better IQ preservation.
-
-### CC auto-compact vs manual /compact behavior difference (source code analysis)
-- **Root cause**: CC v2.1.170 source code (`yK$` function) passes `stripNonEssential=true` for auto-compact but `stripNonEssential=false` for manual `/compact`. When `stripNonEssential=true`: tool output is truncated via `TXf()`+`VXf()`, tools array is empty (`tools=[]`), so the summary model has NO tool definitions and SEVERELY reduced context. Manual `/compact` gets full context + all tools → much better summary quality.
-- **Additional differences**: auto-compact uses `customInstructions=null` (no user guidance), adds a forced "Resume directly — do not acknowledge the summary" continuation prompt, and suppresses notification (`suppressNotification=true`). When `thresholdSource ≠ "auto"` (i.e. when autoCompactWindow is an explicit number like 155K), CC routes auto-compact through the `NR8` "reactive" path which may use background pre-computed summaries (generated at earlier time points → misses last few turns).
-- **Practical advice**: When CC shows "Autocompact will trigger soon, which discards older messages. Use /compact now to control what gets kept.", proactively run `/compact <focus instructions>` to get a higher-quality summary with your own guidance. Also, write critical info to CLAUDE.md and memory files which survive compaction.
-
-### Metrics Analysis (06-10, 1651 total requests)
-
-| Day | Total | Success | Rate | Errors |
-|-----|-------|---------|------|--------|
-| 06-10 | 1651 | 1648 | 99.8% | 3 (2×502 timeout, 1×429 quota) |
-
-**CC overestimation analysis (135 compact events)**:
-| Metric | Value |
-|--------|-------|
-| CC overestimation factor (est/real) | mean=1.93x, median=1.40x |
-| Real tokens at compact trigger | median=82,808, mean=88,352 |
-| est_json at compact trigger | median=118,261, mean=140,898 |
-| ModelScope capacity utilization at compact | 40.8% |
-| Max real tokens observed | 165,206 |
-| Max est_json tokens observed | 331,707 |
-
-**Latency analysis (glm5.1 success)**:
-| Metric | Value |
-|--------|-------|
-| Mean TTFB | 18,749ms |
-| Median TTFB | 15,826ms |
-| P95 TTFB | 40,652ms |
-| Max TTFB | 212,195ms |
-
-**TTFB by context size**:
-| est_json range | Count | Avg TTFB |
-|---------------|-------|----------|
-| <50K | 270 | 10.5s |
-| 50-100K | 531 | 17.9s |
-| 100-140K | 327 | 20.4s |
-| 140-170K | 215 | 20.6s |
-| >170K | 285 | 25.0s |
-
-**DSv4P**: 4 requests, all finish_reason=length (startup checks only)
-
-**Tool truncation**: 1588/1630 requests truncated (97.4%), avg reduction 70.2%, original 54.6K→truncated 16.1K
-
-**CPT=3.0 transition**: Proxy container recreated ~45 min ago. Old metrics used CPT=2.0 (600 records), new metrics use CPT=3.0 (1052 records). CPT only affects metrics logging, NOT CC compact decisions.
-
-**Error analysis**:
-- 2×502 ConnectionError/timed out (at 00:00 and 17:31 — isolated, not systemic)
-- 1×429 insufficient_quota (at 00:17 — single key exhaustion, LiteLLM rotated to other keys)
-
-### Post-deployment verification
-- **settings.json**: ✅ autoCompactWindow=155000, CLAUDE_CODE_AUTO_COMPACT_WINDOW=155000
-- **glm5.1**: ✅ 200 response via proxy
-- **dsv4p**: ✅ 200 response via proxy
-- **All 6 containers**: ✅ healthy
-
-### opc2_uname sync
-- autoCompactWindow: 140K→155K (raised by 15K)
-- CLAUDE_CODE_AUTO_COMPACT_WINDOW env: 140K→155K
-- contextWindow: 170K (unchanged)
-
-### FIX: autoCompactWindow 180K→140K (GLM IQ preservation)
-- **Problem**: Community research and user experience confirm that GLM-5.1 (and all LLMs) exhibit intelligence degradation at high context (>100K real tokens). Stanford's "Lost in the Middle" paper shows 20-30% accuracy drop for information in middle of long context. Reddit/V2EX users report GLM series becomes "stupid" above 100K+ tokens — reasoning quality drops, instruction following degrades, hallucinations increase. With autoCompactWindow=180K, CC compact triggers at ~174K-190K real tokens — far past the point where GLM IQ degrades significantly.
-- **Fix**: Changed autoCompactWindow from 180000 to 140000. Changed CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 180000 to 140000.
-- **Why**: Target is to trigger CC auto-compact BEFORE 150K real tokens. With worst-case ratio (old conv, ratio=1.058): 140K est → ~148K real → just below 150K. With better-case ratio (new conv, ratio=0.865): 140K est → ~117-121K real → conservatively below 150K. This guarantees ALL conversation types compact before GLM IQ degrades past recoverable point.
-- **Evidence**: 06-10 post-R7 data (n=531): old conv 150-180K ratio=1.058, new conv 150-180K ratio=0.865. 140K est → 148K real (worst case) < 150K target. Stanford "Lost in the Middle" paper (Liu et al. 2023) quantifies 20-30% accuracy degradation. Reddit r/LocalLLaMA and V2EX community reports confirm GLM IQ drop above ~100K tokens.
-
-### FIX: contextWindow 190K→170K, MODEL_INPUT_TOKEN_SAFETY 190K→170K (alignment)
-- **Problem**: contextWindow and MODEL_INPUT_TOKEN_SAFETY must be aligned. If contextWindow=170K but safety=190K, CC thinks it can use 170K est tokens while proxy reports 190K context_window → contradiction. Also, with autoCompactWindow=140K, having contextWindow=190K provides too much headroom (50K buffer above compact trigger) → CC may not compact aggressively enough.
-- **Fix**: Changed contextWindow from 190000 to 170000. Changed MODEL_INPUT_TOKEN_SAFETY_GLM51 and MODEL_INPUT_TOKEN_SAFETY_DSV4P from 190000 to 170000 in docker-compose.yml (both proxy containers).
-- **Why**: contextWindow=170K aligns with safety=170K → proxy /v1/models reports 170K context_window → CC understands 170K max → compact triggers at 140K (30K buffer before hard limit). This 30K buffer gives CC time to auto-compact before hitting context ceiling. At 170K est: old conv → ~179K real, new conv → ~147K real — both below ModelScope 202.7K limit.
-- **Evidence**: Max real tokens observed=159.7K. 170K est → worst case 179K real → still 23.7K below ModelScope 202.7K limit. No overflow risk.
-
-### Token estimation ratio data (06-10, post-R7, chars/token=3.0)
-| Context (real) | Old conv ratio | New conv ratio | Est trigger (140K) |
-|---------------|----------------|----------------|---------------------|
-| 0-50K | 1.078 | 1.047 | ~47-53K real |
-| 50-100K | 0.995 | 0.976 | ~97-116K real |
-| 100-150K | 1.033 | 0.896 | ~117-148K real |
-| 150-180K | 1.058 | 0.865 | ~121-148K real |
-
-**Conservative guarantee**: autoCompactWindow=140K → compact triggers at ≤148K real tokens (worst case old conv ratio=1.058) → GLM IQ preserved.
-
-### Usable context comparison
-| Setting | Before (R7) | After (R15) | Change |
-|---------|-------------|-------------|---------|
-| autoCompactWindow | 180K | 140K | -40K (earlier compact) |
-| contextWindow | 190K | 170K | -20K (aligned with safety) |
-| MODEL_INPUT_TOKEN_SAFETY | 190K | 170K | -20K (aligned with context) |
-| CC compact trigger (worst case) | ~190K real | ~148K real | -42K real (GLM IQ safe) |
-| CC compact trigger (new conv) | ~156K real | ~121K real | -35K real (conservative) |
-| Context ceiling (worst case) | ~201K real | ~179K real | -22K (still 23.7K margin to limit) |
-
-### opc2_uname sync
-- autoCompactWindow: 150K→140K (reduced by 10K)
-- contextWindow: 170K (unchanged, already aligned)
-- CLAUDE_CODE_AUTO_COMPACT_WINDOW env: 150K→140K
-
-### Metrics Analysis (06-10, 1188 total requests)
-
-| Day | Total | Success | Rate | Errors | Post-R7 |
-|-----|-------|---------|------|--------|---------|
-| 06-10 | 1188 | 1185 | 99.7% | 3×transient | 531 reqs, 99.7% success |
-
-**Post-R7 token estimation (chars/token=3.0)**: n=531, real/est ratio=0.980 (2% avg overestimation). max_real=159.7K. Context buckets: 0-50K ratio=1.066, 50-100K ratio=0.918, 100-150K ratio=0.958, 150-180K ratio=1.039.
-
-**New vs old conversation ratio profiles**: Old conv (pre-20:00) ratio=1.031 (3.1% underestimation), avg_tools=24.6, chars/real_token=3.02. New conv (post-20:00) ratio=0.922 (8% overestimation), avg_tools=28.6, chars/real_token=3.60. New conversations have more tool definitions → higher JSON ratio → more overestimation → safer (CC compacts earlier).
-
-**Safety margin**: At 170K est (new context ceiling), worst case old conv → 179K real (23.7K below ModelScope 202.7K). New conv → 147K real (55.7K below limit). Both safe.
-
-### Post-deployment verification (pending)
-- **settings.json**: ⏳ needs sync from repo + CC restart
-- **docker-compose.yml**: ⏳ needs proxy rebuild + recreate
-- **glm5.1**: ⏳ curl test
-- **dsv4p**: ⏳ curl test
-- **/v1/models context_window**: ⏳ verify 170K reported
-- **All 6 containers**: ⏳ health check
-
-## opc_uname_r14 Changes (2026-06-10 — R13 env vars sync + shell env vars fix + metrics analysis)
-
-### FIX: R13 CC v2.1.170 startup connectivity check — shell env vars (synced from opc2_uname)
-- **Problem**: CC v2.1.170+ startup connectivity check connects to api.anthropic.com using **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json env vars. settings.json env vars only take effect AFTER startup check passes. Without shell env vars, CC tries api.anthropic.com → 401/403 → ERR_BAD_REQUEST → refuses to start.
-- **Fix (from opc2_uname R13)**: Added HTTPS_PROXY, HTTP_PROXY, NO_PROXY to settings-opc_uname.json. Port 7880 = mihomo mixed-port on opc_uname (verified: mihomo running, `curl -x http://127.0.0.1:7880 https://www.google.com` returns 200).
-- **Why**: Without HTTPS_PROXY in settings.json, CC's internal tools (WebFetch, WebSearch) can't reach external sites. Without HTTPS_PROXY in shell env, CC startup check can't pass if it needs to reach api.anthropic.com.
-- **Evidence**: R13 commit afb9c9d from opc2_uname — discovered CC v2.1.170 behavior change, added proxy vars to settings.json.
-
-### FIX: Shell env vars for CC startup — .bashrc + .profile + restart_claude.sh (local)
-- **Problem**: On opc_uname, ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY were in shell env but NOT in any config file (not in .bashrc, .profile, /etc/environment). They were set by the current CC process but not persisted. `restart_claude.sh` uses `screen -dmS claude bash -c` (non-interactive shell → doesn't source .bashrc → no env vars → CC startup check fails). Also, `.bashrc` line 125 had `unset HTTP_PROXY HTTPS_PROXY` which would clear any proxy vars.
-- **Fix**: Three-layer shell env vars persistence (as documented in R13):
-  1. **.bashrc**: Added ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY, HTTP_PROXY, NO_PROXY **before** the non-interactive return check. Changed `unset HTTP_PROXY HTTPS_PROXY` to only unset lowercase `http_proxy https_proxy all_proxy` (preserve uppercase for CC).
-  2. **.profile**: Added same env vars for login shells (SSH login, systemd user services).
-  3. **restart_claude.sh**: Changed `bash -c` to `bash --login -c` so .profile is sourced → env vars available for CC startup check.
-- **Why**: CC v2.1.170 uses shell env vars for startup connectivity check. Without persistent shell env vars, CC won't start after a restart. The three-layer approach (.bashrc + .profile + script) ensures env vars survive all shell types (interactive, login, non-interactive via screen).
-- **Evidence**: `bash -c` (non-interactive) now has env vars: `ANTHROPIC_BASE_URL=http://127.0.0.1:40001 HTTPS_PROXY=http://127.0.0.1:7880`. `bash --login -c` also works. CC connectivity test passes via local proxy.
-
-### Metrics Analysis (06-10, 806 total requests)
-
-| Day | Total | Success | Rate | Errors | Post-R7 |
-|-----|-------|---------|------|--------|---------|
-| 06-10 | 806 | 803 | 99.6% | 3×pre-R7 transient | 195 reqs, 100% success |
-
-**Post-R7 token estimation accuracy**: n=195, real/est ratio=0.976, overestimation=2.4% (improved from 55.4% to 2.4%). max_real_tokens=150K (context growing), max_est=143K. 0 requests est>=150K or real>=170K.
-
-**No parameter changes warranted**: All R7 settings (chars/token=3.0, safety=190K, compact=180K) performing well. R13/14 is about env vars fix, not parameter tuning.
-
-### Post-deployment verification
-- **settings.json**: ✅ synced from repo (HTTPS_PROXY/HTTP_PROXY/NO_PROXY added)
-- **.bashrc**: ✅ env vars before non-interactive return, proxy unset fixed
-- **.profile**: ✅ env vars added for login shells
-- **restart_claude.sh**: ✅ `bash --login -c` for env vars in screen sessions
-- **Shell env vars**: ✅ verified in both non-interactive and login shells
-- **CC connectivity**: ✅ 200 response via proxy
-- **All 6 containers**: ✅ healthy
-
-### R8 Metrics Analysis (06-09 through 06-10, proxy 40001)
-
-| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration | P95 Duration |
-|-----|-------|---------|------|--------|--------------|--------------|--------------|
-| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused (startup burst) | 13.9s | 21.9s | 29.2s |
-| 06-10 | 707 | 704 | 99.6% | 2×502 timeout, 1×429 quota | 19.3s | 34.8s | 48.5s |
-
-**proxy-40002 (opc2_uname)**:
-
-| Day | Total | Success | Rate | Errors |
-|-----|-------|---------|------|--------|
-| 06-09 | 48 | 46 | 95.8% | 2×429 quota |
-| 06-10 | 37 | 37 | 100% | 0 |
-
-### Key findings (06-10 full day, 707 requests):
-
-**Success rate**: 99.6% — best ever. All errors transient:
-- 2×502 timeout (ConnectionRefused at 00:00 and 17:31 — isolated, not systemic)
-- 1×429 quota (at 00:17 — single key exhaustion, LiteLLM rotated to other keys)
-
-**Zero InputReject/529 errors**: Current safety settings (190K context) are working perfectly.
-
-**Streaming overhead analysis**:
-| Request type | % of requests | Avg overhead after TTFB | Avg total overhead |
-|-------------|--------------|------------------------|--------------------|
-| tool_calls | 95.5% (672/704) | 1.3s | 4.1s (21% of avg_dur=17.7s) |
-| stop | 2.8% (20/704) | 29.2s | varies widely |
-| length | 1.7% (12/704) | 0.5s | 3.5s |
-
-**Important discovery: `litellm_response_duration_ms` interpretation**:
-- litellm_response_duration_ms measures LiteLLM routing/dispatch time (time from request receipt to first response byte), NOT total streaming duration
-- Evidence: for tool_calls, litellm/ttfb avg ratio = 81.7%, litellm/dur avg ratio = 79.0% — litellm_dur ≈ ttfb, not total duration
-- For stop requests, litellm_dur varies from 8% to 95% of total_dur — inconsistent, confirming it's not total processing time
-- Proxy overhead for tool_calls (1.3s after TTFB) is excellent — format conversion + SSE forwarding is efficient
-
-**Stop request overhead explanation**:
-- finish_reason=stop requests (text responses, not tool calls) have extreme overhead_after_ttfb (up to 130s)
-- This is NOT a proxy buffering issue — it's the model taking long to generate text tokens
-- Evidence: tool_calls in same est_tokens range (100-170K) have overhead 5s vs stop 44-99s
-- The model generates tool_calls as structured JSON (fast, bounded), but stop as free-form text (slow, unbounded)
-- Only 20/704 = 2.8% of requests are stop type → impact is limited
-- No proxy parameter change can make the model generate text faster
-
-**Tool truncation**: 686/704 requests truncated, avg reduction 69.1%, original 50.7K chars → truncated 15.3K chars
-
-**Model mapping distribution**: claude-opus-4-8→glm5.1: 88%, glm5.1→glm5.1: 11%, dsv4p→dsv4p: 0.3%
-
-**Estimated tokens**: avg=90.3K, max=205.3K. With CHARS_PER_TOKEN_ESTIMATE=3.0, estimation is accurate (~3% conservative vs real ratio 3.11).
-
-**Context window utilization**: CC compact triggers at 180K estimated ≈ 174K real tokens = 86% of 202.7K ModelScope capacity. No overflow events observed.
-
-### Latency by time-of-day (06-10):
-| Hour | Requests | Success | Avg Duration | Avg TTFB |
-|------|----------|---------|-------------|----------|
-| 00:00 | 119 | 98.3% | 10.9s | 9.6s |
-| 01:00 | 40 | 100% | 14.4s | 9.6s |
-| 02:00 | 181 | 100% | 11.6s | 10.6s |
-| 14:00 | 91 | 100% | 29.3s | 28.1s |
-| 15:00 | 6 | 100% | 34.7s | 31.8s |
-| 16:00 | 52 | 100% | 30.8s | 29.0s |
-| 17:00 | 121 | 99.2% | 25.2s | 20.8s |
-| 23:00 | 1 | 100% | 12.7s | 12.7s |
-
-Note: Afternoon/evening hours (14-17) show higher latency (avg 29-35s) vs morning (avg 10-14s). This correlates with conversation complexity (higher est_tokens in afternoon), not ModelScope congestion.
-
-### Historical trend:
-| Day | Total | Success Rate | Avg Duration | P90 Duration | Notes |
-|-----|-------|-------------|--------------|--------------|-------|
-| 06-02 | 243 | 80.2% | ~14s | ~22s | Pre-R12 |
-| 06-03 | 1214 | 84.2% | ~14s | ~22s | Pre-R12, 47 InputExceedsProxyReject |
-| 06-05 | 1558 | 80.7% | ~14s | ~25s | Pre-R12 |
-| 06-09 | 220 | 96.8% | 13.9s | 21.9s | Post-R12, startup errors |
-| 06-10 | 707 | 99.6% | 19.3s | 34.8s | Post-R7, best success rate ever |
-
-**No parameter changes warranted**: System is performing optimally. 99.6% success rate, zero InputReject/529 errors, proxy overhead minimal for 95.5% of requests (tool_calls). All errors are transient. Current settings proven effective.
-
-## opc_uname_r7 Changes (2026-06-10 — chars/token estimation fix + context window optimization + metrics analysis)
-
-### FIX: CHARS_PER_TOKEN_ESTIMATE 2.0→3.0 (data-driven adjustment)
-- **Problem**: CHARS_PER_TOKEN_ESTIMATE=2.0 overestimates tokens by 56%. Verified with 538 requests having real token counts (from stream_options.include_usage): average real_tokens/estimated_tokens ratio = 0.642. This means estimated_tokens overstates real tokens by 56%.
-- **Fix**: Changed CHARS_PER_TOKEN_ESTIMATE from 2.0 to 3.0 (real ratio = 3.11, 3.0 is close but still conservative).
-- **Why**: With 2.0, proxy estimated tokens that never existed → 66 requests appeared to exceed 170K safety but ALL succeeded (real tokens max=142K). With 3.0, estimation is accurate (3.0 vs real 3.11), INPUT-WARN noise eliminated (0 >170K vs 66 before). No functional impact (proxy doesn't truncate — R12 removed auto-compact), but accurate estimation gives better metrics for monitoring.
-- **Evidence**: 538 requests with real input_tokens from ModelScope. Average ratio real/est = 0.642 → actual chars/token = 2.0/0.642 = 3.11. Max real tokens = 142K (well below 202.7K ModelScope limit), max est_tokens (2.0) = 205K (false overestimation), max est_tokens (3.0) = 137K (accurate).
-
-### FIX: MODEL_INPUT_TOKEN_SAFETY 170K→190K (context capacity optimization)
-- **Problem**: MODEL_INPUT_TOKEN_SAFETY=170K reports context_window=170K to CC via /v1/models. This limits CC's usable context to ~170K estimated tokens = ~108K real tokens (with 56% overestimation). That's only 53% of ModelScope's 202.7K real capacity.
-- **Fix**: Changed MODEL_INPUT_TOKEN_SAFETY from 170000 to 190000.
-- **Why**: With 3.0 chars/token, estimated_tokens ≈ real_tokens/1.03 (much more accurate). Reporting 190K context_window tells CC it can use up to 190K estimated ≈ 184K real tokens = 91% of ModelScope capacity. Zero requests have real tokens >170K, so 190K safety provides ample margin.
-- **Evidence**: Max real tokens across 555 requests = 142K. ModelScope limit = 202.7K. 190K safety = 93.6% of limit with 12.7K buffer. No real risk of overflow.
-
-### FIX: contextWindow 170K→190K, autoCompactWindow 150K→180K (CC compact timing optimization)
-- **Problem**: CC settings contextWindow=170K, autoCompactWindow=150K. With 56% overestimation, CC compact triggers at 150K estimated = ~96K real tokens. This wastes 60%+ of ModelScope's 202.7K context capacity.
-- **Fix**: Changed contextWindow from 170000 to 190000, autoCompactWindow from 150000 to 180000, CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 150000 to 180000.
-- **Why**: With 190K contextWindow + 180K autoCompactWindow + 3.0 chars/token, CC compact triggers at 180K estimated ≈ 174K real tokens = 86% of ModelScope capacity. This gives CC ~174K real usable context before compacting (vs ~96K before = 81% improvement in usable context).
-- **Evidence**: No request has real tokens >142K. Even at 180K estimated (with 3.0 chars/token), real tokens ≈ 174K, still below 202.7K limit. Historical data: 0 overflow errors when requests up to 142K real tokens were accepted.
-
-### Metrics Analysis (06-09 through 06-10, proxy 40001)
-
-| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration |
-|-----|-------|---------|------|--------|--------------|--------------|
-| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused (startup) | 13.9s | 21.9s |
-| 06-10 | 555 | 552 | 99.5% | 2×502 timeout, 1×429 quota | 18.8s | 33.3s |
-
-**proxy-40002 (opc2_uname)**:
-
-| Day | Total | Success | Rate | Errors |
-|-----|-------|---------|------|--------|
-| 06-09 | 48 | 46 | 95.8% | 2×429 quota |
-| 06-10 | 36 | 36 | 100% | 0 |
-
-**Key findings**:
-- 99.5% success rate on 06-10 (best ever, 555 requests)
-- All errors are transient: 502 ConnectionRefused/timeout (startup/reconnect), 429 quota (temporary)
-- 0 InputExceeds errors, 0 529 overloaded errors
-- Real token estimation analysis: 538 requests with real input_tokens show avg real/est ratio = 0.642 → chars/token=3.11
-- Max real tokens = 142K (never exceeds 170K), proving CHARS_PER_TOKEN_ESTIMATE=2.0 was wildly conservative
-- 66 requests with estimated >170K ALL succeeded — confirms safety limit can be raised
-- Duration higher on 06-10 vs 06-09 because average messages doubled (96→124) — more complex conversations, not a regression
-- Latency correlates with message count: 0-50 msgs avg=10.9s, 100-150=17.6s, 200-300=25.1s, 300-500=40.3s
-
-**Token estimation accuracy**:
-| Metric | Value |
-|--------|-------|
-| CHARS_PER_TOKEN_ESTIMATE (old) | 2.0 |
-| Real chars/token ratio | 3.11 |
-| Overestimation factor | 56% |
-| CHARS_PER_TOKEN_ESTIMATE (new) | 3.0 |
-| New overestimation | ~3% (conservative) |
-| Requests est>170K (old) | 66 (false positives) |
-| Requests est>170K (new) | 0 (accurate) |
-| Max real tokens | 142K |
-| Max est tokens (old) | 205K |
-| Max est tokens (new) | 137K |
-
-**Usable context comparison**:
-| Setting | Before (R6) | After (R7) | Improvement |
-|---------|-------------|------------|--------------|
-| CHARS_PER_TOKEN_ESTIMATE | 2.0 | 3.0 | 56% more accurate |
-| MODEL_INPUT_TOKEN_SAFETY | 170K | 190K | 20K more capacity |
-| contextWindow | 170K | 190K | 20K more capacity |
-| autoCompactWindow | 150K | 180K | 30K more before compact |
-| CC compact trigger (real tokens) | ~96K | ~174K | 81% more usable context |
-| Capacity utilization | 47% | 86% | +39 percentage points |
-
-### Post-deployment verification
-- **CHARS_PER_TOKEN_ESTIMATE**: ✅ 3.0 (verified docker inspect)
-- **MODEL_INPUT_TOKEN_SAFETY**: ✅ 190000 for both models (verified docker inspect)
-- **CC settings**: ✅ contextWindow=190000, autoCompactWindow=180000, env=180000
-- **/v1/models context_window**: ✅ 190000 reported for both models
-- **glm5.1**: ✅ 200 response via proxy → 41003 (input_tokens=23)
-- **dsv4p**: ✅ 200 response via proxy → 42001 (input_tokens=9)
-- **All 6 containers**: ✅ healthy
-
-### FIX: proxy.py stream_options.include_usage sync (running → repo)
-- **Problem**: Running proxy.py includes `stream_options: {"include_usage": True}` in the OpenAI request body, plus logic to defer message_delta until stream ends to include real token counts from the usage chunk. The repo proxy.py was missing this entire feature.
-- **Fix**: Copied `/opt/cc-infra/proxy/proxy.py` → `configs/proxy/proxy.py` to sync the running version back to the repo.
-- **Why**: Without `stream_options.include_usage=True`, the OpenAI streaming API doesn't send prompt_tokens/completion_tokens in chunks → CC TUI shows "0/200000 tokens" → user can't see actual token consumption. With this fix, the usage chunk arrives after finish_reason in streaming, and the proxy defers message_delta to include real token counts.
-- **Evidence**: All 06-10 metrics show `input_tokens=0` and `output_tokens=0` in successful responses because ModelScope doesn't return prompt_tokens in the streaming response body. But with `stream_options.include_usage`, LiteLLM forwards the usage data → proxy collects streaming_input_tokens/streaming_output_tokens → includes them in message_delta for CC to display.
-
-### FIX: litellm-glm51 config.yaml router_settings sync (running → repo)
-- **Problem**: Repo litellm-glm51/config.yaml (41001 backup) had stale router_settings from R11: `latency-based-routing + cooldown=30 + num_retries=5 + RateLimitErrorAllowedFails=3`. Running config (both 41001 and 41003) uses `simple-shuffle + cooldown=10 + num_retries=8 + RateLimitErrorAllowedFails=5 + allowed_fails_policy format`.
-- **Fix**: Updated repo litellm-glm51/config.yaml router_settings to match running config: `simple-shuffle + cooldown=10 + num_retries=8 + RateLimitErrorAllowedFails=5` + `allowed_fails_policy` format + `AuthenticationErrorAllowedFails:0 + BadRequestErrorAllowedFails:0`.
-- **Why**: Running config has proven superior for 7000-deployment pools. Repo backup config should match for disaster recovery consistency. Also, running 41001 now uses the same 7000-deployment config as 41003 (not the old 1792-dep config), so repo config is a fallback reference only.
-- **Evidence**: 06-09/06-10 metrics show 96.8%/99.1% success rate with simple-shuffle + cooldown=10 + retries=8 — these settings are proven effective.
-
-### Metrics Analysis (06-09 through 06-10, post-R12 sync)
-
-| Day | Total | Success | Rate | Errors | Avg Duration | P90 Duration | P95 Duration |
-|-----|-------|---------|------|--------|--------------|--------------|--------------|
-| 06-09 | 220 | 213 | 96.8% | 7×502 ConnectionRefused | 13.5s | 21.9s | 29.2s |
-| 06-10 | 221 | 219 | 99.1% | 1×502 timeout, 1×429 quota | 11.2s | 16.8s | 20.6s |
-
-**Key findings (post-R12)**:
-- Success rate jumped from 80% range → 96-99%: R12 proxy auto-compact removal + 170K safety limit eliminated InputExceedsProxyReject errors (0 on 06-09/06-10 vs 47 on 06-03/06-04).
-- 429 quota errors rare (1 on 06-10, 0 on 06-09): quota exhaustion is now rare because 7000 deployments provide ample RPM capacity.
-- 502 ConnectionRefused only during startup/reconnect: 7 on 06-09 (container startup), 1 on 06-10.
-- Latency improving: avg 13.5s→11.2s, p90 21.9s→16.8s, p95 29.2s→20.6s on 06-10.
-- Large context requests working: 13 requests with estimated_tokens > 170K all succeeded (ModelScope accepts up to 202745 tokens). The 170K safety limit provides 83% capacity utilization (170K/202.7K).
-
-**Historical trend comparison**:
-
-| Day | Total | Success Rate | Avg Duration | Notes |
-|-----|-------|-------------|--------------|-------|
-| 06-02 | 243 | 80.2% | ~14s | Pre-R12 (proxy auto-compact + 120K safety) |
-| 06-03 | 1214 | 84.2% | ~14s | Pre-R12, 47 InputExceedsProxyReject 529 errors |
-| 06-04 | 2261 | 79.2% | ~14s | Pre-R12, heavy 429 quota exhaustion |
-| 06-05 | 1558 | 80.7% | ~14s | Pre-R12, dsv4p R2 config sync |
-| 06-09 | 220 | 96.8% | 13.5s | Post-R12, auto-compact removed, 170K safety |
-| 06-10 | 221 | 99.1% | 11.2s | Post-R12, best day ever |
-
-**Tool truncation analysis**:
-- 06-09: 203/212 requests truncated (70.3% avg reduction), avg original_chars=44K→truncated_chars=13K
-- 06-10: 208/219 requests truncated (66.0% avg reduction), avg original_chars=45K→truncated_chars=14K
-- Tool descriptions truncated from ~44K chars to ~14K chars = 70% reduction. MAX_TOOL_DESC=2000 working well.
-
-**Token estimation analysis**:
-- 06-09: avg estimated_tokens=74.7K, max=116K, all < 120K → no INPUT-WARN triggered
-- 06-10: avg estimated_tokens=79.6K, max=186K, 40 requests > 120K, 22 > 150K, 13 > 170K
-- CHARS_PER_TOKEN_ESTIMATE=2.0 overestimates tokens for Chinese text (Chinese chars ≈ 1-1.5 tokens/char). This makes our estimation conservative (higher than real tokens) — good for safety but generates INPUT-WARN noise.
-- No parameter change needed: the overestimation is harmless (only triggers INPUT-WARN, no proxy action).
-
-**dsv4p usage**: 1 request on 06-09, 0 on 06-10. dsv4p is essentially unused because CC always requests claude-opus-4-8 → mapped to glm5.1. dsv4p only triggered when CC explicitly requests dsv4p.
-
-**No parameter changes warranted**: Current settings are proven effective with 99.1% success rate. All errors are transient (ConnectionRefused during startup, quota exhaustion). No config optimization needed.
-
-### Post-deployment verification (pending — requires rebuild on opc_uname)
-- **proxy.py**: ⏳ stream_usage version needs rebuild (`docker compose up -d --build --force-recreate auth_to_api_40001`)
-- **litellm-glm51 config**: ⏳ router_settings updated in repo only; 41001 backup not currently routed from proxy
-- **glm5.1**: ✅ 200 response via proxy → 41003 (verified daily)
-- **dsv4p**: ✅ 200 response via proxy → 42001 (verified)
-- **/v1/models context_window**: ✅ 170000 reported for both models
-- **All 6 containers**: ✅ healthy
-
-## opc_uname_r5 Changes (2026-06-09 — R12 config sync + proxy auto-compact removal + context window adjustment)
-
-### CRITICAL: proxy.py auto-compact removed (R12 sync from opc2_uname)
-- **Before**: proxy auto-compacts messages when estimated_tokens > safety (120K) → truncates oldest messages, inserts compact notice → returns 200 to CC. Also has INPUT-REJECT-UNCOMPACTABLE fallback → returns 429 with retry-after=30.
-- **After**: proxy NO longer truncates/compacts messages. If estimated_tokens > 120K, only logs INPUT-WARN. If ModelScope returns 400 "Range of input length should be [1, 202745]", returns invalid_request_error → CC stops (user starts new conversation manually).
-- **Why**: Proxy-level auto-compact caused catastrophic context loss — CC "completely forgets everything" because proxy silently truncates conversation history. Even worse, three compression mechanisms (proxy truncation, 529→overloaded_error triggering CC compact, CC built-in compact) stacked unpredictably. Removing proxy truncation means only CC's built-in auto-compact (controlled by autoCompactWindow) handles compression — same quality outcome but at least CC's own decision.
-- **Evidence**: 47 InputExceedsProxyReject 529 errors on 06-03/06-04 from proxy rejecting requests with est_tokens 110K-182K. These requests likely would have succeeded at ModelScope (limit=202745). After R12 sync, these errors will not recur.
-
-### CRITICAL: MODEL_INPUT_TOKEN_SAFETY 120K→170K (R12 sync)
-- **Before**: MODEL_INPUT_TOKEN_SAFETY=120000 (proxy reported context_window=120K to CC, triggering CC compact too early)
-- **After**: MODEL_INPUT_TOKEN_SAFETY=170000 (proxy reports context_window=170K, giving CC more room before compact triggers)
-- **Why**: ModelScope actual limit=202745. With safety=120K, CC auto-compact triggered at 90K (autoCompactWindow=90K) — only 90K usable context out of 202.7K available capacity = massive waste. With safety=170K and autoCompactWindow=150K, CC uses up to 150K before compacting = 74% capacity utilization (vs 44% previously).
-
-### CRITICAL: contextWindow=120K→170K, autoCompactWindow=90K→150K (R12 sync)
-- **Before**: CC settings contextWindow=120000, autoCompactWindow=90000
-- **After**: CC settings contextWindow=170000, autoCompactWindow=150000, env CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000
-- **Why**: Matches MODEL_INPUT_TOKEN_SAFETY=170K. CC uses contextWindow to decide internal token tracking and autoCompactWindow to trigger compact. With 170K context, CC won't falsely think it's "over capacity" until ~150K tokens = more usable context.
-
-### CRITICAL: Input overflow error mapping changed (R12 sync)
-- **Before**: ModelScope 400 "Range of input length should be [1, 202745]" → proxy converts to 529 overloaded_error → CC retries with auto-compact (catastrophic context loss)
-- **After**: ModelScope 400 "Range of input length should be [1, 202745]" → proxy returns 400 invalid_request_error → CC stops → user starts new conversation manually (better than losing all context)
-- **Why**: Retrying the same oversized content never works. CC's auto-compact triggered by overloaded_error destroys context. invalid_request_error makes CC stop immediately so user can decide to start a new conversation.
-
-### CRITICAL: 529 overloaded_error no longer forced (R12 sync)
-- **Before**: Upstream 529 → proxy forces error type to overloaded_error → CC auto-compact (catastrophic context loss)
-- **After**: Upstream 529 → proxy lets _convert_error produce api_error → CC retries 2-3 times then stops
-- **Why**: Same reasoning as above — no more overloaded_error that triggers CC auto-compact destroying context.
-
-### docker-compose.yml local enhancements preserved
-- TZ: Asia/Shanghai, /etc/localtime mount, json-file logging (max-size=50m, max-file=5) added to all services — these are local-only enhancements not in the repo. Merged back into repo docker-compose.yml.
-
-### Metrics Analysis (06-02 through 06-09, pre-R12 sync)
-
-| Day | Total | Success | Rate | 429 | 529 | 502 | 400 | Avg Latency |
-|-----|-------|---------|------|-----|-----|-----|-----|-------------|
-| 06-02 | 243 | 195 | 80.2% | 23 | 3 | 22 | 0 | ~14s |
-| 06-03 | 1214 | 1022 | 84.2% | 130 | 47 | 14 | 1 | ~14s |
-| 06-04 | 2261 | 1791 | 79.2% | 441 | 0 | 23 | 5 | ~14s |
-| 06-05 | 1558 | 1257 | 80.7% | 244 | 0 | 50 | 7 | ~14s |
-
-**Overall 40001**: 5290 requests, 80.9% success, 838 429 (762 quota + 76 RPM), 50 529 (InputExceedsProxyReject), 109 502
-
-**Key findings (pre-R12)**:
-- 529 InputExceedsProxyReject errors (47 total, 06-03/06-04): proxy rejected requests it estimated as over safety=120K. With R12 removal of auto-compact, these will pass through to ModelScope (which accepts up to 202.7K tokens). Expected improvement: ~1-2% success rate boost.
-- 429 quota errors (762 total, 90.9% of all 429): genuine ModelScope quota exhaustion. Cannot be fixed by config changes.
-- 429 RPM errors (76 total, 9.1%): LiteLLM handles RPM retry/fallback internally.
-
-### Post-deployment verification
-- **proxy.py**: ✅ R12 version deployed (auto-compact removed, INPUT-WARN only, invalid_request_error for overflow)
-- **MODEL_INPUT_TOKEN_SAFETY**: ✅ 170000 (verified docker inspect env)
-- **CC settings**: ✅ contextWindow=170000, autoCompactWindow=150000, env=150000
-- **glm5.1**: ✅ 200 response via proxy → 41003
-- **dsv4p**: ✅ 200 response via proxy → 42001
-- **/v1/models context_window**: ✅ 170000 reported for both models
-- **All 6 containers**: ✅ healthy
-
-## opc_uname_r4 Changes (2026-06-05 — dsv4p R2 config sync + proxy.py sync + metrics analysis)
-
-### CRITICAL FIX: dsv4p running config ← repo R2 config sync
-- **Problem**: Running dsv4p LiteLLM (42001) config was stale — still using simple-shuffle + cooldown=10 + RateLimitAllowedFails=5 (old R1 settings). The repo had R2 optimization (latency-based-routing + cooldown=30 + RateLimitAllowedFails=3 + rolling_window_size=30 + lowest_latency_buffer=2) that was never deployed to this machine.
-- **Fix**: Copied `configs/litellm-dsv4p/config.yaml` (R2 version from repo) → `/opt/cc-infra/litellm-dsv4p/config.yaml` and restarted `dsv4p_uni42001`.
-- **Why**: R2 changes were authored by opc2_uname on this machine but only the repo copy was updated; the running config on disk was never synced. Latency-based-routing is critical for 77-deployment pool to avoid hitting already-throttled deployments; cooldown=30 (vs 10) prevents cascading unhealthy; RateLimitAllowedFails=3 (vs 5) prevents keeping clearly-failing deployments in rotation too long.
-
-### FIX: proxy.py disk file ← repo sync (inappropriate content → invalid_request_error)
-- **Problem**: `/opt/cc-infra/proxy/proxy.py` on disk was missing the "inappropriate content → invalid_request_error" mapping. The proxy container was rebuilt at 09:34 today from the repo version (which includes the fix), but the disk file was never synced.
-- **Fix**: Copied `configs/proxy/proxy.py` → `/opt/cc-infra/proxy/proxy.py` to maintain file ↔ reality consistency.
-- **Why**: Without this fix, ModelScope "inappropriate content" 400 errors map to `api_error` → CC retries infinitely (same content always rejected) → CC freezes. `invalid_request_error` makes CC stop immediately. The fix was already active in the running container; this sync only ensures the disk file matches.
-- **Evidence**: 5 inappropriate content errors on 06-05 — first 4 (06:19-06:45) before container rebuild, last 1 (09:32) after rebuild with CONTENT-MAP fix working correctly.
-
-### Metrics Analysis (06-05, full day)
-
-| Model | Requests | Success | Rate | 429 | 502 | 400 | Avg Latency | P95 Latency |
-|-------|----------|---------|------|-----|-----|-----|-------------|-------------|
-| glm5.1 | 1125 | 878 | 78.0% | 193 (17.2%) | 49 (4.4%) | 5 (0.4%) | 14.5s | 34.5s |
-| dsv4p | 9 | 5 | 55.6% | 3 | 1 | 0 | 2.4s | 3.3s |
-| Overall | 1136 | 883 | 77.7% | 196 | 50 | 7 | — | — |
-
-**Key findings:**
-- 429 errors: 195/196 are genuine quota exhaustion ("exceeded your current quota"), only 1 is RPM throttle. Config change cannot fix quota exhaustion.
-- 502 ConnectionError: 50 total, clustered at hours 05 (16), 09 (18), 10 (14). All are `[Errno 111] Connection refused` — LiteLLM startup/reconnect issues, not persistent.
-- 400 inappropriate content: 5 total, all before proxy rebuild (09:34). After rebuild, CONTENT-MAP fix correctly converts → invalid_request_error.
-- No parameter changes warranted: current glm5.1 router settings (simple-shuffle + cooldown=10 + RateLimitAllowedFails=5) are appropriate for 7000-deployment pool with genuine quota exhaustion as primary failure mode.
-
-**Comparison with 06-04:**
-- 06-04: 2261 requests, 79.2% success, 438 429 (19.4%), 22 502 (1%), 1 401
-- 06-05: 1136 requests, 77.7% success, 196 429 (17.2%), 50 502 (4.4%), 7 400 (0.6%)
-- 502 rate increased from 1% → 4.4% (more startup/reconnect issues)
-- Success rate slightly lower (79.2% → 77.7%) but 429 rate actually lower proportionally (19.4% → 17.2%)
-
-### Post-deployment verification
-- **dsv4p config**: ✅ R2 config applied (latency-based-routing, cooldown=30, RateLimitAllowedFails=3)
-- **dsv4p restart**: ✅ healthy after restart
-- **proxy.py**: ✅ disk file synced with repo (inappropriate content → invalid_request_error)
-- **glm5.1**: ✅ 200 response via proxy 40001 → 41003
-- **dsv4p**: ✅ 429 quota exhaustion (correct — genuine quota exhaustion at end of day)
-- **All 6 containers**: ✅ healthy
-
-### CRITICAL FIX: Proxy routing config file ↔ running container mismatch resolved
-- **Problem**: `/opt/cc-infra/docker-compose.yml` was manually edited to route GLM-5.1 → `uni41001` (R1 emergency fix), but the running proxy container still routed to `test41003` (from R2 build). The local file ≠ reality.
-- **Fix**: Restored `/opt/cc-infra/docker-compose.yml` to match repo config (GLM-5.1 → `test41003` primary). Rebuilt proxy container. Now file matches running container.
-- **Why test41003 remains primary**: Data evidence shows 41003 (7000 dep) has 4× more quota capacity than 41001 (1792 dep). The 69.1% success rate on 06-05 is from genuine `insufficient_quota` exhaustion (all 7 keys exhausted across all tested variants), not a routing problem. uni41001 with only 1792 deployments would exhaust quota faster.
-- **Data (06-05)**: 349 requests, 69.1% success, 25.2% 429 insufficient_quota, 4.6% 502 ConnectionRefused (startup time)
-- **Data (06-04)**: 2261 requests, 79.2% success, 19.5% 429 — better success rate on heavier load day (429 spread over longer time)
-
-### FIX: proxy.py retry-after header restored
-- **Before**: Local proxy.py missing `retry-after=30` header on INPUT-REJECT-UNCOMPACTABLE 429 response
-- **After**: Restored `extra_headers={"retry-after": "30"}` — matches repo proxy.py
-- **Why**: Without retry-after header, CC immediately retries on INPUT-REJECT, worsening quota pressure during exhaustion periods. retry-after=30 tells CC to wait 30 seconds before retrying.
-
-### FIX: docker-compose.yml ulimit → ulimits (Docker Compose v5 compatibility)
-- **Before**: `ulimit:` (without 's') — not recognized by Docker Compose v5.1.3 → deployment fails with "additional properties 'ulimit' not allowed"
-- **After**: `ulimits:` (with 's') — correct Docker Compose specification key
-- **Impact**: Without this fix, `docker compose up` fails entirely. Fix applied to all 3 LiteLLM service definitions.
-
-### Metrics Analysis Summary (06-05, no parameter changes warranted)
-- 429 errors: ALL are `insufficient_quota` (account quota exhaustion), NOT RPM rate limits
-- 429 pattern: concentrated in 06:00-08:00 hours, all 7 keys simultaneously exhausted for tried variants
-- 502 errors: only during startup (05:49-05:59) before test41003 ready — 16 total, then zero
-- 400 errors: 4 inappropriate content (ModelScope content filter, not config issue)
-- Latency: avg TTFB=12.7s, median=9.0s — acceptable for 7000-deployment pool
-- **No parameter changes needed**: cooldown_time=10, RateLimitErrorAllowedFails=5, simple-shuffle, num_retries=5 are all appropriate for current conditions. The 429 insufficient_quota is genuine exhaustion — no config change can fix it; it requires more keys or more quota per key.
-
-### test41003 vs uni41001 router settings comparison (explains why test41003 settings are better)
-| Parameter | uni41001 (1792 dep) | test41003 (7000 dep) | Winner |
-|-----------|---------------------|----------------------|--------|
-| routing_strategy | latency-based-routing | simple-shuffle | test41003 ✓ (1.5s overhead on large pool) |
-| cooldown_time | 30 | 10 | test41003 ✓ (proportional to RPM 1-min window) |
-| RateLimitErrorAllowedFails | 3 | 5 | test41003 ✓ (429 tolerance prevents cascading cooldown) |
-| rolling_window_size | 30 | default | test41003 ✓ (no unnecessary complexity) |
-
-### Post-deployment verification
-- **Proxy routing**: ✅ GLM-5.1 → glm5.1_test41003 (verified via docker inspect env vars + proxy log)
-- **DSv4P**: ✅ 200 response via proxy 40001 (thinking + content, Anthropic format)
-- **GLM-5.1**: ✅ 429 insufficient_quota (correct response — genuine quota exhaustion at end of day)
-- **All 6 containers**: ✅ healthy (41001 backup, 41003 primary, 42001, postgres, 40001, 40002)
-- **proxy.py retry-after**: ✅ restored (matches repo)
-
-## opc2_uname_r2 Changes (2026-06-05 — ulimit fix + dsv4p router unification + engineering scripts)
-
-### CRITICAL: ulimit nofile fix — prevents fd exhaustion on large deployment counts
-- **Before**: All LiteLLM containers ulimit soft=1024 (Docker default)
-- **After**: glm5.1_uni41001 ulimit soft=4096, dsv4p_uni42001 ulimit soft=4096, glm5.1_test41003 ulimit soft=8192
-- **Why**: 1792/7000 deployments × health check TCP connections → "OSError: [Errno 24] Too many open files"
-- **NEVER call /health for monitoring** — use /health/liveliness only. /health triggers on-demand checks → fd exhaustion cascade.
-
-### DSv4P router_settings unified with glm5.1 (parity)
-- **Before**: dsv4p used simple-shuffle + cooldown_time=10 + RateLimitErrorAllowedFails=5
-- **After**: dsv4p uses latency-based-routing + cooldown_time=30 + RateLimitErrorAllowedFails=3 (same as glm5.1)
-- **Also added**: rolling_window_size=30, lowest_latency_buffer=2, timeout=300, retry_after=0, model_group_alias
-- **Format change**: allowed_fails_policy → allowed_fails (parity with glm5.1 format)
-
-## opc_uname_r2 Changes (2026-06-05 — Proxy routing to 41003 primary: 7000 deployments)
-
-### CRITICAL: Proxy 40001 routing switched from 41001 → 41003
-- **Before**: 40001 proxy → 41001 (uni41001, 256 variants × 7 keys = 1792 deployments)
-- **After**: 40001 proxy → 41003 (test41003, 1000 variants × 7 keys = 7000 deployments)
-- **Why**: 7000 dep = 7000 RPM capacity × 200/id/day quota per variant = 1,400,000 requests/day theoretical max
-
-### 41003 config expanded from KEY1-only to KEY1-7
-- **Before**: 41003 config = 1024 variants × KEY1 = 1024 deployments (no key fallback)
-- **After**: 41003 config = 1000 variants × KEY1-7 = 7000 deployments (7-key fallback)
-
-### 41003 container resources increased
-- **Before**: memory=1536M, cpus=1.5, start_period=120s
-- **After**: memory=2048M, cpus=2.0, start_period=180s
-
-### Router settings (optimized for 7000 dep pool)
-- `routing_strategy`: simple-shuffle (latency-based-routing overhead not justified for 7000 dep)
-- `num_retries`: 5
-- `cooldown_time`: 10
-- `RateLimitErrorAllowedFails`: 5
-- `drop_params`: true
-
-## opc2_uname_r3 Changes (2026-06-02 — All 11 Variants Restored)
-
-### CRITICAL: All 11 Variants Restored (both configs)
-- **Before**: glm5.1 had 28 deployments (4 variants × 7 keys), dsv4p had 14 (2 variants × 7 keys)
-- **After**: 77 deployments each (11 variants × 7 keys)
-- **Why**: Previous config removed variants claiming "null-response from ModelScope". Root cause was LiteLLM parser bug (delta field in non-stream). Force-stream fix resolves this for ALL variants. Removing variants = removing quota capacity.
-- **Lesson reinforced**: NEVER remove resources without verifying their independent value first.
-
-## Router Settings (41003 primary, 7000 dep — updated R7)
-- num_retries: 8
-- cooldown_time: 10
-- routing_strategy: simple-shuffle
-- enable_pre_call_checks: false
-- RateLimitErrorAllowedFails: 5
-- TimeoutErrorAllowedFails: 2
-- InternalServerErrorAllowedFails: 3
-- AuthenticationErrorAllowedFails: 0
-- BadRequestErrorAllowedFails: 0
-
-## Router Settings (42001 dsv4p, 77 dep — unified with glm5.1)
-- num_retries: 5
-- cooldown_time: 30
-- routing_strategy: latency-based-routing
-- rolling_window_size: 30
-- lowest_latency_buffer: 2
-- RateLimitErrorAllowedFails: 3
-- TimeoutErrorAllowedFails: 2
-- InternalServerErrorAllowedFails: 3
-
-## Proxy Changes (Round 1-12 + R6-R7 + R13-R15)
-- Removed conn_retry — 3% success rate
-- Removed rate_limit_retry — 8% success rate
-- Removed glm→dsv4p FALLBACK — always fails
-- R7: insufficient_quota 429 → api_error
-- R9: INPUT-REJECT estimation fixed — `_estimate_text_chars()` + chars_per_token=2.0
-- R9: insufficient_quota 429 → rate_limit_error (REVERTED R7, exponential backoff better than api_error)
-- R12: **Removed proxy auto-compact entirely** — proxy-level truncation causes catastrophic context loss
-- R12: Input overflow 400 → invalid_request_error (NOT 529 overloaded_error) — CC stops, user starts new conversation
-- R12: 529 → api_error (NOT forced overloaded_error) — CC retries then stops, no auto-compact
-- R12: retry-after headers on 429 (quota=30s, rpm=5s) and 529 (5s)
-- R6: **stream_options.include_usage=True** — CC TUI shows real token counts instead of 0/200000
-- R6: **Deferred message_delta** — usage chunk arrives after finish_reason in streaming, proxy defers delta to include real token counts
-- R7: **CHARS_PER_TOKEN_ESTIMATE 2.0→3.0** — 56% overestimation → 3% (data: 538 requests, real ratio=3.11)
-- R7: **MODEL_INPUT_TOKEN_SAFETY 170K→190K** — 86% capacity utilization (vs 47% before)
-- R7: **contextWindow 170K→190K, autoCompactWindow 150K→180K** — CC usable context 96K→174K real tokens (+81%)
-- R15: **autoCompactWindow 180K→140K** — GLM IQ preservation: compact before 150K real tokens (worst case ~148K)
-- R15: **contextWindow 190K→170K, MODEL_INPUT_TOKEN_SAFETY 190K→170K** — aligned, 30K buffer between compact(140K) and ceiling(170K)
-- R13/R14: **HTTPS_PROXY/HTTP_PROXY/NO_PROXY in settings.json** — CC v2.1.170 startup connectivity check requires shell env vars
-- R14: **Shell env vars persistence (.bashrc + .profile + restart_claude.sh)** — three-layer guarantee for CC startup in all shell types
-
-## Key Issues
-
-### ModelScope Non-Stream InternalServerError — FIXED (2026-06-01)
-- ALL non-stream requests force `stream=True` to LiteLLM
-
-### /health Endpoint — NEVER call /health for monitoring
+| Container | Port | Role | Notes |
+|-----------|------|------|-------|
+| glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192 |
+| glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=4096 |
+| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096 |
+| auth_to_api_40001 | :40001 | Proxy (opc_uname) | Format conversion + stream_usage + metrics |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | Same codebase |
+| cc_postgres | :5432 | LiteLLM DB | — |
+
+## Deploy Method
+```bash
+# LiteLLM config change → restart only
+docker restart glm5.1_uni41001 / dsv4p_uni42001
+
+# proxy.py change → rebuild
+cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001
+
+# Full rebuild
+cd /opt/cc-infra && docker compose up -d --force-recreate
+
+# CC restart
+bash ~/cc_ps/cc_recover/restart_claude.sh
+```
+Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `DOCKER_BUILDKIT=0` required (BuildKit ignores systemd proxy).
+
+## Current Parameters (R17)
+
+| Parameter | Value | File | Notes |
+|-----------|-------|------|-------|
+| contextWindow | 170000 | settings.json | CC max context tracking |
+| autoCompactWindow | 155000 | settings.json | CC auto-compact trigger threshold |
+| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | settings.json env + .bashrc + .profile | Env var backup for CC |
+| MODEL_INPUT_TOKEN_SAFETY | 170000 | docker-compose.yml | Reported to CC via /v1/models |
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 (docker-compose) | docker-compose.yml | opc_uname running container still 2.0 (needs recreate); opc2_uname running 3.0 ✅ |
+| PROXY_TIMEOUT | 300 | docker-compose.yml | Seconds |
+| MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
+| MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
+| timeout (glm5.1/dsv4p) | 300 | litellm config.yaml | Seconds |
+| num_retries (41003) | 8 | litellm config.yaml | — |
+| num_retries (42001) | 5 | litellm config.yaml | — |
+| cooldown_time (41003) | 10 | litellm config.yaml | — |
+| cooldown_time (42001) | 30 | litellm config.yaml | — |
+| routing_strategy (41003) | simple-shuffle | litellm config.yaml | — |
+| routing_strategy (42001) | latency-based-routing | litellm config.yaml | — |
+| RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
+| RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
+
+## Metrics Summary (06-10, latest full day)
+
+| Metric | 40001 (opc_uname) | 40002 (opc2_uname) |
+|--------|-------------------|---------------------|
+| Total requests | 1887 | 48 |
+| Success rate | 99.8% | 100% |
+| Errors | 2×502 timeout, 1×429 quota | 0 |
+| Avg latency | 20.7s | 6.2s |
+| P50 latency | 17.0s | 5.0s |
+| P90 latency | 35.8s | — |
+| P99 latency | 80.4s | — |
+| Unique deployments used | 1660/7000 | — |
+| Quota remaining | 150-199 (all healthy) | — |
+
+**06-11 so far**: 17 requests, 100% success.
+
+## Historical Trend
+
+| Day | Total | Success | Avg Latency | Notes |
+|-----|-------|---------|-------------|-------|
+| 06-02 | 243 | 80.2% | ~14s | Pre-R12 (proxy auto-compact) |
+| 06-03 | 1214 | 84.2% | ~14s | 47 InputExceedsProxyReject |
+| 06-05 | 1558 | 80.7% | ~14s | Pre-R12 |
+| 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
+| 06-10 | 707 | 99.6% | 19.3s | Post-R7 |
+| 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
+
+## Key Issues & Notes
+
+### CC auto-compact behavior (CRITICAL for IQ preservation)
+- **Auto-compact uses `stripNonEssential=true`**: truncates tool output, removes tool defs → low-quality summary
+- **Manual `/compact` uses `stripNonEssential=false`**: full context + all tools → much better summary
+- **When CC warns "Autocompact will trigger soon"**, proactively run `/compact <focus>` for better quality
+- **CC overestimation 1.7x**: at autoCompactWindow=155K trigger, median real tokens ≈ 91K (45% capacity)
+- Write critical info to CLAUDE.md/memory — these survive compaction
+
+### CHARS_PER_TOKEN_ESTIMATE discrepancy (opc_uname only)
+- docker-compose.yml = 3.0, but opc_uname running container = 2.0 (container was restarted, not recreated)
+- Only affects metrics logging (estimated_input_tokens calculation), NOT CC behavior
+- opc2_uname running container = 3.0 ✅ (fully synced in R17)
+- Container recreate needed on opc_uname: `docker compose up -d --force-recreate auth_to_api_40001`
+
+### CC v2.1.170 startup connectivity check
+- Uses **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json
+- Three-layer persistence: .bashrc (before non-interactive return) + .profile (login shells) + restart_claude.sh (`bash --login -c`)
+- Without shell env vars → CC connects api.anthropic.com → 401 → refuses to start
+
+### Proxy NEVER truncates/compacts (R12 principle)
+- Proxy-level truncation causes catastrophic context loss ("completely forgets everything")
+- CC built-in auto-compact is sole mechanism — same outcome but CC's own decision
+- Input overflow → invalid_request_error (CC stops, user starts new conversation)
+
+### ModelScope limits
+- Input token limit: 202,745 (confirmed by ModelScope error)
+- Quota: 200 requests/id/day per variant × 1000 variants = 200K/day theoretical max
+- Daily quota resets; 429 insufficient_quota is genuine exhaustion, not config fixable
+
+### /health endpoint — NEVER use /health for monitoring
 - Use /health/liveliness only. /health triggers per-deployment checks → fd exhaustion.
 
-### insufficient_quota 429 → rate_limit_error (CC exponential backoff)
-- CC treats rate_limit_error as temporary throttle → waits for quota recovery
-- Daily quota resets — backoff allows CC to survive exhaustion periods
+## Parameter Change History (condensed)
 
-## Test Results (2026-06-05, after R3 config sync)
-- dsv4p via proxy → 42001: ✅ 200 (thinking + content, Anthropic format)
-- glm5.1 via proxy → 41003: ✅ 429 insufficient_quota (correct — genuine quota exhaustion)
-- All 6 containers: ✅ healthy
-- Proxy routing: ✅ glm5.1 → test41003 (verified docker inspect + proxy log)
-- proxy.py retry-after: ✅ restored
+| Round | Changes | Result |
+|-------|---------|--------|
+| R1-5 | cooldown params, socket bug, conn_retry removal, num_retries=5 | 85.4%→100% |
+| R12 | Removed proxy auto-compact; safety 120K→170K; contextWindow 120K→170K; InputReject→invalid_request_error | 80%→97% |
+| R7 | CHARS_PER_TOKEN 2.0→3.0; safety 170K→190K; contextWindow 170K→190K; compactWindow 150K→180K | 99.6% |
+| R15 | compactWindow 180K→140K (GLM IQ); contextWindow/safety 190K→170K (alignment) | 99.8% |
+| R16 | compactWindow 140K→155K (CC overestimation 1.7x → too early compact) | 99.8% best ever |
+| R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
+
+## 11 Immutable Variant Model IDs
+
+**GLM-5.1 (41003/41001):** `zhipuai/glm-5.1`, `ZHipuAI/GlM-5.1`, `ZhIpuAI/GLm-5.1`, `ZhiPuAI/gLM-5.1`, `ZhipUAI/GlM-5.1`, `ZhipuAi/GLM-5.1`, `ZhipuaI/GLm-5.1`, `zhipuAI/gLM-5.1`, `ZHIPUAI/GLM-5.1`, `zhipuai/GLM-5.1`, `ZhiPUAI/glm-5.1`
+
+**DSv4P (42001):** `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
+
+**NEVER modify/delete these — each variant has independent 200/id/day quota. rpm=1 per deployment is also immutable.**
