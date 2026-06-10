@@ -60,8 +60,8 @@ def _ensure_url_path(url: str, path: str) -> str:
 # Per-model upstream routing — chat_url and models_url
 MODEL_UPSTREAMS = {
     "glm5.1": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_uni41001:4000/v1/models"), "/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_test41003:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_test41003:4000/v1/models"), "/v1/models"),
     },
     "dsv4p": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"), "/v1/chat/completions"),
@@ -71,25 +71,51 @@ MODEL_UPSTREAMS = {
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
 
 # Model name → LiteLLM model_name mapping
+# Tier-based routing (inspired by cc-switch): Claude model tiers → backend models.
+# "opus" tier → glm5.1 (high-capability, 7000 dep pool, with thinking)
+# "sonnet" tier → glm5.1 (same backend, without thinking for simpler tasks)
+# "haiku" tier → dsv4p (lighter model, 77 dep pool, fast responses)
+# This allows other agents (OpenCode, Codex, etc.) to specify claude-tier names
+# or OpenAI-style names and get routed to appropriate backends automatically.
+# NOTE: Current CC always requests claude-opus-4-8 → mapped to glm5.1 (with thinking).
+# Other agents may request different tiers → mapped to different backends.
 MODEL_MAP = {
+    # Our own model names (direct)
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
     "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
     # Claude Code names → glm5.1 (with and without date suffixes)
+    # ALL Claude opus/sonnet names → glm5.1 for maximum quota capacity
     "claude-opus-4-8": "glm5.1",
     "claude-opus-4-7": "glm5.1",
     "claude-opus-4": "glm5.1",
     "claude-sonnet-4-6": "glm5.1",
     "claude-sonnet-4": "glm5.1",
-    "claude-haiku-4-5": "glm5.1",
+    "claude-haiku-4-5": "dsv4p",  # haiku tier → dsv4p (lighter backend, fast responses)
     "claude-sonnet-4-20250514": "glm5.1",
     "claude-sonnet-4-6-20250514": "glm5.1",
     "claude-opus-4-20250514": "glm5.1",
     "claude-opus-4-8-20250514": "glm5.1",
-    "claude-haiku-4-5-20251001": "glm5.1",
+    "claude-haiku-4-5-20251001": "dsv4p",  # haiku tier → dsv4p
     "claude-3-5-sonnet-20241022": "glm5.1",
-    "claude-3-5-haiku-20241022": "glm5.1",
+    "claude-3-5-haiku-20241022": "dsv4p",  # haiku tier → dsv4p
     "claude-3-opus-20240229": "glm5.1",
+    # OpenAI-style names for other agents (OpenCode, Codex, etc.)
+    # opus-tier equivalent → glm5.1
+    "gpt-4o": "glm5.1",
+    "gpt-4o-mini": "dsv4p",      # mini tier → dsv4p (lighter)
+    "o3": "glm5.1",
+    "o3-mini": "dsv4p",
+    "o4-mini": "dsv4p",
+    "gpt-4.1": "glm5.1",
+    "gpt-4.1-mini": "dsv4p",
+    "gpt-4.1-nano": "dsv4p",
+    "codex-mini-latest": "glm5.1",  # Codex CLI default → glm5.1 (strong coding)
 }
+
+# Thinking support per backend model
+# glm5.1 supports reasoning_effort + thinking_budget (ModelScope GLM-5.1 feature)
+# dsv4p does NOT support reasoning_effort → proxy must NOT send thinking params to dsv4p
+THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}
 
 # Input token safety limits — read from env vars, fallback to 128000
 # docker-compose passes MODEL_INPUT_TOKEN_SAFETY_GLM51/DSV4P env vars.
@@ -448,8 +474,9 @@ def anth_to_openai(body, target_model=None):
     # ModelScope GLM-5.1 requires: max_completion_tokens > thinking_budget
     # Claude Code sends thinking.budget_tokens=32768 (default) with max_tokens=8192
     # We must ensure max_completion_tokens > thinking_budget
-    # NOTE: DSv4P does NOT support reasoning_effort — only set it for glm5.1
-    if body.get("thinking"):
+    # NOTE: DSv4P does NOT support reasoning_effort — only set it for models with thinking support
+    # Use THINKING_SUPPORT dict for multi-agent compatibility (not hardcoded "glm5.1")
+    if body.get("thinking") and THINKING_SUPPORT.get(target_model, False):
         thinking_cfg = body["thinking"]
         budget = thinking_cfg.get("budget_tokens", 8000)
         # Pass thinking_budget directly for ModelScope GLM-5.1
@@ -462,7 +489,7 @@ def anth_to_openai(body, target_model=None):
             output_tokens = required_min
             oai_body["max_tokens"] = output_tokens
             oai_body["max_completion_tokens"] = output_tokens
-        # Set reasoning_effort for GLM-5.1 only — DSv4P doesn't support it
+        # Set reasoning_effort for thinking-capable models only
         if target_model == "glm5.1":
             if budget >= 10000:
                 oai_body["reasoning_effort"] = "high"
@@ -1521,16 +1548,27 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _anthropic_models_list(self):
         """Return Anthropic-format model list with context_window.
         CC uses this context_window to decide when to trigger built-in auto-compact.
-        Reporting context_window=MODEL_INPUT_TOKEN_SAFETY (120K) tells CC the
-        effective capacity, so CC's auto-compact (settings.json autoCompactWindow=110K)
-        triggers before hitting ModelScope's actual 202745 limit.
+        Reporting context_window=MODEL_INPUT_TOKEN_SAFETY tells CC the effective capacity,
+        so CC's auto-compact triggers at the right time.
+
+        Multi-agent compatibility (inspired by cc-switch): returns ALL model aliases
+        from MODEL_MAP, not just deduplicated backend names. Each alias shows its
+        backend (display_name) and context_window. Agents can request any alias ID
+        and the proxy will route to the correct backend via MODEL_MAP.
+
+        For CC specifically: it already knows "claude-opus-4-8" and will request it.
+        The model list confirms the context_window for CC's auto-compact decisions.
+        For other agents (OpenCode, Codex): they can discover available model IDs
+        and choose appropriate ones (e.g., "gpt-4o" → glm5.1, "gpt-4o-mini" → dsv4p).
         """
         all_models = []
         seen_ids = set()
-        # Include all model IDs from MODEL_MAP (known Claude names + our names)
+        # Include ALL model IDs from MODEL_MAP — each alias is a valid requestable ID
+        # Deduplicate by model_id (not by mapped backend), so aliases like
+        # claude-opus-4-8 and gpt-4o both appear but point to same backend
         for model_id, mapped in MODEL_MAP.items():
-            if mapped not in seen_ids:
-                seen_ids.add(mapped)
+            if model_id not in seen_ids:
+                seen_ids.add(model_id)
                 safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
                 all_models.append({
                     "id": model_id,
@@ -1539,9 +1577,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "created_at": "2024-01-01T00:00:00Z",
                     "context_window": safety,
                 })
-        # Also include the canonical model names (glm5.1, dsv4p)
+        # Also include the canonical model names (glm5.1, dsv4p) if not already covered
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
+                seen_ids.add(model_key)
                 safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 128000)
                 all_models.append({
                     "id": model_key,

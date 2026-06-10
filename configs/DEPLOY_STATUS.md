@@ -1,13 +1,16 @@
-# Deploy Status — opc_uname (R17, 2026-06-11)
+# Deploy Status — opc_uname (R18, 2026-06-11)
 
 ## Architecture
 ```
-CC → 40001(proxy) → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope
-                    → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope
-                    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys) [BACKUP]
+Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + tier routing + metrics)
+    → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope [PRIMARY]
+    → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope [HAIUK/MINI tier]
+    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys) [BACKUP]
 ```
 
-Proxy does **format conversion + force-stream + stream_usage + metrics logging only**. No retry, no truncation, no auto-compact. LiteLLM handles retry/fallback/routing/cooldown.
+Proxy does **format conversion + force-stream + stream_usage + tier-based model routing + metrics logging**. No retry, no truncation, no auto-compact. LiteLLM handles retry/fallback/routing/cooldown.
+
+**Tier-based routing (inspired by cc-switch)**: opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking). OpenAI-style names (gpt-4o, gpt-4o-mini, codex-mini-latest) also supported for multi-agent compatibility.
 
 ## Containers (all healthy)
 | Container | Port | Role | Notes |
@@ -15,8 +18,8 @@ Proxy does **format conversion + force-stream + stream_usage + metrics logging o
 | glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192 |
 | glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=4096 |
 | dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096 |
-| auth_to_api_40001 | :40001 | Proxy (opc_uname) | Format conversion + stream_usage + metrics |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | Same codebase |
+| auth_to_api_40001 | :40001 | Proxy (opc_uname) | Format conversion + tier routing + stream_usage + metrics |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | Same codebase + LITELLM_MODELS_URL now configured |
 | cc_postgres | :5432 | LiteLLM DB | — |
 
 ## Deploy Method
@@ -35,7 +38,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ```
 Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `DOCKER_BUILDKIT=0` required (BuildKit ignores systemd proxy).
 
-## Current Parameters (R17)
+## Current Parameters (R18)
 
 | Parameter | Value | File | Notes |
 |-----------|-------|------|-------|
@@ -43,7 +46,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger threshold |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | settings.json env + .bashrc + .profile | Env var backup for CC |
 | MODEL_INPUT_TOKEN_SAFETY | 170000 | docker-compose.yml | Reported to CC via /v1/models |
-| CHARS_PER_TOKEN_ESTIMATE | 3.0 (docker-compose) | docker-compose.yml | opc_uname running container still 2.0 (needs recreate); opc2_uname running 3.0 ✅ |
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 | docker-compose.yml | Both containers running 3.0 ✅ (resolved R17 recreate) |
 | PROXY_TIMEOUT | 300 | docker-compose.yml | Seconds |
 | MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
 | MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
@@ -71,7 +74,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | Unique deployments used | 1660/7000 | — |
 | Quota remaining | 150-199 (all healthy) | — |
 
-**06-11 so far**: 140 requests, 100% success, avg latency 20.0s, avg est_tokens 62K, max est_tokens 107K.
+**06-11 so far**: 181 requests, 100% success, avg latency 20.2s, max est_tokens 109K (no >155K or >170K), quota 197-199 avg=199.
 
 ## Historical Trend
 
@@ -83,6 +86,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 707 | 99.6% | 19.3s | Post-R7 |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
+| 06-11 | 181 | 100% | 20.2s | Zero errors, CPT=3.0 confirmed |
 
 ## Key Issues & Notes
 
@@ -93,11 +97,10 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - **CC overestimation 1.7x**: at autoCompactWindow=155K trigger, median real tokens ≈ 91K (45% capacity)
 - Write critical info to CLAUDE.md/memory — these survive compaction
 
-### CHARS_PER_TOKEN_ESTIMATE discrepancy (opc_uname only)
-- docker-compose.yml = 3.0, but opc_uname running container = 2.0 (container was restarted, not recreated)
-- Only affects metrics logging (estimated_input_tokens calculation), NOT CC behavior
-- opc2_uname running container = 3.0 ✅ (fully synced in R17)
-- Container recreate needed on opc_uname: `docker compose up -d --force-recreate auth_to_api_40001`
+### CHARS_PER_TOKEN_ESTIMATE — resolved ✅
+- Both containers now running CPT=3.0 (Jun 11 metrics confirm ratio=3.0005)
+- Previous discrepancy (docker-compose=3.0 vs running=2.0) was from container restart without recreate
+- Resolved by force-recreate during R15/16 deployment on Jun 10
 
 ### CC v2.1.170 startup connectivity check
 - Uses **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json
@@ -117,6 +120,41 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 ### /health endpoint — NEVER use /health for monitoring
 - Use /health/liveliness only. /health triggers per-deployment checks → fd exhaustion.
 
+## R18 Changes (2026-06-11)
+
+### 1. LITELLM_MODELS_URL bug fix (CRITICAL)
+- **40002 proxy**: Missing BOTH `LITELLM_MODELS_URL_GLM51` and `LITELLM_MODELS_URL_DSV4P` env vars → /v1/models used wrong defaults → agents couldn't discover available models
+- **40001 proxy**: Missing `LITELLM_MODELS_URL_DSV4P` → dsv4p models returned via default pointing to old backup 41001
+- **Fix**: Added both env vars to docker-compose.yml for both proxy containers, pointing to correct backend:
+  - `LITELLM_MODELS_URL_GLM51=http://glm5.1_test41003:4000/v1/models` (primary, not old backup 41001)
+  - `LITELLM_MODELS_URL_DSV4P=http://dsv4p_uni42001:4000/v1/models`
+
+### 2. Tier-based model routing (cc-switch inspired)
+- **Before**: All Claude model names (opus, sonnet, haiku) mapped to glm5.1 → wasted dsv4p's 77-deployment pool
+- **After**: Tier routing — opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking)
+- **New MODEL_MAP entries**: gpt-4o/gpt-4.1→glm5.1, gpt-4o-mini/gpt-4.1-mini/o3-mini/o4-mini→dsv4p, codex-mini-latest→glm5.1
+- **Rationale**: Lighter tasks (haiku, mini) don't need 7000-deployment pool; dsv4p is sufficient and frees glm5.1 quota for heavy tasks
+
+### 3. THINKING_SUPPORT dict
+- **Before**: Hardcoded `if body.get("thinking"):` → thinking params sent to ALL backends including dsv4p (doesn't support it)
+- **After**: `THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}` + conditional: `if body.get("thinking") and THINKING_SUPPORT.get(target_model, False)`
+- **Rationale**: dsv4p doesn't support extended thinking; sending thinking params causes errors or wasted tokens
+
+### 4. _anthropic_models_list expansion (2→29 aliases)
+- **Before**: Deduplication by backend name (mapped) → only glm5.1 and dsv4p appeared in /v1/models response
+- **After**: Deduplication by model_id → all 29 requestable model aliases appear
+- **Rationale**: Other agents (OpenCode, Codex, etc.) need to see all available model IDs to route correctly
+
+### 5. Haiku→dsv4p routing fix
+- **Before**: claude-haiku-4-5, claude-haiku-4-5-20251001, claude-3-5-haiku-20241022 all → glm5.1
+- **After**: All three → dsv4p (no thinking support, lighter model)
+- **Rationale**: Haiku is a lightweight model; dsv4p's 77-deployment pool is adequate; frees glm5.1's 7000-deployment pool for heavy opus/sonnet tasks
+
+### 6. Gateway package sync
+- Monolithic proxy.py AND modular gateway package (6 files) both updated with same changes
+- Running proxy uses modular gateway package (Dockerfile uses litellm base image + gateway/)
+- Repo configs/proxy/Dockerfile (python:3.13-alpine) is documentation-only; actual running Dockerfile uses litellm base image
+
 ## Parameter Change History (condensed)
 
 | Round | Changes | Result |
@@ -127,6 +165,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R15 | compactWindow 180K→140K (GLM IQ); contextWindow/safety 190K→170K (alignment) | 99.8% |
 | R16 | compactWindow 140K→155K (CC overestimation 1.7x → too early compact) | 99.8% best ever |
 | R17 | opc2_uname full sync: docker-compose.yml + litellm num_retries 30→8 + settings.json 155K + HTTPS_PROXY + proxy.py parity | 99.8%+ stable |
+| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix (40002 missing both, 40001 missing dsv4p) + _anthropic_models_list expansion (2→29 aliases) + haiku→dsv4p routing fix + gateway package sync | Pending remote validation |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs

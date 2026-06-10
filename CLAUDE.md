@@ -52,7 +52,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics)
 
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
-| CHARS_PER_TOKEN_ESTIMATE | 3.0 (docker-compose) / **2.0 (running)** | 1.5-6 | 实际chars/token=3.11，3.0保守。**注意：运行容器=2.0（需force-recreate才生效），仅影响metrics日志不影响CC行为** |
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | 实际chars/token=3.11，3.0保守（3%误差）。Jun 11 metrics确认ratio=3.0005 ✅ |
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的context_window |
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | 同上 |
 | MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |

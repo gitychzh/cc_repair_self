@@ -227,6 +227,7 @@ services:
       LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
       LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
@@ -273,7 +274,9 @@ services:
     restart: unless-stopped
     environment:
       LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
       LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://dsv4p_uni42001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
