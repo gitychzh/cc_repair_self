@@ -97,6 +97,8 @@ logs/
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
 | Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
+| Shell env vars | `.bashrc` + `.profile` + `/etc/environment` | 新终端生效 |
+| CC startup check | shell env vars only（不读settings.json） | 必须 .bashrc+/.profile |
 
 ## 重启命令
 
@@ -164,4 +166,4 @@ git push  # 自动走代理
 
 **proxy-level retry增加37%延迟。** 数据证明：有proxy_retry的请求avg=15963ms vs 正常11635ms。proxy只做格式转换，retry由LiteLLM负责。
 
-**proxy auto-compact导致彻底忘记上下文。** proxy截断消息历史（保留最近5组+砍掉其余）→用户完全丢失早期对话。CC内置auto-compact也会丢上下文但至少是CC自己的摘要。更糟的是：三层压缩机制（proxy截断、400→529 overloaded触发CC compact、CC内置compact）互相叠加，复杂且效果差。正确做法：删除proxy层面所有压缩干预，只靠CC内置auto-compact（autoCompactWindow尽量高=110K/120K减少触发频率），如果真的超过ModelScope上限返回invalid_request_error让CC直接停止→用户手动开新对话。
+**CC v2.1.170+ startup connectivity check不读settings.json env vars。** CC v2.1.170交互模式启动时，connectivity check连接api.anthropic.com用的是shell env vars（ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY、HTTPS_PROXY），不是settings.json里的env vars。settings.json的env vars只在startup check通过后才生效。这意味着：即使settings.json配置正确，如果shell env里没有ANTHROPIC_BASE_URL和ANTHROPIC_API_KEY，CC会直接连接api.anthropic.com → 401/403 → ERR_BAD_REQUEST → 拒绝启动。修复方法：确保shell env vars始终可用（.bashrc + .profile + /etc/environment 三层保障）。没有.profile → 登录shell不source .bashrc → env vars缺失 → CC启动失败。
