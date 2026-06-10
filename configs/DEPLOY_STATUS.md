@@ -71,7 +71,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | Unique deployments used | 1660/7000 | — |
 | Quota remaining | 150-199 (all healthy) | — |
 
-**06-11 so far**: 17 requests, 100% success.
+**06-11 so far**: 140 requests, 100% success, avg latency 20.0s, avg est_tokens 62K, max est_tokens 107K.
 
 ## Historical Trend
 
