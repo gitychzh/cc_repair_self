@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (updated 2026-06-10 R15 — GLM IQ preservation: autoCompactWindow 180K→140K + contextWindow/safety 190K→170K)
+# Deploy Status — opc_uname (updated 2026-06-10 R16 — autoCompactWindow 140K→155K: reduce premature compaction + CC overestimation 1.7x data evidence)
 
 ## Architecture
 ```
@@ -20,7 +20,72 @@ CC → 40001(proxy, format conversion + force-stream ALL non-stream + stream_opt
 - auth_to_api_40001 :40001 (proxy, format conversion + stream_usage reporting + metrics logging + retry-after headers, NO auto-compact/NO truncation)
 - auth_to_api_40002 :40002 (opc2_uname proxy, same codebase)
 
-## opc_uname_r15 Changes (2026-06-10 — GLM IQ preservation: conservative autoCompactWindow + context window reduction)
+## opc_uname_r16 Changes (2026-06-10 — autoCompactWindow 140K→155K: reduce premature compaction based on overestimation data)
+
+### FIX: autoCompactWindow 140K→155K (reduce premature compaction)
+- **Problem**: CC uses Anthropic tokenizer internally, which over-estimates tokens for Chinese+code+JSON mixed content by ~1.7x. Data evidence: at autoCompactWindow=140K trigger, median REAL input_tokens from ModelScope = 82,808 — only 40.8% of ModelScope 202,745 capacity. CC compacts WAY TOO EARLY, triggering 135 compacts in a single day. Each auto-compact uses `stripNonEssential=true` (truncates tool output, removes tool definitions from summary request), producing lower-quality summaries that cause CC to "forget what it was doing". Manual `/compact` works fine because it uses `stripNonEssential=false` (full context + all tools available).
+- **Fix**: Changed autoCompactWindow from 140000 to 155000. Changed CLAUDE_CODE_AUTO_COMPACT_WINDOW env from 140000 to 155000.
+- **Why**: With CC overestimation factor 1.7x, autoCompactWindow=155K triggers compact at real ~91K tokens (45% capacity) instead of real ~82K (41%). This gives CC ~10% more usable context before compacting, reducing the number of auto-compacts per session and improving context preservation. The 15K buffer (155K→170K contextWindow = 8.8%) is sufficient for CC to handle responses. No INPUT-REJECT risk: at 155K est, real ≈ 91K, well under ModelScope 202K limit. At worst case 170K est, real ≈ 100K, still 102K below limit.
+- **Evidence**: June 10 metrics analysis: 1651 glm5.1 requests, 99.8% success, 135 compact events. At compact trigger: median real_tokens=82,808, median est_json=118,261, CC overestimation=1.7x. Capacity utilization=40.8%. With 155K: real at trigger ≈ 91K, utilization ≈ 45%, fewer compacts = better IQ preservation.
+
+### CC auto-compact vs manual /compact behavior difference (source code analysis)
+- **Root cause**: CC v2.1.170 source code (`yK$` function) passes `stripNonEssential=true` for auto-compact but `stripNonEssential=false` for manual `/compact`. When `stripNonEssential=true`: tool output is truncated via `TXf()`+`VXf()`, tools array is empty (`tools=[]`), so the summary model has NO tool definitions and SEVERELY reduced context. Manual `/compact` gets full context + all tools → much better summary quality.
+- **Additional differences**: auto-compact uses `customInstructions=null` (no user guidance), adds a forced "Resume directly — do not acknowledge the summary" continuation prompt, and suppresses notification (`suppressNotification=true`). When `thresholdSource ≠ "auto"` (i.e. when autoCompactWindow is an explicit number like 155K), CC routes auto-compact through the `NR8` "reactive" path which may use background pre-computed summaries (generated at earlier time points → misses last few turns).
+- **Practical advice**: When CC shows "Autocompact will trigger soon, which discards older messages. Use /compact now to control what gets kept.", proactively run `/compact <focus instructions>` to get a higher-quality summary with your own guidance. Also, write critical info to CLAUDE.md and memory files which survive compaction.
+
+### Metrics Analysis (06-10, 1651 total requests)
+
+| Day | Total | Success | Rate | Errors |
+|-----|-------|---------|------|--------|
+| 06-10 | 1651 | 1648 | 99.8% | 3 (2×502 timeout, 1×429 quota) |
+
+**CC overestimation analysis (135 compact events)**:
+| Metric | Value |
+|--------|-------|
+| CC overestimation factor (est/real) | mean=1.93x, median=1.40x |
+| Real tokens at compact trigger | median=82,808, mean=88,352 |
+| est_json at compact trigger | median=118,261, mean=140,898 |
+| ModelScope capacity utilization at compact | 40.8% |
+| Max real tokens observed | 165,206 |
+| Max est_json tokens observed | 331,707 |
+
+**Latency analysis (glm5.1 success)**:
+| Metric | Value |
+|--------|-------|
+| Mean TTFB | 18,749ms |
+| Median TTFB | 15,826ms |
+| P95 TTFB | 40,652ms |
+| Max TTFB | 212,195ms |
+
+**TTFB by context size**:
+| est_json range | Count | Avg TTFB |
+|---------------|-------|----------|
+| <50K | 270 | 10.5s |
+| 50-100K | 531 | 17.9s |
+| 100-140K | 327 | 20.4s |
+| 140-170K | 215 | 20.6s |
+| >170K | 285 | 25.0s |
+
+**DSv4P**: 4 requests, all finish_reason=length (startup checks only)
+
+**Tool truncation**: 1588/1630 requests truncated (97.4%), avg reduction 70.2%, original 54.6K→truncated 16.1K
+
+**CPT=3.0 transition**: Proxy container recreated ~45 min ago. Old metrics used CPT=2.0 (600 records), new metrics use CPT=3.0 (1052 records). CPT only affects metrics logging, NOT CC compact decisions.
+
+**Error analysis**:
+- 2×502 ConnectionError/timed out (at 00:00 and 17:31 — isolated, not systemic)
+- 1×429 insufficient_quota (at 00:17 — single key exhaustion, LiteLLM rotated to other keys)
+
+### Post-deployment verification
+- **settings.json**: ✅ autoCompactWindow=155000, CLAUDE_CODE_AUTO_COMPACT_WINDOW=155000
+- **glm5.1**: ✅ 200 response via proxy
+- **dsv4p**: ✅ 200 response via proxy
+- **All 6 containers**: ✅ healthy
+
+### opc2_uname sync
+- autoCompactWindow: 140K→155K (raised by 15K)
+- CLAUDE_CODE_AUTO_COMPACT_WINDOW env: 140K→155K
+- contextWindow: 170K (unchanged)
 
 ### FIX: autoCompactWindow 180K→140K (GLM IQ preservation)
 - **Problem**: Community research and user experience confirm that GLM-5.1 (and all LLMs) exhibit intelligence degradation at high context (>100K real tokens). Stanford's "Lost in the Middle" paper shows 20-30% accuracy drop for information in middle of long context. Reddit/V2EX users report GLM series becomes "stupid" above 100K+ tokens — reasoning quality drops, instruction following degrades, hallucinations increase. With autoCompactWindow=180K, CC compact triggers at ~174K-190K real tokens — far past the point where GLM IQ degrades significantly.

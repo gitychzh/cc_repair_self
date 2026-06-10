@@ -57,8 +57,8 @@ Claude Code → :40001 proxy (格式转换 + metrics)
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | docker-compose.yml env |
 | CHARS_PER_TOKEN_ESTIMATE | 2.0 | 1.5-6 | docker-compose.yml env |
 | contextWindow | 170000 | 120000-190000 | claude/settings-*.json |
-| autoCompactWindow | 150000 | 90000-180000 | claude/settings-*.json |
-| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 150000 | 90000-180000 | claude/settings-*.json env |
+| autoCompactWindow | 155000 | 90000-180000 | claude/settings-*.json |
+| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | claude/settings-*.json env |
 
 ## 项目文件结构
 
