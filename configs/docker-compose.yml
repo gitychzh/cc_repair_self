@@ -137,10 +137,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2048M
           cpus: "1.0"
         reservations:
-          memory: 512M
+          memory: 768M
           cpus: "0.5"
     healthcheck:
       test:

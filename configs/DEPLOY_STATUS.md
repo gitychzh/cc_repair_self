@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (R18.1, 2026-06-11)
+# Deploy Status — opc_uname (R18.2, 2026-06-11)
 
 ## Architecture
 ```
@@ -17,7 +17,7 @@ Proxy does **format conversion + force-stream + stream_usage + tier-based model 
 |-----------|------|------|-------|
 | glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192 |
 | glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=4096 |
-| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096 |
+| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096, memory limit 2GiB (R18.2) |
 | auth_to_api_40001 | :40001 | Proxy (opc_uname) | Format conversion + tier routing + stream_usage + metrics |
 | auth_to_api_40002 | :40002 | Proxy (opc2_uname) | Same codebase + LITELLM_MODELS_URL now configured |
 | cc_postgres | :5432 | LiteLLM DB | — |
@@ -64,10 +64,10 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
 |--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 925 | 36 |
+| Total requests | 1887 | 48 | 994 | 36 |
 | Success rate | 99.8% | 100% | 97.5%* | 100% |
-| Errors | 2×502, 1×429 | 0 | 20×429 token-limit†, 3×other | 0 |
-| Avg TTFB | 19.0s | 6.0s | 19.3s | 8.5s |
+| Errors | 2×502, 1×429 | 0 | 25×429 token-limit† | 0 |
+| Avg TTFB | 19.0s | 6.0s | 19.2s | 8.5s |
 | P50 TTFB | 16.2s | 5.0s | 17.7s | — |
 | P90 TTFB | 33.0s | — | 32.8s | — |
 | P95 TTFB | — | — | 39.2s | — |
@@ -80,9 +80,9 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | MS quota remaining | 150-199 | — | 1705 avg at hour 16 | — |
 
 \* *Excluding 429 burst: 99.8% (902/905)*
-† *429 burst at 16:05-16:20 — ALL 7 keys exhausted ModelScope TOKEN quota simultaneously (RPM quota still fine: ms_requests_remaining=1705). Same keys across all deployments → fallback won't help. Burst resolved after 15min; low impact: 20/925=2.2%*
+† *429 burst at 16:05-16:50 — ALL 7 keys exhausted ModelScope TOKEN quota simultaneously (RPM quota still fine: ms_requests_remaining=1705). Same keys across all deployments → fallback won't help. 25 errors in 45 min; low impact: 25/994=2.5%*
 
-**06-11 full analysis**: 925 reqs, 97.5% success (20×429 token-limit burst at 16:05-16:20, all 7 keys' per-key token quota exhausted simultaneously). Excluding burst: 99.8% success. Avg TTFB 19.3s, P95=39.2s, P99=51.8s. Max actual input_tokens=135K (ModelScope limit=202K, safe margin). Proxy est/actual tokens=1.36x median (CPT=3.0 overestimates vs actual chars/token=4.08 — but this only affects INPUT-WARN threshold, not CC auto-compact). dsv4p usage: 2% of total (by design: haiku/mini tier only). 14 finish_reason=length requests (all input≤7 tokens, CC startup checks, harmless). **TTFB increase**: Jun 9 avg 12s → Jun 10-11 avg 19-20s at same conversation depth (60% increase, ModelScope server-side — time-of-day pattern: peak 14-16h→25-32s, off-peak 0-2h→10s). Not config-fixable.
+**06-11 full analysis**: 994 reqs, 97.5% success (25×429 token-limit burst at 16:05-16:50, all 7 keys' per-key token quota exhausted simultaneously). Excluding burst: 99.8% success. Avg TTFB 19.2s, P95=39.4s, P99=51.8s. Max actual input_tokens=135K (ModelScope limit=202K, safe margin). Proxy est/actual tokens=1.36x median (CPT=3.0 overestimates vs actual chars/token=4.08 — but this only affects INPUT-WARN threshold, not CC auto-compact). dsv4p usage: 2% of total (by design: haiku/mini tier only). 14 finish_reason=length requests (all input≤7 tokens, CC startup checks, harmless). **TTFB increase**: Jun 9 avg 12s → Jun 10-11 avg 19-20s at same conversation depth (60% increase, ModelScope server-side — time-of-day pattern: peak 14-16h→25-32s, off-peak 0-2h→10s). Not config-fixable. **dsv4p OOM risk**: container at 90.39% memory (925.6MiB/1GiB) → upgraded to 2GiB limit (R18.2).
 
 ## Historical Trend
 
@@ -94,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 925 | 97.5% (99.8% excl burst) | 19.3s | 20×429 token-limit burst (15min), TTFB+60% vs Jun9 (ModelScope), est/actual=1.36x |
+| 06-11 | 994 | 97.5% (99.8% excl burst) | 19.2s | 25×429 token-limit burst (45min), TTFB+60% vs Jun9 (ModelScope), est/actual=1.36x, dsv4p OOM risk → R18.2 |
 
 ## Key Issues & Notes
 
@@ -182,6 +182,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R17 | opc2_uname full sync: docker-compose.yml + litellm num_retries 30→8 + settings.json 155K + HTTPS_PROXY + proxy.py parity | 99.8%+ stable |
 | R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix + _anthropic_models_list expansion (2→29) + haiku→dsv4p + gateway package sync | 100% success, zero errors ✅ |
 | R18.1 | Metrics deep analysis: 429 token-limit burst identified (not RPM), ModelScope dual quota documented, TTFB+60% is server-side, CPT=3.0 accuracy verified (1.36x overest vs actual 4.08), /health endpoint clarified for proxy vs LiteLLM | No param changes — all current settings performing well within range |
+| R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39% utilization=925.6MiB/1GiB), reservations 512M→768M | Prevents dsv4p OOM kill, verified 51.13% after recreate ✅ |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs
