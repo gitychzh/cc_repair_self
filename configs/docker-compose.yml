@@ -1,6 +1,6 @@
-# Two-model architecture: 41001 (glm5.1-backup, 1000var×7key=7000) + 41003 (glm5.1-primary, 1000var×7key=7000) + 42001 (dsv4p, 11var×7key=77)
-# proxy.py (40001/40002) — format conversion + metrics logging
-# LiteLLM handles all retry/fallback/routing — proxy does NOT retry, compact, or truncate
+# Two-model architecture: 41001 (glm5.1-backup, 7key-groups×1000var=7000) + 41003 (glm5.1-primary, 7key-groups×1000var=7000) + 42001 (dsv4p, 7key-groups×11var=77)
+# proxy.py (40001/40002) — format conversion + metrics logging + key round-robin (429 cycles through all 7 keys)
+# LiteLLM handles variant-level routing within each key group — proxy cycles keys on 429
 #
 # Port assignments: 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p
 # ulimit nofile: 8192 soft / 65536 hard — prevents fd exhaustion with large deployment counts
@@ -235,6 +235,7 @@ services:
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
       MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
+      NUM_KEYS: "7"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -284,6 +285,7 @@ services:
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
       MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
+      NUM_KEYS: "7"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:

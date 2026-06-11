@@ -9,14 +9,21 @@
 ## 架构
 
 ```
-Claude Code → :40001/40002 proxy (格式转换 + metrics)
-             → :41003 LiteLLM (glm5.1, 1000变体×7keys=7000 dep) [PRIMARY]
-             → :42001 LiteLLM (dsv4p, 11变体×7keys=77 dep)
-             → :41001 LiteLLM (glm5.1, 1000变体×7keys=7000 dep) [BACKUP]
+Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
+             → :41003 LiteLLM (glm5.1k1~k7, 7 key groups × 1000 variants = 7000 dep) [PRIMARY]
+             → :42001 LiteLLM (dsv4pk1~k7, 7 key groups × 11 variants = 77 dep)
+             → :41001 LiteLLM (glm5.1k1~k7, 7 key groups × 1000 variants = 7000 dep) [BACKUP]
              → ModelScope API
 ```
 
-核心原则：**proxy.py 只做格式转换和 metrics logging，不做 retry、不做压缩、不做截断。LiteLLM 自带的功能（retry/fallback/routing/cooldown）不重复实现。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy.py 做格式转换 + metrics logging + key round-robin（429时按顺序换下一个key，7 key全429才返回agent），不做压缩、不做截断。LiteLLM 负责 variant-level routing（每个key group内simple-shuffle）和500/timeout的retry。压缩完全由 CC 内置 auto-compact 控制。**
+
+**Key Round-Robin (R19) 机制：**
+- Proxy 维护 key 轮换 counter：request N → key_idx = counter % 7 → model `glm5.1k{idx+1}`
+- 429 时：按顺序换下一个key（k1→k2→k3→k4→k5→k6→k7→k1→...）
+- 7 key 全部 429 → 返回 429 给 agent（所有key的token quota耗尽）
+- 每个key的 429 尝试都记录在 error_detail 日志中
+- 成功时：记录 key_idx 和 litellm_model，以及之前的 429 cycling 信息
 
 ## 不可变更约束（NEVER CHANGE）
 
@@ -24,7 +31,8 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics)
 |------|------|
 | **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改** |
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
-| frontend model_name | `glm5.1`, `dsv4p` — proxy/LiteLLM使用这两个名字 |
+| frontend model_name (agent-facing) | `glm5.1`, `dsv4p` — CC/agent请求使用这两个名字 |
+| LiteLLM model_name (internal) | `glm5.1k1`~`glm5.1k7`, `dsv4pk1`~`dsv4pk7` — proxy映射后发给LiteLLM |
 | Docker container names | `glm5.1_uni41001`, `glm5.1_test41003`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
 | port assignments | 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p |
 
@@ -68,31 +76,29 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics)
 | autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
 
-### LiteLLM router_settings (41003 glm5.1-primary, 7000 dep)
+### LiteLLM router_settings (41003 glm5.1-primary, 7 key groups × 1000 dep each)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
-| num_retries | 8 | 大pool需要更多retry找健康deployment |
+| num_retries | 2 | proxy key cycling替代了LiteLLM的429 retry |
 | cooldown_time | 10 | RPM 1-min窗口，10s proportional |
-| routing_strategy | simple-shuffle | 7000 dep时latency-based-routing开销过高 |
-| RateLimitErrorAllowedFails | 5 | 429容忍度高，防止cascading cooldown |
+| routing_strategy | simple-shuffle | per key group 1000 dep pool |
+| RateLimitErrorAllowedFails | 1 | 429 → proxy cycles to next key group |
 | TimeoutErrorAllowedFails | 2 | |
 | InternalServerErrorAllowedFails | 3 | ModelScope null choices |
 | AuthenticationErrorAllowedFails | 0 | |
 | BadRequestErrorAllowedFails | 0 | |
 
-### LiteLLM router_settings (42001 dsv4p, 77 dep)
+### LiteLLM router_settings (42001 dsv4p, 7 key groups × 11 dep each)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
-| num_retries | 5 | 小pool，5次retry足够 |
-| cooldown_time | 30 | 小pool需要更长cooldown避免循环 |
-| routing_strategy | latency-based-routing | 77 dep小pool，latency routing有效 |
-| RateLimitErrorAllowedFails | 3 | |
+| num_retries | 2 | proxy key cycling替代429 retry |
+| cooldown_time | 10 | |
+| routing_strategy | simple-shuffle | per key group 11 dep pool |
+| RateLimitErrorAllowedFails | 1 | |
 | TimeoutErrorAllowedFails | 2 | |
 | InternalServerErrorAllowedFails | 3 | |
-| rolling_window_size | 30 | latency routing窗口 |
-| lowest_latency_buffer | 2 | latency routing缓冲 |
 
 ## 项目文件结构
 

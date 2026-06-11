@@ -1,0 +1,25 @@
+{
+  // scheduled_tasks.json.template — CC CronCreate 定时任务模板
+  //
+  // 这是 CronCreate 工具的持久化文件格式。
+  // 你可以手动编辑此文件放到 ~/.claude/ 目录，
+  // 但推荐方式是在 CC 对话内部调用 CronCreate 工具（见 register_cron.md）。
+  //
+  // 关键字段:
+  //   - id: 随机8位十六进制标识
+  //   - cron: 标准5字段 cron 表达式（local time）
+  //   - prompt: 每次触发时注入到 CC session 的文字
+  //   - recurring: true = 持续循环，false = 一次性
+  //   - createdAt/lastFiredAt: 毫秒级 Unix timestamp
+
+  "tasks": [
+    {
+      "id": "<RANDOM_8CHAR_HEX>",
+      "cron": "*/<INTERVAL_MINUTES> * * * *",
+      "prompt": "<YOUR_CRON_PROMPT>",
+      "createdAt": "<UNIX_MS_TIMESTAMP>",
+      "lastFiredAt": null,
+      "recurring": true
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  // settings.json.template — Claude Code 配置模板
+  // 复制到 ~/.claude/settings.json，替换 <PLACEHOLDER> 为你的值
+  //
+  // 关键配置说明:
+  //   - env: CC 运行时的环境变量（包括 API 连接信息）
+  //   - permissions.allow: 允许的工具列表（全开放 = 无人值守）
+  //   - defaultMode: bypassPermissions = 无需人工确认
+  //   - skipDangerousModePermissionPrompt: true = 跳过危险模式确认弹窗
+  //   - contextWindow / autoCompactWindow: CC 的上下文管理参数
+  //   - model: CC 使用的模型名（通过 proxy 转换后的 frontend name）
+
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:<PROXY_PORT>",
+    "ANTHROPIC_API_KEY": "<YOUR_API_KEY>",
+    "HTTPS_PROXY": "<YOUR_PROXY_IF_NEEDED>",
+    "HTTP_PROXY": "<YOUR_PROXY_IF_NEEDED>",
+    "NO_PROXY": "localhost,127.0.0.1,<YOUR_LOCAL_NETWORKS>",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192",
+    "API_TIMEOUT_MS": "300000",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "<AUTO_COMPACT_WINDOW_VALUE>"
+  },
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+      "TodoWrite",
+      "NotebookEdit",
+      "Agent",
+      "AskUserQuestion",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "ScheduleWakeup",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "Skill",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "MemoryWrite",
+      "MemoryRead",
+      "MemoryDelete",
+      "MemorySearch",
+      "EnterWorktree",
+      "ExitWorktree"
+    ],
+    "deny": []
+  },
+  "model": "<YOUR_MODEL_NAME>",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "defaultMode": "bypassPermissions",
+  "contextWindow": <CONTEXT_WINDOW_VALUE>,
+  "autoCompactWindow": <AUTO_COMPACT_WINDOW_VALUE>,
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/statusline-command.sh"
+  }
+}
