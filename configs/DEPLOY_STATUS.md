@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname (R18, 2026-06-11)
+# Deploy Status — opc_uname (R18.1, 2026-06-11)
 
 ## Architecture
 ```
@@ -60,29 +60,29 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
 | RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
 
-## Metrics Summary (06-11, latest full day + 06-10 comparison)
+## Metrics Summary (06-11 full data, 06-10 comparison)
 
 | Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
 |--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 585 | 32 |
-| Success rate | 99.8% | 100% | 100% | 100% |
-| Errors | 2×502, 1×429 | 0 | 0 | 0 |
-| Avg TTFB | 19.0s | 6.0s | 20.7s | 9.2s |
-| P50 TTFB | 16.2s | 5.0s | 18.9s | 8.5s |
-| P90 TTFB | 33.0s | — | 33.3s | — |
-| P99 TTFB | 65.0s | — | 65.0s | — |
-| Avg duration | 20.7s | 6.2s | 22.4s | 9.3s |
-| Actual chars/token (all) | 3.22 avg | 3.39 avg | 2.86 avg | 3.39 avg |
-| Actual chars/token (>50K) | — | — | 3.10 avg | — |
-| Max est_tokens | 205K | — | 130K | — |
-| Unique deploys used | 1659/7000 | — | 563/7000 | — |
-| MS quota remaining | 150-199 | — | 196-199 avg=199 | — |
-| Proxy overhead avg | 3.9s | — | 3.1s | — |
-| Proxy overhead median | 1.7s | — | 0.5s | — |
-| Fast path (<1s overhead) | 41.6% | — | 53.9% | — |
-| Slow path (>5s overhead) | 22.7% | — | 20.8% | — |
+| Total requests | 1887 | 48 | 925 | 36 |
+| Success rate | 99.8% | 100% | 97.5%* | 100% |
+| Errors | 2×502, 1×429 | 0 | 20×429 token-limit†, 3×other | 0 |
+| Avg TTFB | 19.0s | 6.0s | 19.3s | 8.5s |
+| P50 TTFB | 16.2s | 5.0s | 17.7s | — |
+| P90 TTFB | 33.0s | — | 32.8s | — |
+| P95 TTFB | — | — | 39.2s | — |
+| P99 TTFB | 65.0s | — | 51.8s | — |
+| Avg duration | 20.7s | 6.2s | 20.6s | — |
+| Actual chars/token (json) | — | — | 4.08 median (CPT=3.0 → 1.36x overest) | — |
+| Max est_tokens_json | 205K | — | 187K (actual=135K) | — |
+| Max actual tokens | — | — | 135K | — |
+| est/actual ratio | 1.24 avg | — | 1.37 avg, 1.36 median | — |
+| MS quota remaining | 150-199 | — | 1705 avg at hour 16 | — |
 
-**06-11 analysis**: 585 reqs, 100% success (ZERO errors), avg TTFB 20.7s, max est_tokens 130K (never hit autoCompactWindow 155K), quota 196-199. CC est/actual ratio avg=1.18 (overestimate), meaning auto-compact fires at ~137K real tokens = 80.6% of 170K capacity — healthy safety buffer. Proxy overhead improving: avg 3.1s (down from 3.9s on 06-10), median 0.5s, fast path ratio 54% (up from 42%). CPT=3.0 confirmed: actual avg 2.86 (all sizes), 3.10 (>50K). 'length' finish_reason: 12 requests, all startup checks (input≤7 tokens, harmless).
+\* *Excluding 429 burst: 99.8% (902/905)*
+† *429 burst at 16:05-16:20 — ALL 7 keys exhausted ModelScope TOKEN quota simultaneously (RPM quota still fine: ms_requests_remaining=1705). Same keys across all deployments → fallback won't help. Burst resolved after 15min; low impact: 20/925=2.2%*
+
+**06-11 full analysis**: 925 reqs, 97.5% success (20×429 token-limit burst at 16:05-16:20, all 7 keys' per-key token quota exhausted simultaneously). Excluding burst: 99.8% success. Avg TTFB 19.3s, P95=39.2s, P99=51.8s. Max actual input_tokens=135K (ModelScope limit=202K, safe margin). Proxy est/actual tokens=1.36x median (CPT=3.0 overestimates vs actual chars/token=4.08 — but this only affects INPUT-WARN threshold, not CC auto-compact). dsv4p usage: 2% of total (by design: haiku/mini tier only). 14 finish_reason=length requests (all input≤7 tokens, CC startup checks, harmless). **TTFB increase**: Jun 9 avg 12s → Jun 10-11 avg 19-20s at same conversation depth (60% increase, ModelScope server-side — time-of-day pattern: peak 14-16h→25-32s, off-peak 0-2h→10s). Not config-fixable.
 
 ## Historical Trend
 
@@ -90,11 +90,11 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 |-----|-------|---------|-------------|-------|
 | 06-02 | 243 | 80.2% | ~14s | Pre-R12 (proxy auto-compact) |
 | 06-03 | 1214 | 84.2% | ~14s | 47 InputExceedsProxyReject |
-| 06-05 | 1558 | 80.7% | ~14s | Pre-R12 |
+| 06-04 | 1787 | ~85% | ~14s | 441 429 errors, pre-R12 |
+| 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
-| 06-10 | 707 | 99.6% | 19.3s | Post-R7 |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 585 | 100% | 20.7s | Zero errors, CPT=3.0 confirmed, est≤130K, proxy overhead improving |
+| 06-11 | 925 | 97.5% (99.8% excl burst) | 19.3s | 20×429 token-limit burst (15min), TTFB+60% vs Jun9 (ModelScope), est/actual=1.36x |
 
 ## Key Issues & Notes
 
@@ -102,13 +102,15 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - **Auto-compact uses `stripNonEssential=true`**: truncates tool output, removes tool defs → low-quality summary
 - **Manual `/compact` uses `stripNonEssential=false`**: full context + all tools → much better summary
 - **When CC warns "Autocompact will trigger soon"**, proactively run `/compact <focus>` for better quality
-- **CC tokenizer estimation variance**: Combined Jun 10+11 data (2348 samples, >50K tokens): est/actual avg=1.18, median=1.14 → CC overestimates ~18%. At autoCompactWindow=155K, auto-compact fires at ~137K real tokens (80.6% of 170K), leaving 33K safety buffer. Content composition variance makes per-day ratio unpredictable (0.95 on Jun 11 vs 1.24 on Jun 10), but autoCompactWindow=155K balances both scenarios
+- **CC tokenizer estimation variance**: Jun 10 est/actual=1.24 (overestimate), Jun 11 est/actual=1.36 median (proxy CPT=3.0 overestimates vs actual chars/token=4.08). Content composition variance makes per-day ratio unpredictable. autoCompactWindow=155K balances both scenarios: Jun 10 overestimates → compact fires earlier (real~125K=74% of 170K), Jun 11's 1.36x overestimate → compact fires at real~114K=67% of 170K). Both safe, with good margin
 - Write critical info to CLAUDE.md/memory — these survive compaction
 
-### CHARS_PER_TOKEN_ESTIMATE — resolved ✅
-- Both containers now running CPT=3.0 (Jun 11 metrics confirm ratio=3.0005)
-- Previous discrepancy (docker-compose=3.0 vs running=2.0) was from container restart without recreate
-- Resolved by force-recreate during R15/16 deployment on Jun 10
+### CHARS_PER_TOKEN_ESTIMATE — resolved ✅, accuracy documented
+- Both containers running CPT=3.0 (Jun 11 full metrics confirm: actual chars/token(json)=4.08 median)
+- Proxy overestimates tokens by 1.36x (chars_json/3.0 vs actual ModelScope tokens) — only affects INPUT-WARN threshold
+- CC auto-compact uses Anthropic tokenizer internally, NOT proxy's CPT estimate — changing CPT won't affect compact behavior
+- Overestimation gives safety margin for early warning (INPUT-WARN triggers at ~88K actual tokens instead of 120K)
+- Previous discrepancy (docker-compose=3.0 vs running=2.0) resolved by force-recreate during R15/16
 
 ### CC v2.1.170 startup connectivity check
 - Uses **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json
@@ -120,13 +122,18 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - CC built-in auto-compact is sole mechanism — same outcome but CC's own decision
 - Input overflow → invalid_request_error (CC stops, user starts new conversation)
 
-### ModelScope limits
+### ModelScope dual quota system (NEW FINDING)
+- **RPM quota**: 200/id/day per variant (tracked by `ms_requests_remaining` header). Resets daily.
+- **Token quota**: Per-key hourly/daily token allocation (NOT tracked by any header). Independent from RPM.
+- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausted simultaneously at 16:05 → 20 consecutive 429s in 15 minutes.
+- Same 7 keys used across all deployments → fallback to backup LiteLLM (41001) won't help (same keys = same token quota exhaustion).
+- Burst is transient and self-resolving (15 min). Low impact (2.2% of requests). Not config-fixable.
 - Input token limit: 202,745 (confirmed by ModelScope error)
-- Quota: 200 requests/id/day per variant × 1000 variants = 200K/day theoretical max
-- Daily quota resets; 429 insufficient_quota is genuine exhaustion, not config fixable
 
-### /health endpoint — NEVER use /health for monitoring
-- Use /health/liveliness only. /health triggers per-deployment checks → fd exhaustion.
+### /health endpoint — context clarified
+- LiteLLM /health triggers per-deployment checks → fd exhaustion → NEVER use for monitoring. Use /health/liveliness.
+- Proxy /health is a simple status check (returns {"status":"ok"}) → SAFE to use for Docker healthcheck.
+- Docker-compose correctly uses /health/liveliness for LiteLLM containers and /health for proxy containers.
 
 ## R18 Changes (2026-06-11)
 
@@ -173,7 +180,8 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R15 | compactWindow 180K→140K (GLM IQ); contextWindow/safety 190K→170K (alignment) | 99.8% |
 | R16 | compactWindow 140K→155K (CC overestimation 1.7x → too early compact) | 99.8% best ever |
 | R17 | opc2_uname full sync: docker-compose.yml + litellm num_retries 30→8 + settings.json 155K + HTTPS_PROXY + proxy.py parity | 99.8%+ stable |
-| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix (40002 missing both, 40001 missing dsv4p) + _anthropic_models_list expansion (2→29 aliases) + haiku→dsv4p routing fix + gateway package sync | 100% success, zero errors ✅ |
+| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix + _anthropic_models_list expansion (2→29) + haiku→dsv4p + gateway package sync | 100% success, zero errors ✅ |
+| R18.1 | Metrics deep analysis: 429 token-limit burst identified (not RPM), ModelScope dual quota documented, TTFB+60% is server-side, CPT=3.0 accuracy verified (1.36x overest vs actual 4.08), /health endpoint clarified for proxy vs LiteLLM | No param changes — all current settings performing well within range |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs

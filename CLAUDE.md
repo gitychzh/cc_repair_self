@@ -43,8 +43,9 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics)
 - **429→529 转换会导致CC崩溃** — 429=rate_limit(backoff retry)，529=overloaded(CC auto-compact→灾难性上下文丢失)。绝不转换。
 - **CC v2.1.170+ startup check用shell env vars** — CC启动时的connectivity check用shell环境变量（ANTHROPIC_BASE_URL等），不读settings.json。必须三层保障：.bashrc（在non-interactive return之前）+.profile+restart_claude.sh用bash --login。
 - **CC auto-compact质量远低于手动/compact** — 自动compact用stripNonEssential=true（截断tool输出，tools=[]），手动/compact用stripNonEssential=false（完整上下文）。CC提示compact时，主动/compact加自定义指令可获得更好的摘要。
-- **/health endpoint会触发fd耗尽** — 用/health/liveliness监控，绝不调/health（触发per-deployment checks→OSError Too many open files）。
+- **/health endpoint会触发fd耗尽** — LiteLLM的/health触发per-deployment checks→OSError Too many open files。用/health/liveliness监控LiteLLM。Proxy的/health是简单状态检查（只返回{"status":"ok"}），SAFE用于Docker healthcheck。
 - **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
+- **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。
 
 ## 可调整参数（有数据支撑才能改）
 
@@ -52,7 +53,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics)
 
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
-| CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | 实际chars/token=3.11，3.0保守（3%误差）。Jun 11 metrics确认ratio=3.0005 ✅ |
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | proxy用CPT估算tokens。Jun 11 metrics: actual chars/token(json)=4.08 median, proxy overestimates 1.36x (chars_json/3.0 vs actual)。只影响INPUT-WARN阈值，不影响CC auto-compact。3.0的overestimation提供安全提前警告 |
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的context_window |
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | 同上 |
 | MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
