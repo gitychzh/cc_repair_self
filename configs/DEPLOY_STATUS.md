@@ -64,27 +64,27 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
 |--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 1302 | 38 |
+| Total requests | 1887 | 48 | 1339 | 38 |
 | Success rate | 99.8% | 100% | 96.7%* | 100% |
-| Errors | 2×502, 1×429 | 0 | 43×429 (31 glm5.1 + 12 dsv4p)† | 0 |
-| Avg TTFB | 19.0s | 6.0s | 18.5s | 8.4s |
-| P50 TTFB | 16.2s | 5.0s | 17.0s | — |
+| Errors | 2×502, 1×429 | 0 | 44×429 (32 glm5.1 + 12 dsv4p)† | 0 |
+| Avg TTFB | 19.0s | 6.0s | 18.4s | 8.4s |
+| P50 TTFB | 16.2s | 5.0s | 16.7s | — |
 | P90 TTFB | 33.0s | — | 30.9s | — |
-| P95 TTFB | — | — | 38.5s | — |
-| P99 TTFB | 65.0s | — | 48.6s | — |
+| P95 TTFB | — | — | 38.4s | — |
+| P99 TTFB | 65.0s | — | 49.2s | — |
 | Avg duration | 20.7s | 6.2s | 20.5s | — |
-| Actual chars/token (json) | — | — | 4.08 median (CPT=3.0 → 1.36x overest) | — |
+| Actual chars/token (json) | — | — | 4.09 median (CPT=3.0 → 1.36x overest) | — |
 | Max est_tokens_json | 205K | — | 208K (actual=136K) | — |
 | Max actual tokens | — | — | 136K | — |
 | est/actual ratio | 1.24 avg | — | 1.36 median | — |
-| MS quota remaining | 150-199 | — | 1314-1509, last=1489 | — |
-| Burst success rate | — | — | 93.1% inside burst (glm5.1=94.7%, dsv4p=64.7%) | — |
+| MS quota remaining | 150-199 | — | 1314-1502, last=1485 | — |
+| Burst success rate | — | — | 93.6% inside burst (glm5.1=95%, dsv4p=65%) | — |
 | Tool truncation | — | — | 71% reduction, ~10K tok saved | — |
 
-\* *Excluding 429 burst: 100% (678/678 outside 16:05→17:37 window)*
-† *429 burst at 16:05→17:37 (91min, ENDED) — ALL 7 keys' ModelScope TOKEN quota exhausting. 31 glm5.1 429s (94.7% burst success) + 12 dsv4p 429s (64.7% burst success). Same keys across all deployments → both backends affected. dsv4p's smaller pool (77 dep vs 7000) = fewer retry opportunities = lower burst success. Overall burst success 93.1%. Same keys → fallback won't help.*
+\* *Excluding 429 burst: 100% (648/648 outside 16:05→17:47 window)*
+† *429 burst at 16:05→17:46 (101min, ENDED) — ALL 7 keys' ModelScope TOKEN quota exhausting. 32 glm5.1 429s + 12 dsv4p 429s. Same keys across all deployments → both backends affected. Overall burst success 93.6%. Same keys → fallback won't help.*
 
-**06-11 full analysis**: 1302 reqs, 96.7% success (43×429: 31 glm5.1 + 12 dsv4p, burst ENDED at 17:37). Outside burst: 100%. Avg TTFB 18.5s, P95=38.5s, **P99=48.6s (improved vs Jun 10's 65s)**. Max actual=136K (safe margin). dsv4p also gets 429 during burst (same 7 keys = same token quota exhaustion), but outside burst dsv4p 100% success → tier routing still beneficial. dsv4p volume=3%. Tool truncation: 71% reduction, ~10K tok/req saved. **dsv4p memory**: 52.46%. **All parameters within range — no changes warranted.**
+**06-11 full analysis**: 1339 reqs, 96.7% success (44×429: 32 glm5.1 + 12 dsv4p, burst ENDED at 17:46). Outside burst: 100%. Avg TTFB 18.4s, P95=38.4s, **P99=49.2s (improved vs Jun 10's 65s)**. Max actual=136K. dsv4p also gets 429 during burst (same keys), but outside burst 100% success → tier routing still beneficial. Post-burst TTFB avg=17.1s (normal). **dsv4p memory**: 52.46%. **All parameters within range — no changes warranted.**
 
 ## Historical Trend
 
@@ -96,7 +96,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1302 | 96.7% (100% excl burst) | 18.5s | 43×429 (31 glm+12 dsv4p) burst 16:05→17:37 (91min, ENDED), P99=48.6s ✅, R18.2 ✅ |
+| 06-11 | 1339 | 96.7% (100% excl burst) | 18.4s | 44×429 (32 glm+12 dsv4p) burst 16:05→17:46 (101min, ENDED), P99=49.2s ✅, R18.2 ✅ |
 
 ## Key Issues & Notes
 
@@ -127,7 +127,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 ### ModelScope dual quota system (NEW FINDING)
 - **RPM quota**: 200/id/day per variant (tracked by `ms_requests_remaining` header). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked by any header). Independent from RPM.
-- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausting at 16:05 → 43 errors over 91min (16:05→17:37, ENDED). 31 glm5.1 429s (94.7% burst success) + 12 dsv4p 429s (64.7% burst success). Overall burst success 93.1%.
+- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausting at 16:05 → 44 errors over 101min (16:05→17:46, ENDED). 32 glm5.1 429s + 12 dsv4p 429s. Overall burst success 93.6%.
 - **NEW: dsv4p also affected by same-key token quota exhaustion** — same 7 keys across both backends means dsv4p's 77-deployment pool has fewer retry opportunities than glm5.1's 7000-deployment pool. But dsv4p volume is only 3% of total, so absolute impact is small. Outside burst: dsv4p 100% success. Tier routing remains beneficial.
 - Same 7 keys used across all deployments → fallback to backup LiteLLM (41001) won't help (same keys = same token quota exhaustion).
 - Input token limit: 202,745 (confirmed by ModelScope error)
