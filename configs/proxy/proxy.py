@@ -156,6 +156,15 @@ def _next_key_idx(model: str) -> int:
         _key_rr_counter[model] = (idx + 1) % NUM_KEYS
         return idx
 
+def _is_key_group_name(name: str) -> bool:
+    """Check if a model name is an internal key group routing name (e.g. 'glm5.1k1', 'dsv4pk3').
+    R19: Key group names are proxy→LiteLLM routing, NOT meant for CC/agents."""
+    for base in MODEL_UPSTREAMS:
+        for ki in range(NUM_KEYS):
+            if name == f"{base}k{ki+1}":
+                return True
+    return False
+
 def _log(level, msg):
     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:10]
     line = f"[{ts}] [{level}] {msg}"
@@ -1519,6 +1528,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _proxy_models(self):
         all_models = []
         seen_ids = set()
+        # R19: Key group names (glm5.1k1~k7, dsv4pk1~k7) are internal routing.
+        # Only expose canonical names (glm5.1, dsv4p) to CC/agents.
         for model_key, upstream in MODEL_UPSTREAMS.items():
             models_url = upstream["models_url"]
             parsed = urllib.parse.urlparse(models_url)
@@ -1532,6 +1543,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
+                    # R19: Filter out key group internal names (e.g. "glm5.1k1", "dsv4pk3")
+                    # These are proxy→LiteLLM routing names, not meant for CC/agents
+                    if _is_key_group_name(model_id):
+                        continue
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
                         upstream_key = MODEL_MAP.get(model_id, model_id)
@@ -1549,6 +1564,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
             except Exception as e:
                 _log("ERROR", f"models proxy error for {model_key}: {e}")
+        # Always include canonical names (glm5.1, dsv4p) even if LiteLLM doesn't list them
+        for model_key in MODEL_UPSTREAMS:
+            if model_key not in seen_ids:
+                seen_ids.add(model_key)
+                context_len = MODEL_MAX_INPUT_TOKENS.get(model_key, 131072)
+                all_models.append({
+                    "id": model_key,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "proxy",
+                    "context_length": context_len,
+                })
         self._send_json(200, {"object": "list", "data": all_models})
 
     # ─── Anthropic-format /v1/models endpoints ───
