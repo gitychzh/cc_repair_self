@@ -1,11 +1,11 @@
-# Deploy Status — opc_uname (R18.2, 2026-06-11)
+# Deploy Status — opc_uname (R18.3, 2026-06-11)
 
 ## Architecture
 ```
 Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + tier routing + metrics)
     → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope [PRIMARY]
     → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope [HAIUK/MINI tier]
-    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys) [BACKUP]
+    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys = 7000 deploys) [BACKUP]
 ```
 
 Proxy does **format conversion + force-stream + stream_usage + tier-based model routing + metrics logging**. No retry, no truncation, no auto-compact. LiteLLM handles retry/fallback/routing/cooldown.
@@ -15,9 +15,9 @@ Proxy does **format conversion + force-stream + stream_usage + tier-based model 
 ## Containers (all healthy)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
-| glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192 |
-| glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=4096 |
-| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096, memory limit 2GiB (R18.2) |
+| glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192, memory 2GiB |
+| glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=8192 (R18.3), memory 2GiB (R18.3) |
+| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096, memory 2GiB (R18.2) |
 | auth_to_api_40001 | :40001 | Proxy (opc_uname) | Format conversion + tier routing + stream_usage + metrics |
 | auth_to_api_40002 | :40002 | Proxy (opc2_uname) | Same codebase + LITELLM_MODELS_URL now configured |
 | cc_postgres | :5432 | LiteLLM DB | — |
@@ -62,29 +62,27 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 ## Metrics Summary (06-11 full data, 06-10 comparison)
 
-| Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
-|--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 1367 | 39 |
-| Success rate | 99.8% | 100% | 96.8%* | 100% |
-| Errors | 2×502, 1×429 | 0 | 44×429 (32 glm5.1 + 12 dsv4p)† | 0 |
-| Avg TTFB | 19.0s | 6.0s | 18.4s | 8.4s |
-| P50 TTFB | 16.2s | 5.0s | 16.7s | — |
-| P90 TTFB | 33.0s | — | 30.9s | — |
-| P95 TTFB | — | — | 38.5s | — |
-| P99 TTFB | 65.0s | — | 50.9s | — |
-| Avg duration | 20.7s | 6.2s | 20.5s | — |
-| Actual chars/token (json) | — | — | 4.09 median (CPT=3.0 → 1.36x overest) | — |
-| Max est_tokens_json | 205K | — | 208K (actual=136K) | — |
-| Max actual tokens | — | — | 136K | — |
-| est/actual ratio | 1.24 avg | — | 1.36 median | — |
-| MS quota remaining | 150-199 | — | 1314-1502, last=1490 | — |
-| Burst success rate | — | — | 93.6% inside burst, 100% outside | — |
-| Tool truncation | — | — | 71% reduction, ~10K tok saved | — |
+| Metric | 06-10 40001 | 06-11 40001 | Change |
+|--------|-------------|-------------|--------|
+| Total requests | 1887 | 1395 | ↓ |
+| Success rate | 99.8% | 96.7% (100% excl burst) | burst外持平 |
+| 429 errors | 1 | 46 (34 glm+12 dsv4p) | token quota burst |
+| Avg TTFB | 19.0s | 18.4s | — |
+| P50 TTFB | 16.2s | 16.6s | — |
+| P90 TTFB | 33.0s | 30.9s | ↓ |
+| P95 TTFB | — | 38.4s | — |
+| P99 TTFB | 65.0s | 49.2s | ↓ 24% improved ✅ |
+| P99 duration | 80.4s | 65.4s | ↓ 19% improved ✅ |
+| Avg litellm_resp | 15.1s | 15.3s | — |
+| P99 litellm_resp | 55.9s | 45.4s | ↓ 19% improved |
+| ms_requests_remaining min | 1316 | 1314 | — |
+| est/actual token ratio | 1.24 avg | 1.362 median | CPT=3.0 normal |
+| Actual chars/token (json) | — | 4.08 median | — |
+| Tool truncation | — | 71.1% reduction | ✅ |
 
-\* *Excluding 429 burst: 100% (677/677 outside 16:05→17:47 window)*
-† *429 burst at 16:05→17:46 (101min, ENDED) — ALL 7 keys' ModelScope TOKEN quota exhausting. 32 glm5.1 429s + 12 dsv4p 429s. Same keys across all deployments → both backends affected. Overall burst success 93.6%. Same keys → fallback won't help.*
+**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Inside 16:05→17:46 window: 93.6% success. Outside burst: 100% (707/707). P99 TTFB improved from Jun 10's 65s → 49.2s ✅.
 
-**06-11 full analysis**: 1367 reqs, 96.8% success (44×429 burst ENDED at 17:46). Outside burst: 100% (677/677). Avg TTFB 18.4s, P95=38.5s, **P99=49.2s (improved vs Jun 10's 65s)**. Max actual=136K. dsv4p also gets 429 during burst (same keys), but outside burst 100% success. **dsv4p memory**: 52.48%. **All parameters within range — no changes warranted.**
+**Container memory status**: glm5.1_test41003 35.56%/2GiB ✅, dsv4p_uni42001 39.26%/2GiB ✅, glm5.1_uni41001 93.73%/1GiB ⚠️→R18.3 fix to 2GiB.
 
 ## Historical Trend
 
@@ -96,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1367 | 96.8% (100% excl burst) | 18.4s | 44×429 burst ENDED 17:46 (101min), P99=49.2s ✅, R18.2 ✅ |
+| 06-11 | 1395 | 96.7% (100% excl burst) | 18.4s | 46×429 token burst, P99=49.2s ✅, R18.2 + R18.3 |
 
 ## Key Issues & Notes
 
@@ -124,11 +122,11 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - CC built-in auto-compact is sole mechanism — same outcome but CC's own decision
 - Input overflow → invalid_request_error (CC stops, user starts new conversation)
 
-### ModelScope dual quota system (NEW FINDING)
+### ModelScope dual quota system
 - **RPM quota**: 200/id/day per variant (tracked by `ms_requests_remaining` header). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked by any header). Independent from RPM.
-- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausting at 16:05 → 44 errors over 101min (16:05→17:46, ENDED). 32 glm5.1 429s + 12 dsv4p 429s. Overall burst success 93.6%.
-- **NEW: dsv4p also affected by same-key token quota exhaustion** — same 7 keys across both backends means dsv4p's 77-deployment pool has fewer retry opportunities than glm5.1's 7000-deployment pool. But dsv4p volume is only 3% of total, so absolute impact is small. Outside burst: dsv4p 100% success. Tier routing remains beneficial.
+- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1314+), but ALL 7 keys' token quota exhausting at 16:05 → 46 errors over ~5hr (16:05→21:12). 34 glm5.1 429s + 12 dsv4p 429s.
+- **dsv4p also affected by same-key token quota exhaustion** — same 7 keys across both backends means dsv4p's 77-deployment pool has fewer retry opportunities than glm5.1's 7000-deployment pool. But dsv4p volume is only 3% of total, so absolute impact is small. Outside burst: dsv4p 100% success.
 - Same 7 keys used across all deployments → fallback to backup LiteLLM (41001) won't help (same keys = same token quota exhaustion).
 - Input token limit: 202,745 (confirmed by ModelScope error)
 
@@ -142,35 +140,34 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 ### 1. LITELLM_MODELS_URL bug fix (CRITICAL)
 - **40002 proxy**: Missing BOTH `LITELLM_MODELS_URL_GLM51` and `LITELLM_MODELS_URL_DSV4P` env vars → /v1/models used wrong defaults → agents couldn't discover available models
 - **40001 proxy**: Missing `LITELLM_MODELS_URL_DSV4P` → dsv4p models returned via default pointing to old backup 41001
-- **Fix**: Added both env vars to docker-compose.yml for both proxy containers, pointing to correct backend:
-  - `LITELLM_MODELS_URL_GLM51=http://glm5.1_test41003:4000/v1/models` (primary, not old backup 41001)
-  - `LITELLM_MODELS_URL_DSV4P=http://dsv4p_uni42001:4000/v1/models`
+- **Fix**: Added both env vars to docker-compose.yml for both proxy containers, pointing to correct backend
 
 ### 2. Tier-based model routing (cc-switch inspired)
 - **Before**: All Claude model names (opus, sonnet, haiku) mapped to glm5.1 → wasted dsv4p's 77-deployment pool
 - **After**: Tier routing — opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking)
-- **New MODEL_MAP entries**: gpt-4o/gpt-4.1→glm5.1, gpt-4o-mini/gpt-4.1-mini/o3-mini/o4-mini→dsv4p, codex-mini-latest→glm5.1
-- **Rationale**: Lighter tasks (haiku, mini) don't need 7000-deployment pool; dsv4p is sufficient and frees glm5.1 quota for heavy tasks
 
 ### 3. THINKING_SUPPORT dict
-- **Before**: Hardcoded `if body.get("thinking"):` → thinking params sent to ALL backends including dsv4p (doesn't support it)
-- **After**: `THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}` + conditional: `if body.get("thinking") and THINKING_SUPPORT.get(target_model, False)`
-- **Rationale**: dsv4p doesn't support extended thinking; sending thinking params causes errors or wasted tokens
+- **Before**: Hardcoded `if body.get("thinking"):` → thinking params sent to ALL backends including dsv4p
+- **After**: `THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}` + conditional check
 
 ### 4. _anthropic_models_list expansion (2→29 aliases)
-- **Before**: Deduplication by backend name (mapped) → only glm5.1 and dsv4p appeared in /v1/models response
+- **Before**: Deduplication by backend name → only glm5.1 and dsv4p appeared
 - **After**: Deduplication by model_id → all 29 requestable model aliases appear
-- **Rationale**: Other agents (OpenCode, Codex, etc.) need to see all available model IDs to route correctly
 
 ### 5. Haiku→dsv4p routing fix
-- **Before**: claude-haiku-4-5, claude-haiku-4-5-20251001, claude-3-5-haiku-20241022 all → glm5.1
-- **After**: All three → dsv4p (no thinking support, lighter model)
-- **Rationale**: Haiku is a lightweight model; dsv4p's 77-deployment pool is adequate; frees glm5.1's 7000-deployment pool for heavy opus/sonnet tasks
+- claude-haiku models → dsv4p (no thinking, lighter model)
 
 ### 6. Gateway package sync
 - Monolithic proxy.py AND modular gateway package (6 files) both updated with same changes
-- Running proxy uses modular gateway package (Dockerfile uses litellm base image + gateway/)
-- Repo configs/proxy/Dockerfile (python:3.13-alpine) is documentation-only; actual running Dockerfile uses litellm base image
+
+## R18.3 Changes (2026-06-11)
+
+### 1. glm5.1_uni41001 memory OOM fix (CRITICAL)
+- **Problem**: glm5.1_uni41001 at 93.73% memory (959.8MiB/1GiB) with 7000 deployments → near OOM kill risk
+- **Same pattern as dsv4p R18.2 fix** (90.39%/1GiB → increased to 2GiB)
+- **Evidence**: docker stats shows 958-960MiB consistently; 41001 config upgraded to 1000var×7keys=7000 deploys (from 256var) but memory limit stayed at 1GiB
+- **Fix**: memory 1024M→2048M, reservations 512M→768M, ulimit nofile 4096→8192, CPU 1.0→2.0, healthcheck interval 30s→60s, timeout 10s→30s, start_period 60s→180s — matching glm5.1_test41003 specs since both have identical 7000 deployment configs
+- **Rationale**: 41001 is BACKUP with same 7000 deploys as 41003 PRIMARY. It should have same resource specs. Without this fix, Docker will OOM-kill the container when memory hits 1GiB limit, making the backup unavailable.
 
 ## Parameter Change History (condensed)
 
@@ -182,14 +179,15 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R15 | compactWindow 180K→140K (GLM IQ); contextWindow/safety 190K→170K (alignment) | 99.8% |
 | R16 | compactWindow 140K→155K (CC overestimation 1.7x → too early compact) | 99.8% best ever |
 | R17 | opc2_uname full sync: docker-compose.yml + litellm num_retries 30→8 + settings.json 155K + HTTPS_PROXY + proxy.py parity | 99.8%+ stable |
-| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix + _anthropic_models_list expansion (2→29) + haiku→dsv4p + gateway package sync | 100% success, zero errors ✅ |
-| R18.1 | Metrics deep analysis: 429 token-limit burst identified (not RPM), ModelScope dual quota documented, TTFB+60% is server-side, CPT=3.0 accuracy verified (1.36x overest vs actual 4.08), /health endpoint clarified for proxy vs LiteLLM | No param changes — all current settings performing well within range |
-| R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39% utilization=925.6MiB/1GiB), reservations 512M→768M | Prevents dsv4p OOM kill, verified 51.13% after recreate ✅ |
+| R18 | Tier-based routing + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix + _anthropic_models_list expansion + haiku→dsv4p + gateway package sync | 100% success |
+| R18.1 | Metrics deep analysis: 429 token-limit burst, dual quota, TTFB server-side, CPT=3.0 accuracy, /health endpoint clarified | No param changes |
+| R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39%), reservations 512M→768M | dsv4p OOM prevented ✅ |
+| R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented (pending deploy) |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs
 
-**GLM-5.1 (41003/41001):** `zhipuai/glm-5.1`, `ZHipuAI/GlM-5.1`, `ZhIpuAI/GLm-5.1`, `ZhiPuAI/gLM-5.1`, `ZhipUAI/GlM-5.1`, `ZhipuAi/GLM-5.1`, `ZhipuaI/GLm-5.1`, `zhipuAI/gLM-5.1`, `ZHIPUAI/GLM-5.1`, `zhipuai/GLM-5.1`, `ZhiPUAI/glm-5.1`
+**GLM-5.1 (41003/41001):** 1000 case-permutation variants of `zhipuai/glm-5.1` × 7 keys = 7000 deployments
 
 **DSv4P (42001):** `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
 

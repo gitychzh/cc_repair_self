@@ -1,11 +1,10 @@
-# Two-model architecture: 41001 (glm5.1, 256var×7key=1792) + 42001 (dsv4p, 11var×7key=77)
-# + 41003 test (glm5.1, 1000var×7key=7000) — quota exploration, temporary
+# Two-model architecture: 41001 (glm5.1-backup, 1000var×7key=7000) + 41003 (glm5.1-primary, 1000var×7key=7000) + 42001 (dsv4p, 11var×7key=77)
 # proxy.py (40001/40002) — format conversion + metrics logging
 # LiteLLM handles all retry/fallback/routing — proxy does NOT retry, compact, or truncate
 #
-# Port assignments: 41001=glm5.1, 42001=dsv4p, 41003=glm5.1-test
-# ulimit nofile: 4096 soft / 65536 hard — prevents fd exhaustion with large deployment counts
-# (1792 deployments on 41001, 7000 on 41003 need more than default 1024 soft limit)
+# Port assignments: 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p
+# ulimit nofile: 8192 soft / 65536 hard — prevents fd exhaustion with large deployment counts
+# (7000 deployments on both 41001 and 41003 need more than default 1024 soft limit)
 
 services:
   cc_postgres:
@@ -55,7 +54,7 @@ services:
     restart: unless-stopped
     ulimits:
       nofile:
-        soft: 4096
+        soft: 8192
         hard: 65536
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -83,19 +82,19 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
-          cpus: "1.0"
+          memory: 2048M
+          cpus: "2.0"
         reservations:
-          memory: 512M
+          memory: 768M
           cpus: "0.5"
     healthcheck:
       test:
         - CMD-SHELL
         - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
-      interval: 30s
-      timeout: 10s
+      interval: 60s
+      timeout: 30s
       retries: 3
-      start_period: 60s
+      start_period: 180s
     logging: *id001
     command:
       - --config
