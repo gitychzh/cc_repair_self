@@ -21,6 +21,7 @@ from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, MODEL_MAP, DEFAULT_MODEL, DEFAULT_UPSTREAM_MODEL,
     MODEL_UPSTREAMS, MODEL_MAX_INPUT_TOKENS, MODEL_INPUT_TOKEN_SAFETY,
     CHARS_PER_TOKEN_ESTIMATE, OUTPUT_TOKEN_MARGIN,
+    NUM_KEYS, _next_key_idx, _is_key_group_name,
 )
 from .logger import _log, _log_metrics, _log_error_detail
 from .converters import anth_to_openai, openai_to_anth, _estimate_text_chars
@@ -181,275 +182,336 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"msgs={len(oai_body.get('messages',[]))} "
                     f"tools={len(oai_body.get('tools',[]))}")
 
-        # Forward to LiteLLM (no proxy-level retry — LiteLLM handles all retry/fallback)
-        auth_key = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
-        headers_out = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {auth_key}",
-            "Content-Length": str(len(json.dumps(oai_body).encode("utf-8"))),
-        }
-        oai_data = json.dumps(oai_body).encode("utf-8")
-        parsed_upstream = urllib.parse.urlparse(litellm_url)
+        # ─── Key round-robin + 429 cycling (R19) ───
+        # LiteLLM config has 7 key groups per model (glm5.1k1~k7, dsv4pk1~k7).
+        # Proxy round-robins: request N → key_idx = counter % NUM_KEYS → model "glm5.1k{idx+1}"
+        # On 429 from a key group, cycle to next key group.
+        # After all key groups return 429 → return 429 to agent (all keys exhausted).
+        start_key_idx = _next_key_idx(mapped_model)
+        litellm_model_base = mapped_model
+        key_cycle_attempts = []
 
-        try:
-            conn = self._make_upstream_conn(parsed_upstream)
-            conn.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
-            resp = conn.getresponse()
+        for attempt_idx in range(NUM_KEYS):
+            current_key_idx = (start_key_idx + attempt_idx) % NUM_KEYS
+            litellm_model = f"{litellm_model_base}k{current_key_idx + 1}"
+            oai_body["model"] = litellm_model
+            _log("KEY-RR", f"attempt {attempt_idx+1}/{NUM_KEYS}: key_idx={current_key_idx} → model={litellm_model}")
 
-            # Extract LiteLLM routing/quota headers for optimization analytics
-            for hdr_key, metrics_key in [
-                ("x-litellm-model-id", "litellm_model_id"),
-                ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
-            ]:
-                val = resp.getheader(hdr_key)
-                if val:
-                    metrics[metrics_key] = val
+            auth_key = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
+            headers_out = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {auth_key}",
+                "Content-Length": str(len(json.dumps(oai_body).encode("utf-8"))),
+            }
+            oai_data = json.dumps(oai_body).encode("utf-8")
+            parsed_upstream = urllib.parse.urlparse(litellm_url)
 
-            # Extract ModelScope quota headers from LiteLLM-passed llm_provider-* headers
-            for hdr_key, metrics_key in [
-                ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
-                ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
-            ]:
-                val = resp.getheader(hdr_key)
-                if val:
-                    metrics[metrics_key] = int(val)
+            try:
+                conn = self._make_upstream_conn(parsed_upstream)
+                conn.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
+                resp = conn.getresponse()
 
-            if resp.status >= 400:
-                error_body = resp.read()
-                try:
-                    error_json = json.loads(error_body)
-                except Exception:
-                    error_json = {"error": error_body.decode("utf-8", errors="replace")}
-                conn.close()
+                # Extract LiteLLM routing/quota headers for optimization analytics
+                for hdr_key, metrics_key in [
+                    ("x-litellm-model-id", "litellm_model_id"),
+                    ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
+                ]:
+                    val = resp.getheader(hdr_key)
+                    if val:
+                        metrics[metrics_key] = val
 
-                # Resilience retry for 401/403 AuthenticationError
-                err_str = json.dumps(error_json)
-                should_resilience_retry = (
-                    resp.status in (401, 403)
-                    and "AuthenticationError" in err_str
-                    and metrics.get("_resilience_retry_count", 0) < 1
-                )
+                # Extract ModelScope quota headers from LiteLLM-passed llm_provider-* headers
+                for hdr_key, metrics_key in [
+                    ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
+                    ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
+                ]:
+                    val = resp.getheader(hdr_key)
+                    if val:
+                        metrics[metrics_key] = int(val)
 
-                # No rate_limit_retry: data shows 8% success rate (1/13) with 2s waste.
-                should_rate_limit_retry = False
+                if resp.status >= 400:
+                    error_body = resp.read()
+                    try:
+                        error_json = json.loads(error_body)
+                    except Exception:
+                        error_json = {"error": error_body.decode("utf-8", errors="replace")}
+                    conn.close()
+                    err_str = json.dumps(error_json)
 
-                # Resilience retry for InvalidParameter (thinking_budget > max_completion_tokens)
-                should_fix_thinking_budget = (
-                    resp.status == 400
-                    and "InvalidParameter" in err_str
-                    and "thinking_budget" in err_str
-                    and "max_completion_tokens" in err_str
-                    and metrics.get("_thinking_budget_retry_count", 0) < 1
-                )
-
-                if should_fix_thinking_budget:
-                    metrics["_thinking_budget_retry_count"] = metrics.get("_thinking_budget_retry_count", 0) + 1
-                    # Parse the error to extract actual values
-                    _tb_match = re.search(r'thinking_budget\s*\[(\d+)\]', err_str)
-                    _mc_match = re.search(r'max_completion_tokens\s*\[(\d+)\]', err_str)
-                    if _tb_match and _mc_match:
-                        actual_tb = int(_tb_match.group(1))
-                        actual_mc = int(_mc_match.group(1))
-                        fixed_mc = actual_tb + OUTPUT_TOKEN_MARGIN
-                        _log("THINKFIX", f"thinking_budget={actual_tb} > max_completion_tokens={actual_mc} → fixing to {fixed_mc}")
-                        oai_body_fixed = json.loads(oai_data.decode("utf-8"))
-                        oai_body_fixed["max_tokens"] = fixed_mc
-                        oai_body_fixed["max_completion_tokens"] = fixed_mc
-                        if "thinking_budget" not in oai_body_fixed:
-                            oai_body_fixed["thinking_budget"] = actual_tb
-                        fixed_data = json.dumps(oai_body_fixed).encode("utf-8")
-                        fixed_headers = dict(headers_out)
-                        fixed_headers["Content-Length"] = str(len(fixed_data))
+                    # ─── 429 → cycle to next key (R19 key round-robin) ───
+                    if resp.status == 429:
+                        key_cycle_attempts.append({
+                            "key_idx": current_key_idx,
+                            "litellm_model": litellm_model,
+                            "error_body": err_str[:500],
+                        })
                         _log_error_detail({
                             "request_id": request_id,
                             "timestamp": datetime.datetime.now().isoformat(),
-                            "error_subcategory": "400_thinking_budget_fix_retry",
+                            "error_subcategory": "429_key_cycle_attempt",
+                            "upstream_status": 429,
+                            "key_idx": current_key_idx,
+                            "litellm_model": litellm_model,
+                            "attempt_number": attempt_idx + 1,
+                            "total_keys": NUM_KEYS,
+                            "upstream_error_body_full": err_str[:3000],
+                        })
+                        _log("KEY-429", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
+                        continue
+
+                    # ─── Non-429 errors: resilience retry ───
+                    should_resilience_retry = (
+                        resp.status in (401, 403)
+                        and "AuthenticationError" in err_str
+                        and metrics.get("_resilience_retry_count", 0) < 1
+                    )
+                    should_fix_thinking_budget = (
+                        resp.status == 400
+                        and "InvalidParameter" in err_str
+                        and "thinking_budget" in err_str
+                        and "max_completion_tokens" in err_str
+                        and metrics.get("_thinking_budget_retry_count", 0) < 1
+                    )
+
+                    if should_fix_thinking_budget:
+                        metrics["_thinking_budget_retry_count"] = metrics.get("_thinking_budget_retry_count", 0) + 1
+                        _tb_match = re.search(r'thinking_budget\s*\[(\d+)\]', err_str)
+                        _mc_match = re.search(r'max_completion_tokens\s*\[(\d+)\]', err_str)
+                        if _tb_match and _mc_match:
+                            actual_tb = int(_tb_match.group(1))
+                            actual_mc = int(_mc_match.group(1))
+                            fixed_mc = actual_tb + OUTPUT_TOKEN_MARGIN
+                            _log("THINKFIX", f"thinking_budget={actual_tb} > max_completion_tokens={actual_mc} → fixing to {fixed_mc}")
+                            oai_body_fixed = json.loads(oai_data.decode("utf-8"))
+                            oai_body_fixed["max_tokens"] = fixed_mc
+                            oai_body_fixed["max_completion_tokens"] = fixed_mc
+                            if "thinking_budget" not in oai_body_fixed:
+                                oai_body_fixed["thinking_budget"] = actual_tb
+                            fixed_data = json.dumps(oai_body_fixed).encode("utf-8")
+                            fixed_headers = dict(headers_out)
+                            fixed_headers["Content-Length"] = str(len(fixed_data))
+                            _log_error_detail({
+                                "request_id": request_id,
+                                "timestamp": datetime.datetime.now().isoformat(),
+                                "error_subcategory": "400_thinking_budget_fix_retry",
+                                "upstream_status": resp.status,
+                                "original_max_completion_tokens": actual_mc,
+                                "original_thinking_budget": actual_tb,
+                                "fixed_max_completion_tokens": fixed_mc,
+                                "upstream_error_body_full": err_str[:1000],
+                            })
+                            try:
+                                conn_fix = self._make_upstream_conn(parsed_upstream)
+                                conn_fix.request("POST", parsed_upstream.path, body=fixed_data, headers=fixed_headers)
+                                resp_fix = conn_fix.getresponse()
+                                if resp_fix.status < 400:
+                                    if is_stream:
+                                        stream_to_anth(self, resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
+                                        metrics["status"] = 200
+                                        metrics["thinking_budget_fix_success"] = True
+                                        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                        _log_metrics(metrics)
+                                        return
+                                    elif force_stream_for_nonstream:
+                                        collect_stream_to_anth(self, resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
+                                        metrics["thinking_budget_fix_success"] = True
+                                        return
+                                    else:
+                                        ttfb_fix = time.time()
+                                        resp_body_fix = resp_fix.read()
+                                        oai_resp_fix = json.loads(resp_body_fix)
+                                        anth_resp_fix = openai_to_anth(oai_resp_fix, request_model)
+                                        metrics["status"] = 200
+                                        metrics["thinking_budget_fix_success"] = True
+                                        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                                        metrics["ttfb_ms"] = int((ttfb_fix - t_start) * 1000)
+                                        _log_metrics(metrics)
+                                        self._send_json(200, anth_resp_fix)
+                                        conn_fix.close()
+                                        return
+                                error_body_fix = resp_fix.read()
+                                try:
+                                    error_json_fix = json.loads(error_body_fix)
+                                except Exception:
+                                    error_json_fix = {"error": error_body_fix.decode("utf-8", errors="replace")}
+                                conn_fix.close()
+                                error_json = error_json_fix
+                                _log("ERR", f"thinking_budget fix retry also failed: {resp_fix.status} {json.dumps(error_json_fix)[:200]}")
+                            except Exception as e_fix:
+                                _log("ERR", f"thinking_budget fix retry connection error: {e_fix}")
+
+                    if should_resilience_retry:
+                        metrics["_resilience_retry_count"] = metrics.get("_resilience_retry_count", 0) + 1
+                        _log("RESILIENCE", f"401/403 AuthError → retry #{metrics['_resilience_retry_count']}")
+                        _log_error_detail({
+                            "request_id": request_id,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                            "error_subcategory": "401_resilience_retry_triggered",
                             "upstream_status": resp.status,
-                            "original_max_completion_tokens": actual_mc,
-                            "original_thinking_budget": actual_tb,
-                            "fixed_max_completion_tokens": fixed_mc,
-                            "upstream_error_body_full": err_str[:1000],
+                            "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:1000],
                         })
                         try:
-                            conn_fix = self._make_upstream_conn(parsed_upstream)
-                            conn_fix.request("POST", parsed_upstream.path, body=fixed_data, headers=fixed_headers)
-                            resp_fix = conn_fix.getresponse()
-                            if resp_fix.status < 400:
+                            conn2 = self._make_upstream_conn(parsed_upstream)
+                            conn2.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
+                            resp2 = conn2.getresponse()
+                            if resp2.status < 400:
                                 if is_stream:
-                                    stream_to_anth(self, resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
+                                    stream_to_anth(self, resp2, request_model, mapped_model, conn2, metrics, t_start)
                                     metrics["status"] = 200
-                                    metrics["thinking_budget_fix_success"] = True
+                                    metrics["resilience_retry_success"] = True
                                     metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                     _log_metrics(metrics)
                                     return
                                 elif force_stream_for_nonstream:
-                                    collect_stream_to_anth(self, resp_fix, request_model, mapped_model, conn_fix, metrics, t_start)
-                                    metrics["thinking_budget_fix_success"] = True
+                                    collect_stream_to_anth(self, resp2, request_model, mapped_model, conn2, metrics, t_start)
+                                    metrics["resilience_retry_success"] = True
                                     return
                                 else:
-                                    ttfb_fix = time.time()
-                                    resp_body_fix = resp_fix.read()
-                                    oai_resp_fix = json.loads(resp_body_fix)
-                                    anth_resp_fix = openai_to_anth(oai_resp_fix, request_model)
+                                    ttfb_start2 = time.time()
+                                    resp_body2 = resp2.read()
+                                    oai_response2 = json.loads(resp_body2)
+                                    anth_response2 = openai_to_anth(oai_response2, request_model)
                                     metrics["status"] = 200
-                                    metrics["thinking_budget_fix_success"] = True
+                                    metrics["resilience_retry_success"] = True
                                     metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                    metrics["ttfb_ms"] = int((ttfb_fix - t_start) * 1000)
+                                    metrics["ttfb_ms"] = int((ttfb_start2 - t_start) * 1000)
+                                    usage2 = oai_response2.get("usage", {})
+                                    metrics["input_tokens"] = usage2.get("prompt_tokens", 0)
+                                    metrics["output_tokens"] = usage2.get("completion_tokens", 0)
+                                    choices2 = oai_response2.get("choices", [])
+                                    if choices2:
+                                        metrics["finish_reason"] = choices2[0].get("finish_reason")
                                     _log_metrics(metrics)
-                                    self._send_json(200, anth_resp_fix)
-                                    conn_fix.close()
+                                    self._send_json(200, anth_response2)
+                                    conn2.close()
                                     return
-                            # Fix retry also failed — fall through to error reporting
-                            error_body_fix = resp_fix.read()
+                            error_body2 = resp2.read()
                             try:
-                                error_json_fix = json.loads(error_body_fix)
+                                error_json2 = json.loads(error_body2)
                             except Exception:
-                                error_json_fix = {"error": error_body_fix.decode("utf-8", errors="replace")}
-                            conn_fix.close()
-                            error_json = error_json_fix
-                            _log("ERR", f"thinking_budget fix retry also failed: {resp_fix.status} {json.dumps(error_json_fix)[:200]}")
-                        except Exception as e_fix:
-                            _log("ERR", f"thinking_budget fix retry connection error: {e_fix}")
-                if should_resilience_retry:
-                    metrics["_resilience_retry_count"] = metrics.get("_resilience_retry_count", 0) + 1
-                    _log("RESILIENCE", f"401/403 AuthError → retry #{metrics['_resilience_retry_count']} (KEY5 cooldown should force different deployment)")
+                                error_json2 = {"error": error_body2.decode("utf-8", errors="replace")}
+                            conn2.close()
+                            error_json = error_json2
+                            resp_status_final = resp2.status
+                            _log("ERR", f"resilience retry also failed: {resp2.status} {json.dumps(error_json2)[:200]}")
+                        except Exception as e2:
+                            _log("ERR", f"resilience retry connection error: {e2}")
+                            resp_status_final = resp.status
+                    else:
+                        resp_status_final = resp.status
+
+                    # ─── Non-429, non-retryable (or retry failed) → report error ───
+                    _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
                     _log_error_detail({
                         "request_id": request_id,
                         "timestamp": datetime.datetime.now().isoformat(),
-                        "error_subcategory": "401_resilience_retry_triggered",
-                        "upstream_status": resp.status,
-                        "upstream_error_body_full": error_body.decode("utf-8", errors="replace")[:1000],
+                        "error_subcategory": f"{resp_status_final}_upstream_error",
+                        "upstream_status": resp_status_final,
+                        "upstream_error_body_full": json.dumps(error_json)[:3000],
                     })
-                    try:
-                        conn2 = self._make_upstream_conn(parsed_upstream)
-                        conn2.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
-                        resp2 = conn2.getresponse()
-                        if resp2.status < 400:
-                            if is_stream:
-                                stream_to_anth(self, resp2, request_model, mapped_model, conn2, metrics, t_start)
-                                metrics["status"] = 200
-                                metrics["resilience_retry_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                _log_metrics(metrics)
-                                return
-                            elif force_stream_for_nonstream:
-                                collect_stream_to_anth(self, resp2, request_model, mapped_model, conn2, metrics, t_start)
-                                metrics["resilience_retry_success"] = True
-                                return
-                            else:
-                                ttfb_start2 = time.time()
-                                resp_body2 = resp2.read()
-                                oai_response2 = json.loads(resp_body2)
-                                anth_response2 = openai_to_anth(oai_response2, request_model)
-                                metrics["status"] = 200
-                                metrics["resilience_retry_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                                metrics["ttfb_ms"] = int((ttfb_start2 - t_start) * 1000)
-                                usage2 = oai_response2.get("usage", {})
-                                metrics["input_tokens"] = usage2.get("prompt_tokens", 0)
-                                metrics["output_tokens"] = usage2.get("completion_tokens", 0)
-                                choices2 = oai_response2.get("choices", [])
-                                if choices2:
-                                    metrics["finish_reason"] = choices2[0].get("finish_reason")
-                                _log_metrics(metrics)
-                                self._send_json(200, anth_response2)
-                                conn2.close()
-                                return
-                        # Retry also failed — fall through to error reporting
-                        error_body2 = resp2.read()
-                        try:
-                            error_json2 = json.loads(error_body2)
-                        except Exception:
-                            error_json2 = {"error": error_body2.decode("utf-8", errors="replace")}
-                        conn2.close()
-                        error_json = error_json2
-                        resp_status_final = resp2.status
-                        _log("ERR", f"resilience retry also failed: {resp2.status} {json.dumps(error_json2)[:200]}")
-                    except Exception as e2:
-                        _log("ERR", f"resilience retry connection error: {e2}")
-                        resp_status_final = resp.status
-                else:
-                    resp_status_final = resp.status
+                    metrics["status"] = resp_status_final
+                    metrics["error_type"] = "UpstreamError"
+                    metrics["error_message"] = json.dumps(error_json)[:200]
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
 
-                _log("ERR", f"upstream {resp_status_final}: {json.dumps(error_json)[:200]}")
-                _log_error_detail({
-                    "request_id": request_id,
-                    "timestamp": datetime.datetime.now().isoformat(),
-                    "error_subcategory": f"{resp_status_final}_upstream_error",
-                    "upstream_status": resp_status_final,
-                    "upstream_error_body_full": json.dumps(error_json)[:3000],
-                })
-                metrics["status"] = resp_status_final
-                metrics["error_type"] = "UpstreamError"
-                metrics["error_message"] = json.dumps(error_json)[:200]
-                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                _log_metrics(metrics)
+                    if is_input_overflow(error_json, resp_status_final):
+                        _log("INPUT-OVERFLOW", f"400 input overflow → invalid_request_error (CC stops, no compact)")
+                        err_msg = json.dumps(error_json)[:500]
+                        self._send_json(400, {"type": "error", "error": {"type": "invalid_request_error",
+                                         "message": f"Input tokens exceed ModelScope limit. Please start a new conversation. Detail: {err_msg}"},
+                                         "model": request_model})
+                        metrics["status"] = 400
+                        metrics["error_type"] = "InputExceedsInvalidRequest"
+                        return
 
-                # Convert upstream input-token-overflow 400 errors to invalid_request_error (400).
-                if is_input_overflow(error_json, resp_status_final):
-                    _log("INPUT-OVERFLOW", f"400 input overflow → invalid_request_error (CC stops, no compact)")
-                    err_msg = json.dumps(error_json)[:500]
-                    self._send_json(400, {"type": "error", "error": {"type": "invalid_request_error",
-                                     "message": f"Input tokens exceed ModelScope limit. Please start a new conversation. Detail: {err_msg}"},
-                                     "model": request_model})
-                    metrics["status"] = 400
-                    metrics["error_type"] = "InputExceedsInvalidRequest"
+                    client_status = get_upstream_status_for_client(resp_status_final)
+                    error_payload = convert_error(error_json, request_model)
+                    extra_hdrs = None
+                    if client_status == 429:
+                        quota_exhaust = is_quota_exhaustion(error_json)
+                        retry_seconds = 30 if quota_exhaust else 5
+                        extra_hdrs = {"retry-after": str(retry_seconds)}
+                        _log("RETRY-AFTER", f"429 rate_limit_error → retry-after={retry_seconds}s (quota={quota_exhaust})")
+                    elif client_status == 529:
+                        extra_hdrs = {"retry-after": "5"}
+                        _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
+                    self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                     return
 
-                client_status = get_upstream_status_for_client(resp_status_final)
-                error_payload = convert_error(error_json, request_model)
-                extra_hdrs = None
-                if client_status == 429:
-                    quota_exhaust = is_quota_exhaustion(error_json)
-                    retry_seconds = 30 if quota_exhaust else 5
-                    extra_hdrs = {"retry-after": str(retry_seconds)}
-                    _log("RETRY-AFTER", f"429 rate_limit_error → retry-after={retry_seconds}s (quota={quota_exhaust})")
-                elif client_status == 529:
-                    extra_hdrs = {"retry-after": "5"}
-                    _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
-                self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
-                return
+                # ─── Success: resp.status < 400 ───
+                metrics["key_idx"] = current_key_idx
+                metrics["litellm_model"] = litellm_model
+                if key_cycle_attempts:
+                    metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
+                    metrics["key_cycle_details"] = key_cycle_attempts
+                    _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on key {current_key_idx+1} ({litellm_model})")
 
-            if is_stream:
-                stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
-            elif force_stream_for_nonstream:
-                collect_stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
-            else:
-                ttfb_start = time.time()
-                resp_body = resp.read()
-                oai_response = json.loads(resp_body)
-                anth_response = openai_to_anth(oai_response, request_model)
-                metrics["status"] = 200
-                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                metrics["ttfb_ms"] = int((ttfb_start - t_start) * 1000)
-                usage = oai_response.get("usage", {})
-                metrics["input_tokens"] = usage.get("prompt_tokens", 0)
-                metrics["output_tokens"] = usage.get("completion_tokens", 0)
-                choices = oai_response.get("choices", [])
-                if choices:
-                    metrics["finish_reason"] = choices[0].get("finish_reason")
-                _log_metrics(metrics)
-                self._send_json(200, anth_response)
-                conn.close()
+                if is_stream:
+                    stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
+                elif force_stream_for_nonstream:
+                    collect_stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
+                else:
+                    ttfb_start = time.time()
+                    resp_body = resp.read()
+                    oai_response = json.loads(resp_body)
+                    anth_response = openai_to_anth(oai_response, request_model)
+                    metrics["status"] = 200
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    metrics["ttfb_ms"] = int((ttfb_start - t_start) * 1000)
+                    usage = oai_response.get("usage", {})
+                    metrics["input_tokens"] = usage.get("prompt_tokens", 0)
+                    metrics["output_tokens"] = usage.get("completion_tokens", 0)
+                    choices = oai_response.get("choices", [])
+                    if choices:
+                        metrics["finish_reason"] = choices[0].get("finish_reason")
+                    _log_metrics(metrics)
+                    self._send_json(200, anth_response)
+                    conn.close()
+                return  # Success — done with this request
 
-        except Exception as e:
-            err_str = str(e)
-            _log("ERR", f"upstream connection error: {e}")
-            metrics["status"] = 502; metrics["error_type"] = "ConnectionError"; metrics["error_message"] = err_str
-            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-            _log_error_detail({
-                "request_id": request_id,
-                "timestamp": datetime.datetime.now().isoformat(),
-                "error_subcategory": "ConnectionRefusedError",
-                "upstream_status": 502,
-                "upstream_headers": {},
-                "upstream_error_body_full": err_str[:3000],
-            })
-            _log_metrics(metrics)
-            self._send_json(502, {"type": "error", "error": {"type": "api_error",
-                             "message": f"Upstream connection failed: {e}"}, "model": request_model})
+            except Exception as e:
+                _log("ERR", f"key {current_key_idx+1} ({litellm_model}) connection error: {e}")
+                key_cycle_attempts.append({
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "error": str(e)[:200],
+                    "error_type": "ConnectionError",
+                })
+                continue  # Try next key
 
-    # ─── Passthrough for OpenAI format requests ───
+        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors ───
+        _log("ALL-KEYS-429", f"All {NUM_KEYS} key groups exhausted for {mapped_model}. "
+                             f"Cycled: {[a.get('litellm_model') for a in key_cycle_attempts]}")
+        _log_error_detail({
+            "request_id": request_id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error_subcategory": "429_all_keys_exhausted",
+            "upstream_status": 429,
+            "model": mapped_model,
+            "total_keys": NUM_KEYS,
+            "key_cycle_attempts": key_cycle_attempts,
+            "upstream_error_body_full": json.dumps(key_cycle_attempts)[:3000],
+        })
+        metrics["status"] = 429
+        metrics["error_type"] = "AllKeysExhausted"
+        metrics["error_message"] = f"All {NUM_KEYS} ModelScope keys exhausted for model {mapped_model}."
+        metrics["key_cycle_attempts"] = key_cycle_attempts
+        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+        _log_metrics(metrics)
+
+        self._send_json(429, {
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
+                           f"Please wait for quota recovery (typically 15 minutes) before retrying. "
+                           f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
+            },
+            "model": request_model,
+        }, extra_headers={"retry-after": "30"})
+
+    # ─── Passthrough for OpenAI format requests (with key round-robin) ───
     def _passthrough_openai(self):
         body_len = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(body_len) if body_len > 0 else b""
@@ -459,31 +521,64 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream = MODEL_UPSTREAMS[upstream_key]
         litellm_url = upstream["chat_url"]
 
-        # Replace model name in body with mapped LiteLLM model_name
-        body["model"] = mapped_model
-        forwarded_body = json.dumps(body).encode("utf-8")
+        start_key_idx = _next_key_idx(mapped_model)
+        key_cycle_attempts = []
 
-        headers_out = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LITELLM_KEY}",
-            "Content-Length": str(len(forwarded_body)),
-        }
-        parsed = urllib.parse.urlparse(litellm_url)
-        try:
-            conn = self._make_upstream_conn(parsed)
-            conn.request("POST", parsed.path, body=forwarded_body, headers=headers_out)
-            resp = conn.getresponse()
-            resp_body = resp.read()
-            self.send_response(resp.status)
-            for h in ["Content-Type"]:
-                v = resp.getheader(h)
-                if v:
-                    self.send_header(h, v)
-            self.end_headers()
-            self.wfile.write(resp_body)
-            conn.close()
-        except Exception as e:
-            self._send_json(502, {"error": f"Upstream failed: {e}"})
+        for attempt_idx in range(NUM_KEYS):
+            current_key_idx = (start_key_idx + attempt_idx) % NUM_KEYS
+            litellm_model = f"{mapped_model}k{current_key_idx + 1}"
+            body["model"] = litellm_model
+            _log("KEY-RR-PASSTHRU", f"attempt {attempt_idx+1}/{NUM_KEYS}: key_idx={current_key_idx} → model={litellm_model}")
+
+            forwarded_body = json.dumps(body).encode("utf-8")
+            headers_out = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {LITELLM_KEY}",
+                "Content-Length": str(len(forwarded_body)),
+            }
+            parsed = urllib.parse.urlparse(litellm_url)
+            try:
+                conn = self._make_upstream_conn(parsed)
+                conn.request("POST", parsed.path, body=forwarded_body, headers=headers_out)
+                resp = conn.getresponse()
+                resp_body = resp.read()
+
+                if resp.status == 429:
+                    key_cycle_attempts.append({
+                        "key_idx": current_key_idx,
+                        "litellm_model": litellm_model,
+                        "error_body": resp_body.decode("utf-8", errors="replace")[:500],
+                    })
+                    conn.close()
+                    _log("KEY-429-PASSTHRU", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling")
+                    continue
+
+                self.send_response(resp.status)
+                for h in ["Content-Type"]:
+                    v = resp.getheader(h)
+                    if v:
+                        self.send_header(h, v)
+                self.end_headers()
+                self.wfile.write(resp_body)
+                conn.close()
+                return
+
+            except Exception as e:
+                _log("ERR", f"passthru key {current_key_idx+1} ({litellm_model}) connection error: {e}")
+                key_cycle_attempts.append({
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "error": str(e)[:200],
+                })
+                continue
+
+        _log("ALL-KEYS-429-PASSTHRU", f"All {NUM_KEYS} key groups exhausted in passthru for {mapped_model}")
+        self._send_json(429, {
+            "error": {
+                "type": "rate_limit_error",
+                "message": f"All {NUM_KEYS} ModelScope API keys exhausted for model {mapped_model}. Please wait for quota recovery."
+            }
+        }, extra_headers={"retry-after": "30"})
 
     # ─── /v1/models proxy ───
     def _proxy_models(self):
@@ -502,6 +597,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
+                    # R19: Filter out key group internal names (e.g. "glm5.1k1", "dsv4pk3")
+                    # These are proxy→LiteLLM routing names, not meant for CC/agents
+                    if _is_key_group_name(model_id):
+                        continue
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
                         upstream_key = MODEL_MAP.get(model_id, model_id)
@@ -516,6 +615,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
             except Exception as e:
                 _log("ERROR", f"models proxy error for {model_key}: {e}")
+        # R19: Always include canonical names (glm5.1, dsv4p) even if LiteLLM only lists key groups
+        for model_key in MODEL_UPSTREAMS:
+            if model_key not in seen_ids:
+                seen_ids.add(model_key)
+                context_len = MODEL_MAX_INPUT_TOKENS.get(model_key, 131072)
+                all_models.append({
+                    "id": model_key,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "proxy",
+                    "context_length": context_len,
+                })
         self._send_json(200, {"object": "list", "data": all_models})
 
     # ─── Anthropic-format /v1/models endpoints ───

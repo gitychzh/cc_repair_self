@@ -2,33 +2,35 @@
 
 ## Architecture (same on both machines)
 ```
-Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + tier routing + metrics)
-    → 41003(LiteLLM glm5.1, 1000 variants × 7 keys = 7000 deploys) → ModelScope [PRIMARY]
-    → 42001(LiteLLM dsv4p, 11 variants × 7 keys = 77 deploys) → ModelScope [HAiku/Mini tier]
-    → 41001(LiteLLM glm5.1-backup, 1000 variants × 7 keys = 7000 deploys) [BACKUP]
+Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + key round-robin + metrics)
+    → 41003(LiteLLM glm5.1k1~k7, 7 key groups × 1000 variants = 7000 deploys) → ModelScope [PRIMARY]
+    → 42001(LiteLLM dsv4pk1~k7, 7 key groups × 11 variants = 77 deploys) → ModelScope [HAiku/Mini tier]
+    → 41001(LiteLLM glm5.1k1~k7, 7 key groups × 1000 variants = 7000 deploys) [BACKUP]
 ```
 
-Proxy does **format conversion + force-stream + stream_usage + tier-based model routing + metrics logging**. No retry, no truncation, no auto-compact. LiteLLM handles retry/fallback/routing/cooldown.
+Proxy does **format conversion + key round-robin (429 cycling) + metrics logging**. No retry, no truncation, no auto-compact. LiteLLM handles per-key-group retry/fallback/routing/cooldown.
 
-**Tier-based routing (inspired by cc-switch)**: opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking). OpenAI-style names (gpt-4o, gpt-4o-mini, codex-mini-latest) also supported for multi-agent compatibility.
+**Key Round-Robin (R19)**: Proxy cycles keys on 429 (k1→k2→...→k7), all 7 exhausted → 429 to agent. Each key's 429 attempt logged. LiteLLM config split into 7 key groups per model.
+
+**Tier-based routing**: opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking).
 
 ## Containers (all healthy on both machines)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
-| glm5.1_test41003 | :41003 | Primary glm5.1 | 7000 deploys, ulimits nofile=8192, memory 2GiB |
-| glm5.1_uni41001 | :41001 | Backup glm5.1 | 7000 deploys, ulimits nofile=8192 (R18.3), memory 2GiB (R18.3) |
-| dsv4p_uni42001 | :42001 | dsv4p | 77 deploys, ulimits nofile=4096, memory 2GiB (R18.2) |
-| auth_to_api_40001 | :40001 | Proxy (opc_uname/opc2_uname) | R18 proxy.py ✅ (R19 rebuild on opc2_uname) |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R18 proxy.py ✅ (R19 rebuild on opc2_uname) |
+| glm5.1_test41003 | :41003 | Primary glm5.1 | 7 key groups × 1000 deploys = 7000, ulimits nofile=8192, memory 2GiB |
+| glm5.1_uni41001 | :41001 | Backup glm5.1 | 7 key groups × 1000 deploys = 7000, ulimits nofile=8192, memory 2GiB |
+| dsv4p_uni42001 | :42001 | dsv4p | 7 key groups × 11 deploys = 77, ulimits nofile=4096, memory 2GiB |
+| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R19 gateway package + key round-robin ✅ |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R19 gateway package + key round-robin ✅ |
 | cc_postgres | :5432 | LiteLLM DB | — |
 
 ## Deploy Method
 ```bash
 # LiteLLM config change → restart only
-docker restart glm5.1_uni41001 / dsv4p_uni42001
+docker restart glm5.1_test41003 / glm5.1_uni41001 / dsv4p_uni42001
 
-# proxy.py change → rebuild (use local Dockerfile with cached litellm/litellm:v1.87.0 image)
-cd /opt/cc-infra && DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
+# proxy change → rebuild (gateway package + Dockerfile with cached litellm image)
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
 
 # Full rebuild
 cd /opt/cc-infra && docker compose up -d --force-recreate
@@ -36,7 +38,9 @@ cd /opt/cc-infra && docker compose up -d --force-recreate
 # CC restart
 bash ~/cc_ps/cc_recover/restart_claude.sh
 ```
-Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `DOCKER_BUILDKIT=0` required (BuildKit ignores systemd proxy). **Note**: ghcr.io also unreachable → Dockerfile now uses locally cached `litellm/litellm:v1.87.0` image instead of `ghcr.io/berriai/litellm:v1.83.14-stable.patch.1`.
+**⚠️ CRITICAL**: LiteLLM MUST be restarted BEFORE proxy when changing configs. Proxy sends `glm5.1k1`~`glm5.1k7` to LiteLLM — if LiteLLM doesn't have key groups yet, it returns "Invalid model name" → CC crash.
+
+**Deploy order for key group changes**: 1) LiteLLM configs → 2) `docker restart` LiteLLM containers → 3) verify key groups in LiteLLM `/v1/models` → 4) proxy rebuild → 5) verify proxy `/v1/models` shows only canonical names.
 
 ## Current Parameters (R19)
 
@@ -47,58 +51,34 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | settings.json env + .bashrc + .profile | Env var backup for CC |
 | MODEL_INPUT_TOKEN_SAFETY | 170000 | docker-compose.yml | Reported to CC via /v1/models |
 | CHARS_PER_TOKEN_ESTIMATE | 3.0 | docker-compose.yml | Both containers running 3.0 ✅ |
+| NUM_KEYS | 7 | docker-compose.yml | Key groups per model for round-robin |
 | PROXY_TIMEOUT | 300 | docker-compose.yml | Seconds |
 | MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
 | MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
 | timeout (glm5.1/dsv4p) | 300 | litellm config.yaml | Seconds |
-| num_retries (41003) | 8 | litellm config.yaml | — |
-| num_retries (42001) | 5 | litellm config.yaml | — |
-| cooldown_time (41003) | 10 | litellm config.yaml | — |
-| cooldown_time (42001) | 30 | litellm config.yaml | — |
-| routing_strategy (41003) | simple-shuffle | litellm config.yaml | — |
-| routing_strategy (42001) | latency-based-routing | litellm config.yaml | — |
-| RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
-| RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
+| num_retries (41003) | 2 | litellm config.yaml | R19: reduced from 8, proxy handles key cycling |
+| num_retries (42001) | 2 | litellm config.yaml | R19: reduced from 5, proxy handles key cycling |
+| cooldown_time (41003/42001) | 10 | litellm config.yaml | — |
+| routing_strategy (41003/42001) | simple-shuffle | litellm config.yaml | R19: 42001 changed from latency-based |
+| RateLimitErrorAllowedFails (41003/42001) | 1 | litellm config.yaml | R19: 429→proxy cycles to next key |
 
-## Metrics Summary (06-11 opc_uname 40001, 06-11 opc2_uname 40001)
+## Metrics Summary (06-12 opc_uname/opc2_uname, R19 deployed)
 
 ### opc_uname 40001 (from DEPLOY_STATUS R18.3)
-| Metric | 06-10 | 06-11 | Change |
-|--------|-------|-------|--------|
-| Total requests | 1887 | 1555 | ↓ |
-| Success rate | 99.8% | 96.8% (100% excl 429) | burst外持平 |
-| 429 errors | 1 | 49 (token quota burst) | transient |
-| P99 TTFB | 65.0s | 49.8s | ↓23% ✅ |
-| P99 duration | 80.4s | 69.5s | ↓13% ✅ |
+| Metric | 06-10 | 06-11 | 06-12 (R19) | Change |
+|--------|-------|-------|-------------|--------|
+| Total requests | 1887 | 1555 | TBD | R19 just deployed |
+| Success rate | 99.8% | 96.8% (100% excl 429) | TBD | — |
+| 429 errors | 1 | 49 (token quota burst) | TBD | R19 key cycling should reduce |
+| P99 TTFB | 65.0s | 49.8s | TBD | — |
 
-### opc2_uname 40001 (R19 analysis)
-| Metric | 06-09 | 06-10 | 06-11 | Trend |
-|--------|-------|-------|-------|-------|
-| Total requests | 638 | 771 | 248 | — |
-| Stable success rate | 100% | 99.9% | 99.6% | ✅ stable |
-| 429 errors | 0 | 0 | 1 | token quota burst (21:06) |
-| Startup 502s | 0 | 0 | 9 | container restart, transient |
-| TTFB p99 | 42.5s | 56.8s | 39.8s | improved ✅ |
-| Duration p99 | 52.2s | 82.9s | 58.2s | improved ✅ |
-| ms_requests_remaining min | 1465 | 1323 | 1217 | healthy (>1200) |
-| chars/token median | N/A | N/A | 4.11 | CPT=3.0 overestimates 1.36x |
-
-**Burst analysis (opc2_uname 06-11)**: 9×502 startup errors at 15:38→15:40 (container restart), 1×429 token quota burst at 21:06. Excluding startup: 99.6% success rate. TTFB p99=39.8s improved vs Jun 10's 56.8s ✅. Infrastructure 100% stable outside startup and token quota burst.
-
-**Container memory status (opc2_uname R19)**: glm5.1_test41003 35.55%/2GiB ✅, dsv4p_uni42001 30.49%/2GiB ✅, glm5.1_uni41001 33.28%/2GiB ✅ (R18.3 OOM fix stable, previously was 74.76%/1GiB).
-
-## Historical Trend
-
-| Day | Total | Success | Avg Latency | Notes |
-|-----|-------|---------|-------------|-------|
-| 06-02 | 243 | 80.2% | ~14s | Pre-R12 (proxy auto-compact) |
-| 06-03 | 1214 | 84.2% | ~14s | 47 InputExceedsProxyReject |
-| 06-04 | 1787 | ~85% | ~14s | 441 429 errors, pre-R12 |
-| 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
-| 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
-| 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1555 | 96.8% (100% excl 429) | 17.9s | 49×429 token burst, P99=49.8s ↓23%, infra stable |
-| 06-12 | 248+ | 99.6% (excl startup) | 15.2s | R19 deployed, proxy rebuilt, all 6 containers healthy |
+### opc2_uname 40001 (R19 deployed)
+| Metric | 06-09 | 06-10 | 06-11 | 06-12 (R19) | Trend |
+|--------|-------|-------|-------|-------------|-------|
+| Total requests | 638 | 771 | 248 | TBD | — |
+| Stable success rate | 100% | 99.9% | 99.6% | TBD | — |
+| 429 errors | 0 | 0 | 1 | TBD | R19 key cycling active |
+| TTFB p99 | 42.5s | 56.8s | 39.8s | TBD | — |
 
 ## Key Issues & Notes
 
@@ -106,58 +86,44 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - **Auto-compact uses `stripNonEssential=true`**: truncates tool output, removes tool defs → low-quality summary
 - **Manual `/compact` uses `stripNonEssential=false`**: full context + all tools → much better summary
 - **When CC warns "Autocompact will trigger soon"**, proactively run `/compact <focus>` for better quality
-- **CC tokenizer estimation variance**: Jun 11 est/actual=1.36 median (proxy CPT=3.0 overestimates vs actual chars/token=4.08). autoCompactWindow=155K provides safe margin.
-- Write critical info to CLAUDE.md/memory — these survive compaction
 
-### CHARS_PER_TOKEN_ESTIMATE — resolved ✅
-- CPT=3.0 overestimates by 1.36x (chars_json/3.0 vs actual) — only affects INPUT-WARN threshold
-- CC auto-compact uses Anthropic tokenizer internally, NOT proxy's CPT — changing CPT won't affect compact behavior
-
-### CC v2.1.170 startup connectivity check
-- Uses **shell env vars** (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, HTTPS_PROXY), NOT settings.json
-- Three-layer persistence: .bashrc + .profile + restart_claude.sh (`bash --login -c`)
-
-### Proxy NEVER truncates/compacts (R12 principle)
-- Proxy-level truncation causes catastrophic context loss
-- CC built-in auto-compact is sole mechanism
+### Key Round-Robin (R19) — CRITICAL deploy order
+- **LiteLLM MUST restart first**: Proxy sends `glm5.1k{N}` to LiteLLM. If LiteLLM doesn't have key groups → "Invalid model name" → CC crash
+- **Deploy order**: 1) LiteLLM configs + restart → 2) Verify LiteLLM has key groups → 3) Proxy rebuild → 4) Verify proxy /v1/models only shows canonical names
+- **Wrong order (what crashed opc_uname)**: proxy rebuilt first → sends `glm5.1k1` → LiteLLM only knows `glm5.1` → Invalid model → CC crash
 
 ### ModelScope dual quota system
 - **RPM quota**: 200/id/day per variant (tracked by ms_requests_remaining). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked). Independent from RPM.
-- Jun 11 429 burst: RPM quota fine (ms_requests_remaining=1314+), but 7 keys' token quota exhausted → 429 errors
-- Same 7 keys across all deployments → fallback to backup won't help (same token quota)
-- Token quota burst is transient (15-20 min recovery), NOT configurable
+- **R19 key round-robin addresses token quota**: Each key has independent token quota. 429 on key N → cycle to key N+1 (fresh quota). Only ALL-KEYS-429 returns 429 to agent.
 
 ### /health endpoint — NEVER use on LiteLLM
 - LiteLLM /health → per-deployment checks → fd exhaustion. Use /health/liveliness.
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
 
-## R19 Changes (2026-06-12, opc2_uname)
+## R19 Changes (2026-06-12)
 
-### 1. Proxy rebuild with R18 proxy.py (CRITICAL)
-- **Problem**: Both proxy containers (40001/40002) running OLD proxy.py (1718 lines, md5=06da1083) — missing R18 features
-- **Evidence**: 
-  - Running proxy had NO THINKING_SUPPORT dict → thinking params sent to dsv4p (bug, dsv4p doesn't support reasoning_effort)
-  - Running proxy had NO tier routing → haiku→glm5.1 instead of haiku→dsv4p
-  - Running proxy had NO OpenAI-style model names (gpt-4o, codex-mini-latest) → multi-agent compatibility broken
-  - Running proxy only showed 2 models in /v1/models → should show 29 aliases
-  - Running proxy defaults: glm5.1→41001, dsv4p→41001 — env vars override to correct backends, but defaults wrong
-- **Fix**: Rebuilt both proxy containers with R18 proxy.py (1757 lines, md5=b4e099f1)
-  - Now includes THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}
-  - Now includes tier routing: haiku→dsv4p, opus/sonnet→glm5.1
-  - Now includes 29 model aliases in /v1/models (with anthropic-version header)
-  - Now includes context_window=170000 per model (safety limit for CC auto-compact)
-  - Dockerfile updated from ghcr.io/berriai/litellm:v1.83.14 → litellm/litellm:v1.87.0 (locally cached, avoids ghcr.io unreachable from China)
+### 1. Key round-robin architecture (PRIMARY change)
+- **Problem**: 429 errors caused by token quota exhaustion per key, NOT per variant. Simple-shuffle randomly distributes across keys → single key can exhaust early. Same 7 keys across all deployments → fallback ineffective.
+- **Solution**: Proxy-level key round-robin (429 cycling through all 7 keys)
+  - LiteLLM configs split into 7 key groups: `glm5.1k1`~`glm5.1k7`, `dsv4pk1`~`dsv4pk7`
+  - Each key group has all variants with ONE specific API key (1000 dep for glm5.1, 11 for dsv4p)
+  - Proxy cycles: request N → key_idx = counter % 7 → model `{base}k{idx+1}`
+  - 429 → next key (k1→k2→...→k7→k1), all 7 → return 429 to agent with retry-after=30s
+  - Each 429 attempt logged via KEY-429 tag in error_detail
+  - LiteLLM num_retries reduced: 8→2 (glm5.1), 5→2 (dsv4p) — proxy handles key cycling, not LiteLLM
+  - RateLimitErrorAllowedFails reduced: 5→1 (glm5.1), 3→1 (dsv4p) — 429 → next key, not more retries
+  - /v1/models filters key group names, only shows canonical names (glm5.1, dsv4p) to CC/agents
 
-### 2. Metrics analysis — no parameter changes warranted
-- **Stable success rate**: 99.6% (Jun 11, excl startup 502s) ✅
-- **TTFB p99**: 39.8s (Jun 11) — improved from Jun 10's 56.8s ✅
-- **429 token quota**: 1 occurrence (transient at 21:06) — NOT configurable
-- **Startup 502s**: 9 errors during container restart (15:38→15:40) — transient, not infrastructure issue
-- **RPM quota healthy**: ms_requests_remaining always >1200, ms_model_requests_remaining nearly always 199
-- **Container memory**: All containers at 30-35%/2GiB — R18.3 OOM fix stable ✅
-- **chars/token**: 4.11 median — CPT=3.0 is appropriate (1.36x overestimate provides safety margin)
-- **Conclusion**: No parameter changes warranted — all metrics stable and healthy
+### 2. Gateway package structure (proxy implementation)
+- Proxy implemented as Python package (`gateway/`) with config.py, handlers.py, converters.py, etc.
+- Dockerfile uses `ghcr.io/berriai/litellm:v1.83.14-stable.patch.1` base image
+- NUM_KEYS=7 in docker-compose.yml env vars for both proxy containers
+
+### 3. Deploy crash lesson (CRITICAL — must remember)
+- **What happened**: Deployed R19 configs on opc_uname (self) with WRONG order — proxy rebuilt first, LiteLLM not yet restarted → proxy sends `glm5.1k1` → LiteLLM returns "Invalid model name" → CC crashed
+- **Lesson**: NEVER deploy config changes on your own machine first. Always deploy on remote (opc2_uname), verify stable for ≥2 hours, then update self.
+- **Deploy order for key changes**: LiteLLM restart FIRST → verify key groups → proxy rebuild SECOND → verify /v1/models
 
 ## Parameter Change History (condensed)
 
@@ -173,7 +139,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R18.1 | Metrics deep analysis: 429 token-limit burst, dual quota, TTFB server-side, CPT=3.0 accuracy, /health endpoint clarified | No param changes |
 | R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39%), reservations 512M→768M | dsv4p OOM prevented ✅ |
 | R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented ✅ |
-| R19 | opc2_uname proxy rebuild with R18 proxy.py; Dockerfile→litellm:v1.87.0 (cached); metrics analysis shows all stable — no param changes | Proxy parity ✅, THINKING_SUPPORT ✅, tier routing ✅, 29 model aliases ✅ |
+| R19 | Key round-robin (7 key groups per model, proxy 429 cycling); LiteLLM num_retries 8→2/5→2; RateLimitErrorAllowedFails 5→1/3→1; /v1/models filters key groups; Deploy crash on opc_uname (wrong order) → lesson learned | Key cycling active ✅, /v1/models canonical only ✅ |
 
 ## 11 Immutable Variant Model IDs
 

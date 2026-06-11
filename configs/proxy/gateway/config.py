@@ -111,6 +111,24 @@ MODEL_INPUT_TOKEN_SAFETY = {
 OUTPUT_TOKEN_MARGIN = 8192  # Room for output after thinking_budget
 THINKING_SIGNATURE_DEFAULT = "ErUB3WY0k2GCM2h+4O0S3Y3W3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f"
 
+# ─── Key round-robin ──────────────────────────────────────────────────────
+NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
+_key_rr_counter = {}
+_key_rr_lock = threading.Lock()
+
+def _next_key_idx(model: str) -> int:
+    with _key_rr_lock:
+        idx = _key_rr_counter.get(model, 0)
+        _key_rr_counter[model] = (idx + 1) % NUM_KEYS
+        return idx
+
+def _is_key_group_name(name: str) -> bool:
+    for base in MODEL_UPSTREAMS:
+        for ki in range(NUM_KEYS):
+            if name == f"{base}k{ki+1}":
+                return True
+    return False
+
 # ─── Thread locks for logging ────────────────────────────────────────────
 _log_lock = threading.Lock()
 _metrics_lock = threading.Lock()
