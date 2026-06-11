@@ -1,7 +1,6 @@
-FROM ghcr.io/berriai/litellm:v1.83.14-stable.patch.1
+FROM litellm/litellm:v1.87.0
 WORKDIR /app
 RUN mkdir -p /app/logs
-COPY gateway/ ./gateway/
-COPY gateway_main.py .
+COPY proxy.py .
 ENTRYPOINT ["python3"]
-CMD ["gateway_main.py"]
+CMD ["proxy.py"]
