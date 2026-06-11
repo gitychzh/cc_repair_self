@@ -60,22 +60,29 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
 | RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
 
-## Metrics Summary (06-11, latest full day)
+## Metrics Summary (06-11, latest full day + 06-10 comparison)
 
-| Metric | 40001 (opc_uname) | 40002 (opc2_uname) |
-|--------|-------------------|---------------------|
-| Total requests | 596 | 32 |
-| Success rate | 100% | 100% |
-| Errors | 0 | 0 |
-| Avg latency | 20.8s | 9.2s |
-| P50 latency | 19.0s | 8.6s |
-| P90 latency | 33.3s | — |
-| P99 latency | 65.0s | — |
-| Actual chars/token | 2.87 avg (CPT=3.0) | — |
-| Max est_tokens | 130K (83.9% of 155K) | — |
-| MS quota remaining | 196-199 avg=199 | — |
+| Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
+|--------|-------------|-------------|-------------|-------------|
+| Total requests | 1887 | 48 | 585 | 32 |
+| Success rate | 99.8% | 100% | 100% | 100% |
+| Errors | 2×502, 1×429 | 0 | 0 | 0 |
+| Avg TTFB | 19.0s | 6.0s | 20.7s | 9.2s |
+| P50 TTFB | 16.2s | 5.0s | 18.9s | 8.5s |
+| P90 TTFB | 33.0s | — | 33.3s | — |
+| P99 TTFB | 65.0s | — | 65.0s | — |
+| Avg duration | 20.7s | 6.2s | 22.4s | 9.3s |
+| Actual chars/token (all) | 3.22 avg | 3.39 avg | 2.86 avg | 3.39 avg |
+| Actual chars/token (>50K) | — | — | 3.10 avg | — |
+| Max est_tokens | 205K | — | 130K | — |
+| Unique deploys used | 1659/7000 | — | 563/7000 | — |
+| MS quota remaining | 150-199 | — | 196-199 avg=199 | — |
+| Proxy overhead avg | 3.9s | — | 3.1s | — |
+| Proxy overhead median | 1.7s | — | 0.5s | — |
+| Fast path (<1s overhead) | 41.6% | — | 53.9% | — |
+| Slow path (>5s overhead) | 22.7% | — | 20.8% | — |
 
-**06-11 analysis**: 596 reqs, 100% success (ZERO errors), avg latency 20.8s, max est_tokens 130K (never hit autoCompactWindow 155K), quota 196-199. CC overestimation ratio est/actual=0.95 (slight underestimate on Jun 11 vs 1.24 overestimate on Jun 10 — content composition variance). 'length' finish_reason: 12 requests, all startup connectivity checks (input_tokens≤7, harmless). Proxy overhead median=507ms, avg=4.7s (correlates with output token count — expected streaming behavior).
+**06-11 analysis**: 585 reqs, 100% success (ZERO errors), avg TTFB 20.7s, max est_tokens 130K (never hit autoCompactWindow 155K), quota 196-199. CC est/actual ratio avg=1.18 (overestimate), meaning auto-compact fires at ~137K real tokens = 80.6% of 170K capacity — healthy safety buffer. Proxy overhead improving: avg 3.1s (down from 3.9s on 06-10), median 0.5s, fast path ratio 54% (up from 42%). CPT=3.0 confirmed: actual avg 2.86 (all sizes), 3.10 (>50K). 'length' finish_reason: 12 requests, all startup checks (input≤7 tokens, harmless).
 
 ## Historical Trend
 
@@ -87,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 707 | 99.6% | 19.3s | Post-R7 |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 596 | 100% | 20.8s | Zero errors, CPT=2.87 actual, est≤130K |
+| 06-11 | 585 | 100% | 20.7s | Zero errors, CPT=3.0 confirmed, est≤130K, proxy overhead improving |
 
 ## Key Issues & Notes
 
@@ -95,7 +102,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - **Auto-compact uses `stripNonEssential=true`**: truncates tool output, removes tool defs → low-quality summary
 - **Manual `/compact` uses `stripNonEssential=false`**: full context + all tools → much better summary
 - **When CC warns "Autocompact will trigger soon"**, proactively run `/compact <focus>` for better quality
-- **CC tokenizer estimation variance**: Jun 10 est/actual=1.24 (overestimate), Jun 11 est/actual=0.95 (slight underestimate) — content composition variance makes prediction unreliable. autoCompactWindow=155K balances both scenarios
+- **CC tokenizer estimation variance**: Combined Jun 10+11 data (2348 samples, >50K tokens): est/actual avg=1.18, median=1.14 → CC overestimates ~18%. At autoCompactWindow=155K, auto-compact fires at ~137K real tokens (80.6% of 170K), leaving 33K safety buffer. Content composition variance makes per-day ratio unpredictable (0.95 on Jun 11 vs 1.24 on Jun 10), but autoCompactWindow=155K balances both scenarios
 - Write critical info to CLAUDE.md/memory — these survive compaction
 
 ### CHARS_PER_TOKEN_ESTIMATE — resolved ✅
@@ -166,7 +173,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R15 | compactWindow 180K→140K (GLM IQ); contextWindow/safety 190K→170K (alignment) | 99.8% |
 | R16 | compactWindow 140K→155K (CC overestimation 1.7x → too early compact) | 99.8% best ever |
 | R17 | opc2_uname full sync: docker-compose.yml + litellm num_retries 30→8 + settings.json 155K + HTTPS_PROXY + proxy.py parity | 99.8%+ stable |
-| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix (40002 missing both, 40001 missing dsv4p) + _anthropic_models_list expansion (2→29 aliases) + haiku→dsv4p routing fix + gateway package sync | Pending remote validation |
+| R18 | Tier-based routing (cc-switch inspired) + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix (40002 missing both, 40001 missing dsv4p) + _anthropic_models_list expansion (2→29 aliases) + haiku→dsv4p routing fix + gateway package sync | 100% success, zero errors ✅ |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs
