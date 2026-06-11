@@ -64,25 +64,25 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-11 40001 | Change |
 |--------|-------------|-------------|--------|
-| Total requests | 1887 | 1395 | ↓ |
-| Success rate | 99.8% | 96.7% (100% excl burst) | burst外持平 |
+| Total requests | 1887 | 1425 | ↓ |
+| Success rate | 99.8% | 96.8% (99.7% excl burst) | burst外持平 |
 | 429 errors | 1 | 46 (34 glm+12 dsv4p) | token quota burst |
 | Avg TTFB | 19.0s | 18.4s | — |
 | P50 TTFB | 16.2s | 16.6s | — |
 | P90 TTFB | 33.0s | 30.9s | ↓ |
 | P95 TTFB | — | 38.4s | — |
-| P99 TTFB | 65.0s | 49.2s | ↓ 24% improved ✅ |
-| P99 duration | 80.4s | 65.4s | ↓ 19% improved ✅ |
+| P99 TTFB | 65.0s | 50.9s | ↓ 22% improved ✅ |
+| P99 duration | 80.4s | 66.9s | ↓ 17% improved ✅ |
 | Avg litellm_resp | 15.1s | 15.3s | — |
-| P99 litellm_resp | 55.9s | 45.4s | ↓ 19% improved |
+| P99 litellm_resp | 55.9s | 45.7s | ↓ 18% improved |
 | ms_requests_remaining min | 1316 | 1314 | — |
 | est/actual token ratio | 1.24 avg | 1.362 median | CPT=3.0 normal |
 | Actual chars/token (json) | — | 4.08 median | — |
 | Tool truncation | — | 71.1% reduction | ✅ |
 
-**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Inside 16:05→17:46 window: 93.6% success. Outside burst: 100% (707/707). P99 TTFB improved from Jun 10's 65s → 49.2s ✅.
+**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Inside 16:05→17:46 window: 93.6% success. Outside burst: 99.7% (734/736). P99 TTFB improved from Jun 10's 65s → 50.9s ✅. P99 duration improved from 80.4s → 66.9s ✅.
 
-**Container memory status**: glm5.1_test41003 35.56%/2GiB ✅, dsv4p_uni42001 39.26%/2GiB ✅, glm5.1_uni41001 93.73%/1GiB ⚠️→R18.3 fix to 2GiB.
+**Container memory status**: glm5.1_test41003 36.39%/2GiB ✅, dsv4p_uni42001 39.71%/2GiB ✅, glm5.1_uni41001 51.73%/2GiB ✅ (R18.3 deployed).
 
 ## Historical Trend
 
@@ -94,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1395 | 96.7% (100% excl burst) | 18.4s | 46×429 token burst, P99=49.2s ✅, R18.2 + R18.3 |
+| 06-11 | 1425 | 96.8% (99.7% excl burst) | 18.4s | 46×429 token burst, P99=50.9s ✅, R18.2 + R18.3 |
 
 ## Key Issues & Notes
 
@@ -182,7 +182,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | R18 | Tier-based routing + THINKING_SUPPORT dict + LITELLM_MODELS_URL bug fix + _anthropic_models_list expansion + haiku→dsv4p + gateway package sync | 100% success |
 | R18.1 | Metrics deep analysis: 429 token-limit burst, dual quota, TTFB server-side, CPT=3.0 accuracy, /health endpoint clarified | No param changes |
 | R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39%), reservations 512M→768M | dsv4p OOM prevented ✅ |
-| R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented (pending deploy) |
+| R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented ✅ deployed, 51.73%/2GiB |
 | R14 | Shell env vars fix (.bashrc+.profile+restart_claude.sh) | CC startup stable |
 
 ## 11 Immutable Variant Model IDs
