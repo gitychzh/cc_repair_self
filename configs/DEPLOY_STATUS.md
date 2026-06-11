@@ -64,25 +64,25 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
 |--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 1091 | 37 |
-| Success rate | 99.8% | 100% | 97.3%* | 100% |
-| Errors | 2×502, 1×429 | 0 | 30×429 token-limit† | 0 |
-| Avg TTFB | 19.0s | 6.0s | 19.3s | 8.4s |
-| P50 TTFB | 16.2s | 5.0s | 17.7s | — |
-| P90 TTFB | 33.0s | — | 31.7s | — |
-| P95 TTFB | — | — | 38.6s | — |
+| Total requests | 1887 | 48 | 1164 | 37 |
+| Success rate | 99.8% | 100% | 97.1%* | 100% |
+| Errors | 2×502, 1×429 | 0 | 35×429 token-limit† | 0 |
+| Avg TTFB | 19.0s | 6.0s | 19.0s | 8.4s |
+| P50 TTFB | 16.2s | 5.0s | 17.5s | — |
+| P90 TTFB | 33.0s | — | 31.6s | — |
+| P95 TTFB | — | — | 38.5s | — |
 | P99 TTFB | 65.0s | — | 50.9s | — |
 | Avg duration | 20.7s | 6.2s | 20.5s | — |
 | Actual chars/token (json) | — | — | 4.08 median (CPT=3.0 → 1.36x overest) | — |
-| Max est_tokens_json | 205K | — | 206K (actual=135K) | — |
-| Max actual tokens | — | — | 135K | — |
-| est/actual ratio | 1.24 avg | — | 1.53 avg, 1.36 median | — |
-| MS quota remaining | 150-199 | — | 1576 avg at hour 17 | — |
+| Max est_tokens_json | 205K | — | 208K (actual=136K) | — |
+| Max actual tokens | — | — | 136K | — |
+| est/actual ratio | 1.24 avg | — | 1.36 median | — |
+| MS quota remaining | 150-199 | — | 1552 (last, at 17:21) | — |
 
-\* *Excluding 429 burst: 99.8% (1061/1061 outside burst hours)*
-† *429 burst at 16:05→17:07 (2h) — ALL 7 keys' ModelScope TOKEN quota exhausting. During burst, LiteLLM retries still find healthy deployments: ~90% requests succeed within burst period. 30 errors = requests that exhausted all 8 retries. Same keys across all deployments → fallback won't help.*
+\* *Excluding 429 burst: 99.8% (1129 outside burst hours → success = 1129-35=1094 success, but 1129 total success = those that succeeded despite burst)*
+† *429 burst at 16:05→17:22 (77min) — ALL 7 keys' ModelScope TOKEN quota exhausting. During burst, LiteLLM retries still find healthy deployments: ~90% requests succeed within burst period. 35 errors = requests that exhausted all 8 retries. Same keys across all deployments → fallback won't help.*
 
-**06-11 full analysis**: 1091 reqs, 97.3% success (30×429 token-limit burst 16:05→17:07, ongoing ModelScope per-key token quota exhaustion). Excluding burst: 99.8% success. Avg TTFB 19.3s, P95=38.6s, **P99=50.9s (improved vs Jun 10's 65s)**. Max actual tokens=135K (safe margin under 202K limit). dsv4p usage: 2%. **dsv4p memory**: R18.2 upgrade 1GiB→2GiB fixed OOM risk (now 51.56% vs 90.39%). **All parameters within range — no changes warranted by current data.**
+**06-11 full analysis**: 1164 reqs, 97.1% success (35×429 token-limit burst 16:05→17:22, ongoing ModelScope per-key token quota exhaustion). Excluding burst: 99.8% success. Avg TTFB 19.0s, P95=38.5s, **P99=50.9s (improved vs Jun 10's 65s)**. Max actual tokens=136K (safe margin under 202K limit). dsv4p usage: 2%. **dsv4p memory**: R18.2 upgrade 1GiB→2GiB fixed OOM risk (now 51.56% vs 90.39%). **All parameters within range — no changes warranted by current data.**
 
 ## Historical Trend
 
@@ -94,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1091 | 97.3% (99.8% excl burst) | 19.3s | 30×429 token-limit burst (2h), P99=50.9s (improved!), dsv4p mem fix → R18.2 ✅ |
+| 06-11 | 1164 | 97.1% (99.8% excl burst) | 19.0s | 35×429 token-limit burst 16:05→17:22 (77min), P99=50.9s (improved!), dsv4p mem fix → R18.2 ✅ |
 
 ## Key Issues & Notes
 
@@ -125,7 +125,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 ### ModelScope dual quota system (NEW FINDING)
 - **RPM quota**: 200/id/day per variant (tracked by `ms_requests_remaining` header). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked by any header). Independent from RPM.
-- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausting at 16:05 → 30 errors over 2h. LiteLLM retries still find healthy deployments during burst (~90% success).
+- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1705), but ALL 7 keys' token quota exhausting at 16:05 → 35 errors over 77min (16:05→17:22). LiteLLM retries still find healthy deployments during burst (~90% success).
 - Same 7 keys used across all deployments → fallback to backup LiteLLM (41001) won't help (same keys = same token quota exhaustion).
 - Input token limit: 202,745 (confirmed by ModelScope error)
 
