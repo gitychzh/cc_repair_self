@@ -64,8 +64,8 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-10 40002 | 06-11 40001 | 06-11 40002 |
 |--------|-------------|-------------|-------------|-------------|
-| Total requests | 1887 | 48 | 1350 | 38 |
-| Success rate | 99.8% | 100% | 96.7%* | 100% |
+| Total requests | 1887 | 48 | 1367 | 39 |
+| Success rate | 99.8% | 100% | 96.8%* | 100% |
 | Errors | 2×502, 1×429 | 0 | 44×429 (32 glm5.1 + 12 dsv4p)† | 0 |
 | Avg TTFB | 19.0s | 6.0s | 18.4s | 8.4s |
 | P50 TTFB | 16.2s | 5.0s | 16.7s | — |
@@ -81,10 +81,10 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | Burst success rate | — | — | 93.6% inside burst, 100% outside | — |
 | Tool truncation | — | — | 71% reduction, ~10K tok saved | — |
 
-\* *Excluding 429 burst: 100% (660/660 outside 16:05→17:47 window)*
+\* *Excluding 429 burst: 100% (677/677 outside 16:05→17:47 window)*
 † *429 burst at 16:05→17:46 (101min, ENDED) — ALL 7 keys' ModelScope TOKEN quota exhausting. 32 glm5.1 429s + 12 dsv4p 429s. Same keys across all deployments → both backends affected. Overall burst success 93.6%. Same keys → fallback won't help.*
 
-**06-11 full analysis**: 1350 reqs, 96.7% success (44×429 burst ENDED at 17:46). Outside burst: 100% (660/660). Avg TTFB 18.4s, P95=38.5s, **P99=50.9s (improved vs Jun 10's 65s)**. Max actual=136K. dsv4p also gets 429 during burst (same keys), but outside burst 100% success. **dsv4p memory**: 52.47%. **All parameters within range — no changes warranted.**
+**06-11 full analysis**: 1367 reqs, 96.8% success (44×429 burst ENDED at 17:46). Outside burst: 100% (677/677). Avg TTFB 18.4s, P95=38.5s, **P99=49.2s (improved vs Jun 10's 65s)**. Max actual=136K. dsv4p also gets 429 during burst (same keys), but outside burst 100% success. **dsv4p memory**: 52.48%. **All parameters within range — no changes warranted.**
 
 ## Historical Trend
 
@@ -96,7 +96,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1350 | 96.7% (100% excl burst) | 18.4s | 44×429 (32 glm+12 dsv4p) burst ENDED 17:46 (101min), P99=50.9s ✅, R18.2 ✅ |
+| 06-11 | 1367 | 96.8% (100% excl burst) | 18.4s | 44×429 burst ENDED 17:46 (101min), P99=49.2s ✅, R18.2 ✅ |
 
 ## Key Issues & Notes
 
