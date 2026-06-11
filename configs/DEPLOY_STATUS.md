@@ -60,29 +60,29 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
 | RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
 
-## Metrics Summary (06-11 full data, 06-10 comparison)
+## Metrics Summary (06-11 final, 06-10 comparison)
 
 | Metric | 06-10 40001 | 06-11 40001 | Change |
 |--------|-------------|-------------|--------|
-| Total requests | 1887 | 1461 | ↓ |
-| Success rate | 99.8% | 96.9% (99.7% excl burst) | burst外持平 |
-| 429 errors | 1 | 46 (34 glm+12 dsv4p) | token quota burst |
-| Avg TTFB | 19.0s | 18.3s | ↓ |
-| P50 TTFB | 16.2s | 16.3s | — |
-| P90 TTFB | 33.0s | 30.7s | ↓ |
-| P95 TTFB | — | 38.5s | — |
+| Total requests | 1887 | 1555 | ↓ |
+| Success rate | 99.8% | 96.8% (100% excl 429) | burst外持平 |
+| 429 errors | 1 | 49 (35 glm+14 dsv4p) | token quota burst |
+| Avg TTFB | 19.0s | 17.9s | ↓ |
+| P50 TTFB | 16.2s | 16.0s | — |
+| P90 TTFB | 33.0s | 30.5s | ↓ |
+| P95 TTFB | — | 38.4s | — |
 | P99 TTFB | 65.0s | 49.8s | ↓ 23% improved ✅ |
-| P99 duration | 80.4s | 65.4s | ↓ 19% improved ✅ |
-| Avg litellm_resp | 15.1s | 15.2s | — |
+| P99 duration | 80.4s | 69.5s | ↓ 13% improved ✅ |
+| Avg litellm_resp | 15.1s | 14.8s | — |
 | P99 litellm_resp | 55.9s | 45.4s | ↓ 19% improved ✅ |
 | ms_requests_remaining min | 1316 | 1314 | — |
 | est/actual token ratio | 1.24 avg | 1.362 median | CPT=3.0 normal |
 | Actual chars/token (json) | — | 4.08 median | — |
 | Tool truncation | — | 71.1% reduction | ✅ |
 
-**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Dense burst 16:05→17:46: 93.6% success. Outside burst: 99.7% (770/772). P99 TTFB improved from Jun 10's 65s → 49.8s ✅. P99 duration improved from 80.4s → 65.4s ✅.
+**Burst analysis**: 49×429 at 16:05→22:00 (35 glm5.1 + 14 dsv4p, ALL token quota exhaustion). Dense burst 16:05→17:46 (44/761 reqs = 94.2% success). Outside burst: 99.4% success. P99 TTFB improved from Jun 10's 65s → 49.8s ✅. P99 duration improved from 80.4s → 69.5s ✅. All errors are 429 only — zero 502/timeout/5xx errors = infrastructure 100% stable.
 
-**Container memory status**: glm5.1_test41003 36.92%/2GiB ✅, dsv4p_uni42001 39.73%/2GiB ✅, glm5.1_uni41001 52.12%/2GiB ✅ (R18.3 deployed).
+**Container memory status**: glm5.1_test41003 37.80%/2GiB ✅, dsv4p_uni42001 42.90%/2GiB ✅, glm5.1_uni41001 52.12%/2GiB ✅ (R18.3 OOM fix stable).
 
 ## Historical Trend
 
@@ -94,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1461 | 96.9% (99.7% excl burst) | 18.3s | 46×429 token burst, P99=49.8s ✅, R18.2 + R18.3 deployed |
+| 06-11 | 1555 | 96.8% (100% excl 429) | 17.9s | 49×429 token burst, P99=49.8s ↓23% vs Jun10, R18.3 deployed, infra 100% stable |
 
 ## Key Issues & Notes
 
@@ -125,7 +125,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 ### ModelScope dual quota system
 - **RPM quota**: 200/id/day per variant (tracked by `ms_requests_remaining` header). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked by any header). Independent from RPM.
-- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1314+), but ALL 7 keys' token quota exhausting at 16:05 → 46 errors over ~5hr (16:05→21:12). 34 glm5.1 429s + 12 dsv4p 429s.
+- Jun 11 429 burst: RPM quota was fine (ms_requests_remaining=1314+), but ALL 7 keys' token quota exhausting at 16:05 → 49 errors over ~6hr (16:05→22:00). 35 glm5.1 429s + 14 dsv4p 429s.
 - **dsv4p also affected by same-key token quota exhaustion** — same 7 keys across both backends means dsv4p's 77-deployment pool has fewer retry opportunities than glm5.1's 7000-deployment pool. But dsv4p volume is only 3% of total, so absolute impact is small. Outside burst: dsv4p 100% success.
 - Same 7 keys used across all deployments → fallback to backup LiteLLM (41001) won't help (same keys = same token quota exhaustion).
 - Input token limit: 202,745 (confirmed by ModelScope error)
