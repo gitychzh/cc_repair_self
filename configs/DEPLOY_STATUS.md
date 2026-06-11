@@ -64,25 +64,25 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 
 | Metric | 06-10 40001 | 06-11 40001 | Change |
 |--------|-------------|-------------|--------|
-| Total requests | 1887 | 1425 | ↓ |
-| Success rate | 99.8% | 96.8% (99.7% excl burst) | burst外持平 |
+| Total requests | 1887 | 1461 | ↓ |
+| Success rate | 99.8% | 96.9% (99.7% excl burst) | burst外持平 |
 | 429 errors | 1 | 46 (34 glm+12 dsv4p) | token quota burst |
-| Avg TTFB | 19.0s | 18.4s | — |
-| P50 TTFB | 16.2s | 16.6s | — |
-| P90 TTFB | 33.0s | 30.9s | ↓ |
-| P95 TTFB | — | 38.4s | — |
-| P99 TTFB | 65.0s | 50.9s | ↓ 22% improved ✅ |
-| P99 duration | 80.4s | 66.9s | ↓ 17% improved ✅ |
-| Avg litellm_resp | 15.1s | 15.3s | — |
-| P99 litellm_resp | 55.9s | 45.7s | ↓ 18% improved |
+| Avg TTFB | 19.0s | 18.3s | ↓ |
+| P50 TTFB | 16.2s | 16.3s | — |
+| P90 TTFB | 33.0s | 30.7s | ↓ |
+| P95 TTFB | — | 38.5s | — |
+| P99 TTFB | 65.0s | 49.8s | ↓ 23% improved ✅ |
+| P99 duration | 80.4s | 65.4s | ↓ 19% improved ✅ |
+| Avg litellm_resp | 15.1s | 15.2s | — |
+| P99 litellm_resp | 55.9s | 45.4s | ↓ 19% improved ✅ |
 | ms_requests_remaining min | 1316 | 1314 | — |
 | est/actual token ratio | 1.24 avg | 1.362 median | CPT=3.0 normal |
 | Actual chars/token (json) | — | 4.08 median | — |
 | Tool truncation | — | 71.1% reduction | ✅ |
 
-**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Inside 16:05→17:46 window: 93.6% success. Outside burst: 99.7% (734/736). P99 TTFB improved from Jun 10's 65s → 50.9s ✅. P99 duration improved from 80.4s → 66.9s ✅.
+**Burst analysis**: 46×429 at 16:05→21:12 (34 glm5.1 + 12 dsv4p, ALL token quota exhaustion). Dense burst 16:05→17:46: 93.6% success. Outside burst: 99.7% (770/772). P99 TTFB improved from Jun 10's 65s → 49.8s ✅. P99 duration improved from 80.4s → 65.4s ✅.
 
-**Container memory status**: glm5.1_test41003 36.39%/2GiB ✅, dsv4p_uni42001 39.71%/2GiB ✅, glm5.1_uni41001 51.73%/2GiB ✅ (R18.3 deployed).
+**Container memory status**: glm5.1_test41003 36.92%/2GiB ✅, dsv4p_uni42001 39.73%/2GiB ✅, glm5.1_uni41001 52.12%/2GiB ✅ (R18.3 deployed).
 
 ## Historical Trend
 
@@ -94,7 +94,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-05 | 1558 | 80.7% | ~14s | 244 429 errors, Pre-R12 |
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 1425 | 96.8% (99.7% excl burst) | 18.4s | 46×429 token burst, P99=50.9s ✅, R18.2 + R18.3 |
+| 06-11 | 1461 | 96.9% (99.7% excl burst) | 18.3s | 46×429 token burst, P99=49.8s ✅, R18.2 + R18.3 deployed |
 
 ## Key Issues & Notes
 
