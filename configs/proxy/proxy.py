@@ -1042,51 +1042,142 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     conn.close()
                 return  # Success — done with this request
 
+            except socket.timeout as e:
+                # Timeout on this key attempt — record detailed info
+                elapsed_ms = int((time.time() - t_start) * 1000)
+                timeout_detail = {
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": "upstream_socket_timeout",
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "attempt_number": attempt_idx + 1,
+                    "total_keys": NUM_KEYS,
+                    "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+                    "elapsed_since_request_start_ms": elapsed_ms,
+                    "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                    "error_message": str(e)[:200],
+                }
+                _log_error_detail(timeout_detail)
+                _log("TIMEOUT", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) socket timeout "
+                               f"after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s), cycling to next key")
+                key_cycle_attempts.append({
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "error": str(e)[:200],
+                    "error_type": "SocketTimeout",
+                    "elapsed_ms": elapsed_ms,
+                    "proxy_timeout_ms": PROXY_TIMEOUT * 1000,
+                    "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                })
+                continue  # Try next key
+
             except Exception as e:
                 # Connection error on this key attempt → try next key
                 err_str = str(e)
-                _log("ERR", f"key {current_key_idx+1} ({litellm_model}) connection error: {e}")
+                # Classify error type for more precise logging
+                error_class = type(e).__name__
+                elapsed_ms = int((time.time() - t_start) * 1000)
+                _log("ERR", f"key {current_key_idx+1} ({litellm_model}) {error_class}: {e} (elapsed={elapsed_ms}ms)")
                 key_cycle_attempts.append({
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "error": err_str[:200],
-                    "error_type": "ConnectionError",
+                    "error_type": error_class,
+                    "elapsed_ms": elapsed_ms,
+                })
+                # Log connection errors to error_detail for analysis
+                _log_error_detail({
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": f"upstream_{error_class}",
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "attempt_number": attempt_idx + 1,
+                    "total_keys": NUM_KEYS,
+                    "elapsed_since_request_start_ms": elapsed_ms,
+                    "error_message": err_str[:500],
                 })
                 continue  # Try next key
 
-        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors ───
-        # This means every key group returned 429 → all ModelScope keys have exhausted token quota.
-        # Return 429 to agent with descriptive error indicating all keys are exhausted.
-        _log("ALL-KEYS-429", f"All {NUM_KEYS} key groups exhausted for {mapped_model}. "
-                             f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors/timeout ───
+        # This means every key group failed. Could be 429 (quota exhausted), timeout, or connection error.
+        # Classify the failure type for more precise error reporting.
+        all_429 = all(a.get("error_type") in (None, "429") for a in key_cycle_attempts)
+        has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
+        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError") for a in key_cycle_attempts)
+        elapsed_ms = int((time.time() - t_start) * 1000)
+
+        if all_429:
+            error_subcategory = "429_all_keys_exhausted"
+            _log("ALL-KEYS-429", f"All {NUM_KEYS} key groups 429 for {mapped_model}. "
+                                 f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+        elif has_timeout:
+            error_subcategory = "all_keys_timeout_or_429"
+            _log("ALL-KEYS-TIMEOUT", f"All {NUM_KEYS} key groups failed for {mapped_model} (includes timeouts). "
+                                     f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]} "
+                                     f"elapsed={elapsed_ms}ms")
+        else:
+            error_subcategory = "all_keys_connection_or_429"
+            _log("ALL-KEYS-CONNERR", f"All {NUM_KEYS} key groups failed for {mapped_model} (includes connection errors). "
+                                     f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+
         _log_error_detail({
             "request_id": request_id,
             "timestamp": datetime.datetime.now().isoformat(),
-            "error_subcategory": "429_all_keys_exhausted",
-            "upstream_status": 429,
+            "error_subcategory": error_subcategory,
             "model": mapped_model,
             "total_keys": NUM_KEYS,
             "key_cycle_attempts": key_cycle_attempts,
+            "key_cycle_attempt_types": [a.get("error_type", "429") for a in key_cycle_attempts],
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "all_429": all_429,
+            "has_timeout": has_timeout,
+            "has_connection_error": has_conn_err,
             "upstream_error_body_full": json.dumps(key_cycle_attempts)[:3000],
         })
-        metrics["status"] = 429
-        metrics["error_type"] = "AllKeysExhausted"
-        metrics["error_message"] = f"All {NUM_KEYS} ModelScope keys exhausted for model {mapped_model}. Token quota depleted across all accounts."
+        metrics["status"] = 502 if has_timeout or has_conn_err else 429
+        metrics["error_type"] = error_subcategory
         metrics["key_cycle_attempts"] = key_cycle_attempts
-        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+        metrics["key_cycle_attempt_types"] = [a.get("error_type", "429") for a in key_cycle_attempts]
+        metrics["duration_ms"] = elapsed_ms
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
         _log_metrics(metrics)
 
-        # Return 429 rate_limit_error to CC so it backs off and waits for quota recovery
-        self._send_json(429, {
-            "type": "error",
-            "error": {
-                "type": "rate_limit_error",
-                "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
-                           f"Please wait for quota recovery (typically 15 minutes) before retrying. "
-                           f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
-            },
-            "model": request_model,
-        }, extra_headers={"retry-after": "30"})
+        # Return appropriate error based on failure type:
+        # - All 429 → 429 rate_limit_error (CC backoff, waits for quota recovery)
+        # - Has timeout/connection error → 529 overloaded_error would cause CC auto-compact disaster.
+        #   Instead: use api_error (CC retries with backoff, no auto-compact)
+        if all_429:
+            self._send_json(429, {
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
+                               f"Please wait for quota recovery (typically 15 minutes) before retrying. "
+                               f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
+                },
+                "model": request_model,
+            }, extra_headers={"retry-after": "30"})
+        else:
+            # Mixed failures (429 + timeout + connection error) — use api_error, NOT overloaded_error
+            # api_error → CC retries with backoff (no auto-compact = no context destruction)
+            failure_types = [a.get("error_type", "429") for a in key_cycle_attempts]
+            timeout_keys = [f"k{a['key_idx']+1}" for a in key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+            connerr_keys = [f"k{a['key_idx']+1}" for a in key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+            self._send_json(502, {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": f"All {NUM_KEYS} key groups failed for model {mapped_model} after {elapsed_ms/1000:.1f}s. "
+                               f"Failure types: {failure_types}. "
+                               f"Timeout keys: {timeout_keys} (PROXY_TIMEOUT={PROXY_TIMEOUT}s). "
+                               f"Connection error keys: {connerr_keys}. "
+                               f"Please retry — upstream may recover.",
+                },
+                "model": request_model,
+            })
 
     # ─── Streaming SSE conversion ───
     def _stream_to_anth(self, resp, request_model, target_model, conn, metrics, t_start):
@@ -1329,14 +1420,54 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         pending_stop_reason = stop_reason
                         metrics["finish_reason"] = finish_reason
 
-        except (http.client.RemoteDisconnected, socket.timeout, ConnectionResetError,
+        except socket.timeout as e:
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            timeout_detail = {
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": "stream_socket_timeout",
+                "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+                "elapsed_since_request_start_ms": elapsed_ms,
+                "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                "litellm_model": metrics.get("litellm_model", "?"),
+                "key_idx": metrics.get("key_idx", "?"),
+                "error_message": str(e)[:200],
+            }
+            _log_error_detail(timeout_detail)
+            _log("TIMEOUT", f"stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+            metrics["error_type"] = "StreamSocketTimeout"
+            metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+            # Close gracefully so CC receives proper message_stop
+            _emit_graceful_end()
+            return
+        except (http.client.RemoteDisconnected, ConnectionResetError,
                 OSError, http.client.IncompleteRead) as e:
-            _log("ERR", f"stream connection error: {e}")
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            error_class = type(e).__name__
+            _log("ERR", f"stream {error_class} after {elapsed_ms}ms: {e}")
+            _log_error_detail({
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": f"stream_{error_class}",
+                "elapsed_since_request_start_ms": elapsed_ms,
+                "litellm_model": metrics.get("litellm_model", "?"),
+                "key_idx": metrics.get("key_idx", "?"),
+                "error_message": str(e)[:300],
+            })
             # Close gracefully so CC receives proper message_stop
             _emit_graceful_end()
             return
         except Exception as e:
-            _log("ERR", f"stream unexpected error: {e}")
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            error_class = type(e).__name__
+            _log("ERR", f"stream unexpected {error_class} after {elapsed_ms}ms: {e}")
+            _log_error_detail({
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": f"stream_unexpected_{error_class}",
+                "elapsed_since_request_start_ms": elapsed_ms,
+                "error_message": str(e)[:300],
+            })
             _emit_graceful_end()
             return
 
@@ -1432,8 +1563,37 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         finish_reason = fr
 
             conn.close()
+        except socket.timeout as e:
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            _log_error_detail({
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": "collect_stream_socket_timeout",
+                "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+                "elapsed_since_request_start_ms": elapsed_ms,
+                "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                "litellm_model": metrics.get("litellm_model", "?"),
+                "key_idx": metrics.get("key_idx", "?"),
+                "error_message": str(e)[:200],
+            })
+            _log("TIMEOUT", f"collect_stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+            metrics["error_type"] = "CollectStreamSocketTimeout"
+            metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+            try:
+                conn.close()
+            except Exception:
+                pass
         except Exception as e:
-            _log("ERR", f"collect_stream connection error: {e}")
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            error_class = type(e).__name__
+            _log("ERR", f"collect_stream {error_class} after {elapsed_ms}ms: {e}")
+            _log_error_detail({
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": f"collect_stream_{error_class}",
+                "elapsed_since_request_start_ms": elapsed_ms,
+                "error_message": str(e)[:300],
+            })
             try:
                 conn.close()
             except Exception:
