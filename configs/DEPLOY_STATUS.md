@@ -60,21 +60,22 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | RateLimitErrorAllowedFails (41003) | 5 | litellm config.yaml | — |
 | RateLimitErrorAllowedFails (42001) | 3 | litellm config.yaml | — |
 
-## Metrics Summary (06-10, latest full day)
+## Metrics Summary (06-11, latest full day)
 
 | Metric | 40001 (opc_uname) | 40002 (opc2_uname) |
 |--------|-------------------|---------------------|
-| Total requests | 1887 | 48 |
-| Success rate | 99.8% | 100% |
-| Errors | 2×502 timeout, 1×429 quota | 0 |
-| Avg latency | 20.7s | 6.2s |
-| P50 latency | 17.0s | 5.0s |
-| P90 latency | 35.8s | — |
-| P99 latency | 80.4s | — |
-| Unique deployments used | 1660/7000 | — |
-| Quota remaining | 150-199 (all healthy) | — |
+| Total requests | 596 | 32 |
+| Success rate | 100% | 100% |
+| Errors | 0 | 0 |
+| Avg latency | 20.8s | 9.2s |
+| P50 latency | 19.0s | 8.6s |
+| P90 latency | 33.3s | — |
+| P99 latency | 65.0s | — |
+| Actual chars/token | 2.87 avg (CPT=3.0) | — |
+| Max est_tokens | 130K (83.9% of 155K) | — |
+| MS quota remaining | 196-199 avg=199 | — |
 
-**06-11 so far**: 181 requests, 100% success, avg latency 20.2s, max est_tokens 109K (no >155K or >170K), quota 197-199 avg=199.
+**06-11 analysis**: 596 reqs, 100% success (ZERO errors), avg latency 20.8s, max est_tokens 130K (never hit autoCompactWindow 155K), quota 196-199. CC overestimation ratio est/actual=0.95 (slight underestimate on Jun 11 vs 1.24 overestimate on Jun 10 — content composition variance). 'length' finish_reason: 12 requests, all startup connectivity checks (input_tokens≤7, harmless). Proxy overhead median=507ms, avg=4.7s (correlates with output token count — expected streaming behavior).
 
 ## Historical Trend
 
@@ -86,7 +87,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 | 06-09 | 220 | 96.8% | 13.9s | Post-R12, startup errors |
 | 06-10 | 707 | 99.6% | 19.3s | Post-R7 |
 | 06-10 | 1887 | 99.8% | 20.7s | Post-R15/R16, best ever |
-| 06-11 | 181 | 100% | 20.2s | Zero errors, CPT=3.0 confirmed |
+| 06-11 | 596 | 100% | 20.8s | Zero errors, CPT=2.87 actual, est≤130K |
 
 ## Key Issues & Notes
 
@@ -94,7 +95,7 @@ Docker Hub unreachable from China → mihomo on :7890 as Docker systemd proxy. `
 - **Auto-compact uses `stripNonEssential=true`**: truncates tool output, removes tool defs → low-quality summary
 - **Manual `/compact` uses `stripNonEssential=false`**: full context + all tools → much better summary
 - **When CC warns "Autocompact will trigger soon"**, proactively run `/compact <focus>` for better quality
-- **CC overestimation 1.7x**: at autoCompactWindow=155K trigger, median real tokens ≈ 91K (45% capacity)
+- **CC tokenizer estimation variance**: Jun 10 est/actual=1.24 (overestimate), Jun 11 est/actual=0.95 (slight underestimate) — content composition variance makes prediction unreliable. autoCompactWindow=155K balances both scenarios
 - Write critical info to CLAUDE.md/memory — these survive compaction
 
 ### CHARS_PER_TOKEN_ESTIMATE — resolved ✅
