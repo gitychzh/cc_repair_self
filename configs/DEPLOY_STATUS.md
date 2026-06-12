@@ -8,12 +8,12 @@ Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + variant×key
     → 42001 dsv4p_uni42001 (77 deploys, RETAINED but NOT routed) [FALLBACK]
 ```
 
-Proxy does **format conversion + variant×key 2D round-robin (429 cycling) + metrics logging**. No retry, no truncation, no auto-compact. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
+Proxy does **format conversion + variant×key 2D round-robin + error cycling (429/500/502) + metrics logging**. No retry, no truncation, no auto-compact. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
 
 **Variant×Key 2D Round-Robin (R21)**:
 - request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
 - → model name: `{base}v{V}k{K}` (e.g. glm5.1v1k1, dsv4pv3k5)
-- 429 cycling: same variant, next key (k→k+1). All 7 keys 429 → return 429 to agent
+- Error cycling (429/500/502): same variant, next key (k→k+1). All 7 keys failed → classify and return to agent (all-429→rate_limit; has-500/502→api_error; has-timeout→502)
 - Each variant has independent 200/id/day quota on ModelScope
 
 **R20 Variant Reduction (still valid for 41003/42001)**: 41003 PRIMARY 1000→10 variants per key group. 10 variants × 200/id/key/day = 2000/key/day = per-key RPM cap.
@@ -77,10 +77,13 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
 | MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
 | timeout (ms_uni41001) | 300 | litellm config.yaml | Seconds |
-| num_retries (ms_uni41001) | 2 | litellm config.yaml | Proxy handles key cycling |
+| num_retries (ms_uni41001) | 0 | litellm config.yaml | R22: proxy handles all error cycling; LiteLLM pure pass-through |
 | cooldown_time (ms_uni41001) | 10 | litellm config.yaml | — |
 | routing_strategy (ms_uni41001) | simple-shuffle | litellm config.yaml | Proxy specifies exact model, LiteLLM just forwards |
-| RateLimitErrorAllowedFails | 1 | litellm config.yaml | 429→proxy cycles to next key |
+| RateLimitErrorAllowedFails | 0 | litellm config.yaml | R22: 429 cycling by proxy, LiteLLM no retry (avoid wasting quota) |
+| TimeoutErrorAllowedFails | 0 | litellm config.yaml | R22: timeout cycling by proxy |
+| InternalServerErrorAllowedFails | 0 | litellm config.yaml | R22: 500/choice:null cycling by proxy |
+| API_TIMEOUT_MS | 600000 | settings.json | R22: CC→proxy HTTP total timeout (5min→10min) |
 
 ## Key Issues & Notes
 
@@ -106,6 +109,27 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - LiteLLM /health → per-deployment checks → fd exhaustion. Use /health/liveliness.
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
 
+## R22 Changes (2026-06-12)
+
+### 1. Proxy error cycling expanded: 429 → 429+500+502
+- **ModelScope deducts quota for every request**, even errors (429, choice:null/500, 502)
+- **Old behavior**: Only 429 cycled to next key. 500/502 errors passed through to CC immediately → wasted quota opportunity
+- **New behavior**: 429, 500, 502 all cycle to next key (same variant, k→k+1)
+- **All-keys-exhausted classification**: all-429→rate_limit_error; has-500→api_error; has-502→api_error; has-timeout→502 api_error
+- **Not cycling**: 400 input overflow, 400 inappropriate content, 400 thinking_budget, 401/403 auth errors
+
+### 2. LiteLLM num_retries=0, all allowed_fails=0
+- **R21 architecture**: each model_name has exactly 1 deployment → LiteLLM has NO fallback to try
+- **Old values**: num_retries=2, RateLimitErrorAllowedFails=1, InternalServerErrorAllowedFails=3 → wasted quota by retrying same deployment
+- **New values**: all 0 → LiteLLM is pure pass-through, proxy handles all cycling
+
+### 3. CC API_TIMEOUT_MS: 300000→600000 (5min→10min)
+- **Data support**: Worst case 7×2s(429 cycling) + 210s(success key) = 224s. With 500 cycling (7×5s) could reach ~259s
+- **300s was borderline**: matches SDK default 10min, provides safe margin
+- **CC SDK default**: 600000ms (10 min) — we now match it
+
+**R22 DEPLOYED on opc_uname 2026-06-12 15:20 CST**: Proxy rebuilt + LiteLLM restarted + CC settings updated. Curl test glm5.1+dsv4p return 200.
+
 ## R21 Changes (2026-06-12)
 
 ### 1. Unified container ms_uni41001 (PRIMARY change)
@@ -118,7 +142,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 ### 2. Proxy variant×key 2D round-robin (R21)
 - **2D counter**: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
-- **429 cycling**: same variant, cycle to next key (k→k+1). All 7 keys 429 → return 429 to agent
+- **Error cycling (429/500/502)**: same variant, cycle to next key (k→k+1). All 7 keys failed → classify by error type. ModelScope deducts quota for every request including errors, so cycling avoids wasting quota on a dead deployment.
 - **No variant cycling on 429**: All keys share same token quota → changing variant doesn't help
 - **New env vars**: NUM_VARIANTS_GLM51=10, NUM_VARIANTS_DSV4P=10
 - **VARIANT_IDS**: Hardcoded list of variant model IDs for each backend
@@ -160,6 +184,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R20 | 41003 variant reduction 1000→10; resource savings | Deploying, verified ✅ |
 | R19.1 | socket.timeout单独捕获 + timeout_exceeded_by_ms + 全key失败分类 | No timeout events yet |
 | R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants; single upstream | **DEPLOYED on opc_uname 2026-06-12; gateway package updated to R21; NOT YET on opc2_uname** |
+| R22 | Proxy 429+500+502 error cycling; LiteLLM num_retries=0 all allowed_fails=0; CC API_TIMEOUT_MS 600000 | **DEPLOYED on opc_uname 2026-06-12 15:20 CST** |
 
 ## 10 Variant Model IDs (ms_uni41001, R21)
 
