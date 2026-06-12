@@ -1,17 +1,16 @@
-# Round 10 — 2026-06-13 03:52
+# Round 11 — 2026-06-13 04:02
 
 ## 本轮数据
-- R10(03:42+): 7req/5ok | 429=15次cycling+2variant fallback+1 all_keys_exhausted(v5全7key)
-- v4 5keys 429→k3成功 | v5全7key+2fallback 429→all_keys_exhausted
-- 延迟P50=10630ms | TTFB P50=10625ms | ms_rem avg=1887
-- 429小burst正在恢复(03:51+已有cycling→成功) | 502/500/timeout/ConnectionRefused=0
+- R11(03:52+): 8req/6ok | 429=8次cycling→1次cycling成功 | 502/500/timeout=0
+- 延迟P50=14763ms | TTFB P50=13629ms | ms_rem avg=1883
+- R10 burst余波持续，429频率下降(15→8) | 正在恢复
 
 ## 本轮改动
-- 无改动。429是token quota短暂burst，cycling/variant fallback机制正常工作，非配置问题
+- 无改动。429余波持续恢复中，非配置问题
 
 ## 下轮待办
-- 确认429 burst完全恢复
-- R26 LiteLLM fallback待自然ConnectionRefused验证
+- 确认429完全恢复(频率应回到≤3/10min)
+- R26待自然ConnectionRefused验证
 
 ## 参数现状
 PROXY_TIMEOUT=300 | CPT=3.0 | SAFETY=170000 | COMPACT=155000
