@@ -39,15 +39,11 @@ def _ensure_url_path(url: str, path: str) -> str:
     return stripped + path
 
 # ─── Per-model upstream routing ──────────────────────────────────────────
-# R21: Both models route to ms_uni41001 (unified container with 140 dep)
+# R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed entirely)
 MODEL_UPSTREAMS = {
     "glm5.1": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
         "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
-    },
-    "dsv4p": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
@@ -67,7 +63,7 @@ AGENT_SUFFIXES = {
 DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
 
 # Base model names (backend routing targets)
-BASE_MODELS = ["glm5.1", "dsv4p"]
+BASE_MODELS = ["glm5.1"]
 
 def detect_agent_type(model_id):
     """Detect agent type from model ID suffix.
@@ -77,7 +73,7 @@ def detect_agent_type(model_id):
 
     Returns:
         (base_model, agent_suffix, response_format)
-        base_model: backend model name ("glm5.1" or "dsv4p")
+        base_model: backend model name ("glm5.1")
         agent_suffix: "_cc", "_ol", "_oc", "_hm" or DEFAULT_AGENT_SUFFIX
         response_format: "anthropic" or "openai"
 
@@ -123,66 +119,66 @@ def format_model_id(base_model, agent_suffix):
 # R23: Added suffix-based entries for multi-agent routing.
 # Suffix determines response format; MODEL_MAP determines backend routing.
 MODEL_MAP = {
-    # R23: Suffix-based model IDs — suffix determines format, base determines backend
+    # R24: Only glm5.1 backend (dsv4p removed). All aliases → glm5.1.
+    # Suffix-based model IDs — suffix determines format, base determines backend
     # Claude Code (_cc) — Anthropic format
-    "glm5.1_cc": "glm5.1", "dsv4p_cc": "dsv4p",
+    "glm5.1_cc": "glm5.1",
     # OpenClaw (_ol) — OpenAI format
-    "glm5.1_ol": "glm5.1", "dsv4p_ol": "dsv4p",
+    "glm5.1_ol": "glm5.1",
     # OpenCode (_oc) — OpenAI format
-    "glm5.1_oc": "glm5.1", "dsv4p_oc": "dsv4p",
+    "glm5.1_oc": "glm5.1",
     # Hermes (_hm) — OpenAI format
-    "glm5.1_hm": "glm5.1", "dsv4p_hm": "dsv4p",
+    "glm5.1_hm": "glm5.1",
 
     # Backward compat: no suffix = CC (Anthropic format)
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
-    "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
 
     # Claude Code names → glm5.1 (implicitly _cc / Anthropic format)
-    # ALL Claude opus/sonnet names → glm5.1 for maximum quota capacity
+    # ALL Claude model names → glm5.1 (dsv4p removed in R24)
     "claude-opus-4-8": "glm5.1",
     "claude-opus-4-7": "glm5.1",
     "claude-opus-4": "glm5.1",
     "claude-sonnet-4-6": "glm5.1",
     "claude-sonnet-4": "glm5.1",
-    "claude-haiku-4-5": "dsv4p",  # haiku tier → dsv4p (lighter backend, fast responses)
+    "claude-haiku-4-5": "glm5.1",
     "claude-sonnet-4-20250514": "glm5.1",
     "claude-sonnet-4-6-20250514": "glm5.1",
     "claude-opus-4-20250514": "glm5.1",
     "claude-opus-4-8-20250514": "glm5.1",
-    "claude-haiku-4-5-20251001": "dsv4p",  # haiku tier → dsv4p
+    "claude-haiku-4-5-20251001": "glm5.1",
     "claude-3-5-sonnet-20241022": "glm5.1",
-    "claude-3-5-haiku-20241022": "dsv4p",  # haiku tier → dsv4p
+    "claude-3-5-haiku-20241022": "glm5.1",
     "claude-3-opus-20240229": "glm5.1",
 
     # OpenAI-style alias names for other agents (no suffix = default _cc format)
+    # All → glm5.1 (dsv4p removed in R24)
     "gpt-4o": "glm5.1",
-    "gpt-4o-mini": "dsv4p",
+    "gpt-4o-mini": "glm5.1",
     "o3": "glm5.1",
-    "o3-mini": "dsv4p",
-    "o4-mini": "dsv4p",
+    "o3-mini": "glm5.1",
+    "o4-mini": "glm5.1",
     "gpt-4.1": "glm5.1",
-    "gpt-4.1-mini": "dsv4p",
-    "gpt-4.1-nano": "dsv4p",
+    "gpt-4.1-mini": "glm5.1",
+    "gpt-4.1-nano": "glm5.1",
     "codex-mini-latest": "glm5.1",
 }
 
 # Thinking support per backend model
 # glm5.1 supports reasoning_effort + thinking_budget (ModelScope GLM-5.1 feature)
-# dsv4p does NOT support reasoning_effort → proxy must NOT send thinking params to dsv4p
-THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}
+# R24: dsv4p removed, only glm5.1 backend
+THINKING_SUPPORT = {"glm5.1": True}
 DEFAULT_MODEL = "glm5.1"
 
 # ─── Input token safety limits ───────────────────────────────────────────
-# ModelScope GLM-5.1 and DSv4P actual API input token limit is 202745
+# ModelScope GLM-5.1 actual API input token limit is 202745
 # (confirmed by ModelScope error: "Range of input length should be [1, 202745]").
 # MODEL_INPUT_TOKEN_SAFETY is used for reporting context_window to CC via
 # /v1/models endpoint. This tells CC the effective capacity, so CC's built-in
 # auto-compact triggers at the right time.
 # Proxy no longer truncates/compacts messages — that's CC's job exclusively.
-MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745, "dsv4p": 202745}
+MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745}
 MODEL_INPUT_TOKEN_SAFETY = {
     "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "128000")),
-    "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "128000")),
 }
 
 # ─── Thinking config ─────────────────────────────────────────────────────
@@ -191,17 +187,16 @@ THINKING_SIGNATURE_DEFAULT = "ErUB3WY0k2GCM2h+4O0S3Y3W3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y
 
 # ─── Variant×Key 2D round-robin (R21) ─────────────────────────────────────
 # 2D round-robin: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
-# → model name: "{base}v{V}k{K}" (e.g. glm5.1v1k1, dsv4pv3k5)
-# On 429: same variant, cycle to next key (k→k+1). All 7 keys 429 → return 429 to agent.
+# → model name: "glm5.1v{V}k{K}" (e.g. glm5.1v1k1)
+# On 429: same variant, cycle to next key (k→k+1). All 7 keys 429 → variant fallback (R23)
 # R19 was key-only round-robin (glm5.1k1~k7). R21 adds variant dimension for precise control.
+# R24: Only glm5.1 backend. NUM_VARIANTS simplified to single model.
 NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
 NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
-NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
-NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
+NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51}
 
-# Variant model IDs for each backend — proxy uses these to construct precise model names.
+# Variant model IDs — proxy uses these to construct precise model names.
 # Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
-# R21: dsv4p reduced from 11→10 variants per user decision (v11 'DeEpSeek-V4-Pro' removed).
 GLM51_VARIANT_IDS = [
     "ZHIPUAI/GLM-5.1",      # v1
     "ZHIPUAI/GLm-5.1",      # v2
@@ -214,21 +209,9 @@ GLM51_VARIANT_IDS = [
     "ZHIPUAi/GLM-5.1",      # v9
     "ZHIPUAi/GLm-5.1",      # v10
 ]
-DSV4P_VARIANT_IDS = [
-    "deepseek-ai/deepseek-v4-pro",      # v1
-    "deepseek-ai/Deepseek-V4-Pro",      # v2
-    "deepseek-ai/DeepSeek-v4-pro",      # v3
-    "deepseek-ai/DeepSeek-v4-Pro",      # v4
-    "deepseek-ai/DeepSeek-V4-PrO",      # v5
-    "deepseek-ai/DeepSeek-V4-PRo",      # v6
-    "deepseek-ai/DeepSeeK-V4-Pro",      # v7
-    "deepseek-ai/DeepSeEk-V4-Pro",      # v8
-    "deepseek-ai/DeepSEek-V4-Pro",      # v9
-    "deepseek-ai/DeePSeek-V4-Pro",      # v10
-]
-VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
+VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS}
 
-_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0, "dsv4p": 0}
+_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0}
 _vk_rr_lock = threading.Lock()
 
 def _next_variant_key_pair(model: str) -> tuple:
@@ -245,9 +228,9 @@ def _next_variant_key_pair(model: str) -> tuple:
         return (variant_idx, key_idx)
 
 def _is_routing_name(name: str) -> bool:
-    """Check if a model name is an internal variant×key routing name (e.g. 'glm5.1v1k1', 'dsv4pv3k5').
+    """Check if a model name is an internal variant×key routing name (e.g. 'glm5.1v1k1').
     R21: Routing names use v+k format. These are proxy→LiteLLM routing, NOT meant for CC/agents.
-    Also checks old R19 format (glm5.1k1, dsv4pk3) for backward compatibility."""
+    Also checks old R19 format (glm5.1k1) for backward compatibility."""
     for base in MODEL_UPSTREAMS:
         num_variants = NUM_VARIANTS.get(base, 10)
         # R21 format: base + v{N} + k{K}

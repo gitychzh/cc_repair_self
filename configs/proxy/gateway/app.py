@@ -3,7 +3,7 @@
 
 Architecture:
   CC(40001/40002) → this proxy (format conversion + metrics + variant×key 2D round-robin)
-      → 41001 ms_uni41001 LiteLLM (glm5.1 + dsv4p, unified container with 140 dep)
+      → 41001 ms_uni41001 LiteLLM (glm5.1 only, 70 dep)
 
 Env vars: see config.py for full list.
 """
@@ -23,7 +23,6 @@ def main():
     server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
     _log("START", f"GLM-5.1 gateway: {MODEL_UPSTREAMS['glm5.1']['chat_url']}")
-    _log("START", f"DSv4P gateway: {MODEL_UPSTREAMS['dsv4p']['chat_url']}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

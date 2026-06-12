@@ -538,8 +538,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _proxy_models(self):
         """Return OpenAI-format model list for OpenAI agents.
 
-        Shows suffix-based model IDs: glm5.1_ol, glm5.1_oc, glm5.1_hm, dsv4p_ol, etc.
-        Also includes direct names (glm5.1, dsv4p) for backward compat.
+        Shows suffix-based model IDs: glm5.1_ol, glm5.1_oc, glm5.1_hm.
+        Also includes direct names (glm5.1) for backward compat.
         """
         all_models = []
         seen_ids = set()

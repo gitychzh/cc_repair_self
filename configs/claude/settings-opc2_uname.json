@@ -46,7 +46,7 @@
     ],
     "deny": []
   },
-  "model": "glm5.1",
+  "model": "glm5.1_cc",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
   "defaultMode": "bypassPermissions",

@@ -15,7 +15,7 @@
                     ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
                     ├── _hm (Hermes)      → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
                     │
-                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 dep) [UNIFIED]
+                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) [UNIFIED]
                     → ModelScope API
 ```
 
@@ -45,8 +45,8 @@
 |------|------|
 | **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改**（R21用户主动删除dsv4p v11） |
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
-| frontend model_name (agent-facing) | `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `dsv4p_cc/ol/oc/hm` — R23.1 suffix system; backward compat: `glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc |
-| LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7`, `dsv4pv1k1`~`dsv4pv10k7` — proxy精确指定variant+key |
+| frontend model_name (agent-facing) | `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm` — R23.1 suffix system; backward compat: `glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc |
+| LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7` — proxy精确指定variant+key |
 | Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001/40002` |
 | port assignments | 41001=unified(ms_uni41001) |
 
@@ -55,10 +55,7 @@
 **GLM-5.1 (10 variants):**
 `ZHIPUAI/GLM-5.1`, `ZHIPUAI/GLm-5.1`, `ZHIPUAI/GlM-5.1`, `ZHIPUAI/Glm-5.1`, `ZHIPUAI/gLM-5.1`, `ZHIPUAI/gLm-5.1`, `ZHIPUAI/glM-5.1`, `ZHIPUAI/glm-5.1`, `ZHIPUAi/GLM-5.1`, `ZHIPUAi/GLm-5.1`
 
-**DSv4P (10 variants, R21 reduced from 11):**
-`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`
-
-**已删除**: `deepseek-ai/DeEpSeek-V4-Pro` (dsv4p v11) — R21用户主动决定，每key减少200/id/day额度
+**DSv4P — R24已完全移除（10 variants + 已删除的v11，全部从41001 LiteLLM和proxy config中清除）**
 
 ## 关键原则（长期知识）
 
@@ -71,7 +68,7 @@
 - **/health endpoint会触发fd耗尽** — LiteLLM的/health触发per-deployment checks→OSError Too many open files。用/health/liveliness监控LiteLLM。Proxy的/health是简单状态检查（只返回{"status":"ok"}），SAFE用于Docker healthcheck。
 - **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
 - **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。ModelScope对每种错误（429/500/502）都扣quota，所以必须在proxy层做error cycling而非让LiteLLM重试同一deployment。
-- **多CC进程加速token quota耗尽** — Jun 12 429灾难：5个CC进程同时消耗quota→glm5.1+dsv4p 7key全429→proxy 7×429 cycling→返回rate_limit_error(retry-after=30s)→CC每30秒重试→每次重试浪费7个quota→23次ALL-KEYS-429×7=161个quota浪费→恶性循环。R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
+- **多CC进程加速token quota耗尽** — Jun 12 429灾难：5个CC进程同时消耗quota→7key全429→proxy 7×429 cycling→返回rate_limit_error(retry-after=30s)→CC每30秒重试→每次重试浪费7个quota→23次ALL-KEYS-429×7=161个quota浪费→恶性循环。R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
 - **proxy超时日志详细记录** — socket.timeout现在单独捕获（不再笼统归为ConnectionError），记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms（超了PROXY_TIMEOUT多少）。key cycling时的timeout也单独记录到error_detail。stream和collect_stream的超时同样详细记录。全key失败时区分429（rate_limit_error）vs timeout/connection（502 api_error），避免529→CC auto-compact灾难。
 
 ## 可调整参数（有数据支撑才能改）
@@ -82,7 +79,6 @@
 |------|--------|------|------|
 | CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | proxy用CPT估算tokens。Jun 11 metrics: actual chars/token(json)=4.08 median, proxy overestimates 1.36x (chars_json/3.0 vs actual)。只影响INPUT-WARN阈值，不影响CC auto-compact。3.0的overestimation提供安全提前警告 |
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的context_window |
-| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | 同上 |
 | MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
 | MAX_SCHEMA_DESC | 600 | 300-1200 | Schema描述截断上限chars |
 | PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒。3天数据：P99=85s，max=210s，从未触发timeout |
@@ -96,7 +92,7 @@
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
 | API_TIMEOUT_MS | 600000 | 300000-1200000 | CC→proxy HTTP总超时。R21改为600000(10min)，CC SDK默认值。数据：proxy cycling(7×2s 429) + 成功key(210s) = 224s，在600s内安全 |
 
-### LiteLLM router_settings (41001 ms_uni41001, 14 groups × 10 dep each = 140 dep)
+### LiteLLM router_settings (41001 ms_uni41001, 7 groups × 10 dep each = 70 dep)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
@@ -114,7 +110,6 @@
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
 | NUM_VARIANTS_GLM51 | 10 | 5-10 | glm5.1每个key group的variant数 |
-| NUM_VARIANTS_DSV4P | 10 | 5-11 | dsv4p每个key group的variant数（R21从11减为10） |
 
 ## 项目文件结构
 
@@ -122,7 +117,7 @@
 configs/
   docker-compose.yml       # Docker编排（4个容器：cc_postgres, ms_uni41001, auth_to_api_40001/40002）
   .env.template             # 环境变量模板
-  litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 + 10v×7k dsv4p = 140 dep）
+  litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 = 70 dep）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
     Dockerfile                    # 镜像构建
@@ -151,7 +146,7 @@ scripts/
 | 文件 | 路径 | 修改后需 |
 |------|------|----------|
 | LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001` |
-| 转换代理 | `/opt/cc-infra/proxy/gateway/` (模块包: config.py, handlers.py, upstream.py, error_mapping.py, format_converter.py) | rebuild + recreate proxy容器 |
+| 转换代理 | `/opt/cc-infra/proxy/gateway/` (模块包: config.py, handlers.py, upstream.py, error_mapping.py, converters.py, stream.py, app.py, logger.py) | rebuild + recreate proxy容器 |
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
 | Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
@@ -180,7 +175,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 3. **计划** — 必须说明WHY，附日志证据
 4. **备份** — `bash scripts/backup_config.sh`
 5. **执行** — 修改配置，重启受影响容器
-6. **测试** — curl验证glm5.1和dsv4p返回200
+6. **测试** — curl验证glm5.1返回200
 7. **验证** — 读新metrics，对比前后
 8. **记录** — 更新DEPLOY_STATUS.md
 9. **Push** — 推送到GitHub

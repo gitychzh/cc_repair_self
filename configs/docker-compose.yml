@@ -1,10 +1,10 @@
-# R23: Unified architecture — ms_uni41001 (14 groups × 10 variants = 140 dep, glm5.1+dsv4p) as sole upstream
-# proxy.py (40001/40002) — format conversion + metrics + variant×key 2D round-robin
+# R24: Unified architecture — ms_uni41001 (7 groups × 10 variants = 70 dep, glm5.1 only)
+# proxy gateway (40001/40002) — format conversion + metrics + variant×key 2D round-robin + variant fallback
 # LiteLLM does NOT do routing — proxy precisely specifies variant+key combo
 #
 # Port assignments: 41001=unified(ms_uni41001)
-# R23: Removed 41003 (glm5.1_test41003) and 42001 (dsv4p_uni42001) — no longer needed, ms_uni41001 handles all
-# ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep)
+# R24: Removed 41003/42001 containers entirely. Removed dsv4p from 41001. Only glm5.1 backend.
+# ulimit nofile: 41001 uses 2048 soft / 65536 hard (70 dep)
 
 services:
   cc_postgres:
@@ -48,9 +48,9 @@ services:
         max-file: '5'
         tag: container/{{.Name}}
 
-  # ─── R21: Unified ModelScope container (140 deployments, glm5.1+dsv4p) ───
-  # Formerly glm5.1_uni41001 (7000 dep, glm5.1 only). Now hosts both models.
-  # 14 key groups × 10 variants = 140 dep. Proxy specifies exact variant+key combo.
+  # ─── R24: Unified ModelScope container (70 deployments, glm5.1 only) ───
+  # Formerly hosted both glm5.1 + dsv4p (140 dep). R24 removes dsv4p entirely.
+  # 7 key groups × 10 variants = 70 dep. Proxy specifies exact variant+key combo.
   ms_uni41001:
     image: litellm/litellm:v1.87.0
     container_name: ms_uni41001
@@ -112,11 +112,9 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # R21: Both models route to ms_uni41001 (unified container)
+      # R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed)
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
@@ -124,10 +122,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -164,11 +160,9 @@ services:
     container_name: auth_to_api_40002
     restart: unless-stopped
     environment:
-      # R21: Both models route to ms_uni41001 (unified container)
+      # R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed)
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
@@ -176,10 +170,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "170000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:

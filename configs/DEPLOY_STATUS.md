@@ -1,38 +1,36 @@
-# Deploy Status — opc_uname + opc2_uname (R23.1, 2026-06-12)
+# Deploy Status — opc_uname + opc2_uname (R24, 2026-06-12)
 
-## Architecture (R23.1 multi-agent)
+## Architecture (R24 — glm5.1 only)
 ```
 Agent(CC/_cc)      → 40001/40002(proxy, Anthropic format conversion + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
 Agent(OpenClaw/_ol) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
 Agent(OpenCode/_oc) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
 Agent(Hermes/_hm)  → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
 ```
 
 Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant fallback (R23) + error cycling (429/500/502) + metrics logging** for ALL agent types. OpenAI agents get passthrough (no format conversion) but same error cycling + variant fallback protection. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
 
 **Variant×Key 2D Round-Robin + Variant Fallback (R21→R23)**:
 - request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
-- → model name: `{base}v{V}k{K}` (e.g. glm5.1v1k1, dsv4pv3k5)
+- → model name: `glm5.1v{V}k{K}` (e.g. glm5.1v1k1)
 - Error cycling (429/500/502): same variant, next key (k→k+1). All 7 keys failed → **R23: try 2 fallback variants (1 key each)** before returning to agent
 - Variant fallback (R23): All 7 keys 429 in start variant → try (start_variant+1) and (start_variant+2), each with 1 key attempt. Max extra quota waste = 2 keys per request
 - After variant fallback also fails → classify and return to agent (all-429→rate_limit **retry-after=180s**; has-500/502→api_error; has-timeout→502)
 - Each variant has independent 200/id/day quota on ModelScope
 
-**Tier-based routing**: opus/sonnet tier → glm5.1 (70 dep, thinking support), haiku/mini tier → dsv4p (70 dep, no thinking).
+**R24: All agents route to glm5.1 only**. opus/sonnet/haiku/mini aliases all → glm5.1 (dsv4p removed entirely).
 
-## Containers (R23)
+## Containers (R24)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
-| ms_uni41001 | :41001 | Unified LiteLLM | 14 groups × 10 variants = 140 dep, ulimits nofile=2048, memory 1GiB |
-| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R23 variant×key 2D round-robin + variant fallback → ms_uni41001 |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R23 variant×key 2D round-robin + variant fallback → ms_uni41001 (NOT YET DEPLOYED on opc2_uname) |
-| cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine |
-
-**R23: Removed containers 41003 (glm5.1_test41003) and 42001 (dsv4p_uni42001)** — these were retained but NOT routed since R21. ms_uni41001 is the sole upstream for both models. No fallback containers needed.
+| ms_uni41001 | :41001 | Unified LiteLLM | 7 groups × 10 variants = 70 dep (glm5.1 only), ulimits nofile=2048, memory 1GiB |
+| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R24 variant×key 2D round-robin + variant fallback → ms_uni41001 |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R24 variant×key 2D round-robin + variant fallback → ms_uni41001 |
+| cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (only litellm_glm51 DB) |
 
 ## Deploy Method (R21+)
 ```bash
@@ -58,13 +56,13 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 4. Start ms_uni41001: `cd /opt/cc-infra && docker compose up -d ms_uni41001`
 5. Wait for ms_uni41001 to become healthy: `docker ps` check
 6. Rebuild proxy: `cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002`
-7. Verify: curl test glm5.1 and dsv4p, check /v1/models
+7. Verify: curl test glm5.1, check /v1/models
 
 **⚠️ opc2_uname NOT YET DEPLOYED** — will only deploy after opc_uname proven stable for ≥2 hours.
 
-**opc_uname R21 DEPLOYED 2026-06-12 13:40 CST**: All containers healthy. Curl test glm5.1+dsv4p return 200. /v1/models shows canonical names only. Metrics confirm variant_idx+key_idx in v×k 2D round-robin logs.
+**opc_uname R24 DEPLOYED 2026-06-12**: All containers healthy (4 containers only). Curl test glm5.1_cc returns 200. dsv4p removed entirely.
 
-## Current Parameters (R23)
+## Current Parameters (R24)
 
 | Parameter | Value | File | Notes |
 |-----------|-------|------|-------|
@@ -75,7 +73,6 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | CHARS_PER_TOKEN_ESTIMATE | 3.0 | docker-compose.yml | Both containers running 3.0 ✅ |
 | NUM_KEYS | 7 | docker-compose.yml | Keys per model for round-robin |
 | NUM_VARIANTS_GLM51 | 10 | docker-compose.yml | R21: variants per key group for glm5.1 |
-| NUM_VARIANTS_DSV4P | 10 | docker-compose.yml | R21: variants per key group for dsv4p (was 11) |
 | PROXY_TIMEOUT | 300 | docker-compose.yml | Seconds |
 | MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
 | MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
@@ -88,23 +85,19 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | InternalServerErrorAllowedFails | 0 | litellm config.yaml | R22: 500/choice:null cycling by proxy |
 | API_TIMEOUT_MS | 600000 | settings.json | R22: CC→proxy HTTP total timeout (5min→10min) |
 
-## opc2_uname Link Verification (R22, 2026-06-12)
+## opc2_uname Link Verification (R24, 2026-06-12)
 
 **opc2_uname 所有配置与仓库完全一致** ✅：
-- proxy.py: md5=40426e02d9f6fd4913395e5e501c04a4 (local=repo)
-- docker-compose.yml: diff=0 (local=repo)
-- litellm-glm51/config.yaml: diff=0 (local=repo)
+- gateway module: all 9 files synced (app.py, config.py, converters.py, error_mapping.py, handlers.py, __init__.py, logger.py, stream.py, upstream.py)
+- docker-compose.yml: R24 version (4 containers only, no dsv4p env vars)
+- litellm-glm51/config.yaml: R24 version (70 dep glm5.1 only)
 - 4个容器全部 healthy (ms_uni41001, cc_postgres, auth_to_api_40001, auth_to_api_40002)
-- Proxy env vars confirmed: NUM_KEYS=7, NUM_VARIANTS_GLM51=10, NUM_VARIANTS_DSV4P=10, PROXY_TIMEOUT=300
-- LiteLLM env vars confirmed: 7 MS_KEYs, MS_BASEURL, DATABASE_URL all present
-- curl test glm5.1 via 40001 returns 200 ✅
+- Proxy env vars: NUM_KEYS=7, NUM_VARIANTS_GLM51=10, PROXY_TIMEOUT=300
+- CC settings.json: model=glm5.1_cc, API_TIMEOUT_MS=600000 ✅
+- curl test glm5.1_cc via 40001 returns 200 ✅
+- dsv4p model returns proper error (no longer supported) ✅
 
-**⚠️ opc2_uname 本机settings.json API_TIMEOUT_MISMATCH**：
-- 本机 `~/.claude/settings.json`: API_TIMEOUT_MS=300000 (旧值，5min)
-- 仓库 `configs/claude/settings-opc2_uname.json`: API_TIMEOUT_MS=600000 (R22新值，10min)
-- **需要同步**: opc2_uname下次deploy时必须更新此值，否则极端7-key cycling场景可能超时
-
-**opc_uname 可达 via tailscale**: SSH `opc2_uname@100.109.57.26:222` ✅。LAN 192.168.1.104/105 也可用但不太稳定。
+**opc_uname 可达 via tailscale**: SSH `opc2sname-tailscale:222` ✅
 
 ## Log System Analysis (R22, 2026-06-12)
 
@@ -148,9 +141,9 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - **ms_uni41001 MUST be running first**: Proxy sends `glm5.1v1k1` to LiteLLM. If LiteLLM doesn't have these names → "Invalid model name" → CC crash
 - **Deploy order**: 1) ms_uni41001 config + start → 2) Verify LiteLLM has v+k model names → 3) Proxy rebuild → 4) Verify proxy /v1/models only shows canonical names
 
-### Single point of failure (R21 risk)
-- Both glm5.1 and dsv4p route to the same ms_uni41001 container
-- If ms_uni41001 crashes → BOTH models unavailable
+### Single point of failure (R24)
+- All agents route to the same ms_uni41001 container (glm5.1 only)
+- If ms_uni41001 crashes → ALL models unavailable
 - **Mitigation**: ms_uni41001 has been stable since R21 deploy. If it fails, proxy env vars can be changed to route to a new LiteLLM container on any port.
 
 ### ModelScope dual quota system
@@ -162,7 +155,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
 
 ### 5. Variant fallback + retry-after=180s (opc2_uname push, R23)
-- **Issue**: 5 CC processes consuming quota simultaneously → ALL-KEYS-429 for both glm5.1 and dsv4p → CC stuck in 429 retry loop
+- **Issue**: 5 CC processes consuming quota simultaneously → ALL-KEYS-429 for glm5.1 → CC stuck in 429 retry loop
 - **Root cause**: Token quota per-key shared across all variants. 7 key cycling wastes 7 quota per attempt. 5 CC processes × 429 retry loop = massive quota waste
 - **Immediate fix**: Kill 3 redundant CC processes. Quota recovered in ~8 minutes (17:40→17:48)
 - **Prevention fix**: Proxy now tries 2 additional variants (1 key each) when all 7 keys in start variant are 429. Max extra waste = 2 keys (vs 7×N from CC retry loop). retry-after changed from 30s to 180s
@@ -250,19 +243,17 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants | DEPLOYED ✅ |
 | R22 | Proxy 429+500+502 error cycling; LiteLLM num_retries=0 all allowed_fails=0; CC API_TIMEOUT_MS 600000 | DEPLOYED ✅ |
 | R23 | opc_uname: R21 gateway deployed+timeout cycling test ✅+variant fallback+retry-after=180s; opc2_uname: removed 41003/42001 containers | Config cleanup + gateway verified ✅ |
-| R23.1 | Multi-agent gateway refactoring: upstream.py shared module, AGENT_SUFFIXES (_cc/_ol/_oc/_hm), OpenAI error format, _handle_openai_with_cycling() | **DEPLOYED 2026-06-12 18:20 CST; CC/OpenClaw/OpenCode/Hermes all verified ✅** | (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
+| R23.1 | Multi-agent gateway refactoring: upstream.py shared module, AGENT_SUFFIXES (_cc/_ol/_oc/_hm), OpenAI error format, _handle_openai_with_cycling() | **DEPLOYED 2026-06-12 18:20 CST; CC/OpenClaw/OpenCode/Hermes all verified ✅** |
+| R24 | dsv4p removed entirely (70 dep→140 dep removed, 41003/42001 containers stopped+removed, config cleanup); CC settings model=glm5.1_cc; opc2_uname gateway synced | **DEPLOYED 2026-06-12; both machines verified ✅** | (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
 
-## 10 Variant Model IDs (ms_uni41001, R21)
+## 10 Variant Model IDs (ms_uni41001, R24 — glm5.1 only)
 
 **GLM-5.1 (ms_uni41001):** 10 variants × 7 keys = 70 deployments
 `ZHIPUAI/GLM-5.1`, `ZHIPUAI/GLm-5.1`, `ZHIPUAI/GlM-5.1`, `ZHIPUAI/Glm-5.1`, `ZHIPUAI/gLM-5.1`, `ZHIPUAI/gLm-5.1`, `ZHIPUAI/glM-5.1`, `ZHIPUAI/glm-5.1`, `ZHIPUAi/GLM-5.1`, `ZHIPUAi/GLm-5.1`
 
-**DSv4P (ms_uni41001):** 10 variants × 7 keys = 70 deployments (was 11, v11 removed per R21)
-`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`
+**DSv4P — R24 removed entirely** (was 10 variants × 7 keys = 70 dep, all purged from LiteLLM and proxy config)
 
 **NEVER modify/delete these — each variant has independent 200/id/day quota. rpm=1 per deployment is also immutable.**
-
-**Removed**: `deepseek-ai/DeEpSeek-V4-Pro` (dsv4p v11) — per user decision R21, losing 7×200=1400 req/day dsv4p capacity.
 
 ## R23.1: Multi-Agent Gateway Refactoring (2026-06-12)
 
@@ -296,7 +287,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | `_oc` | OpenCode | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
 | `_hm` | Hermes | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
 
-Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm` (dsv4p variants reserved)
+Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`
 Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
 
 ### Test Results
@@ -306,7 +297,15 @@ Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
 - **OpenCode (_oc):** ✅ streaming, ✅ non-stream, ✅ agent=_oc detected
 - **Hermes (_hm):** ✅ non-stream, ✅ agent=_hm detected, ✅ 429 error (OpenAI format)
 
-### Pending
+### R24: dsv4p Purge + Container Cleanup (2026-06-12)
 
-- CC settings.json: update model to `glm5.1_cc` (currently `glm5.1`, backward compat works)
-- dsv4p suffix IDs (dsv4p_cc/ol/oc/hm): reserved, not yet prioritized (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
+1. **CC settings.json model → glm5.1_cc** (both machines) ✅
+2. **opc2_uname R23.1 gateway synced** ✅
+3. **41003/42001 containers removed** ✅ (docker stop+rm on both machines)
+4. **Config dirs + logs cleaned** ✅ (litellm-glm51-test, litellm-dsv4p, gateway_old_R22, old backups)
+5. **PostgreSQL databases dropped** ✅ (litellm_glm51_test, litellm_dsv4p)
+6. **dsv4p removed from LiteLLM config** ✅ (140 dep → 70 dep glm5.1 only)
+7. **dsv4p removed from proxy config** ✅ (MODEL_UPSTREAMS, MODEL_MAP, VARIANT_IDS, THINKING_SUPPORT, etc.)
+8. **dsv4p env vars removed from docker-compose.yml** ✅ (LITELLM_URL_DSV4P, MODEL_INPUT_TOKEN_SAFETY_DSV4P, NUM_VARIANTS_DSV4P)
+9. **All aliases now → glm5.1** ✅ (haiku/mini/tier previously → dsv4p, now all → glm5.1)
+10. **Both machines rebuilt + verified** ✅ (4 containers healthy, curl glm5.1_cc returns 200)

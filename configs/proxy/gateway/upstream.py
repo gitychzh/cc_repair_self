@@ -74,7 +74,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         handler: ProxyHandler instance (needed for _make_upstream_conn)
         oai_body: dict — OpenAI-format request body (already converted from Anthropic
                   if CC path, or raw OpenAI body if OpenAI path)
-        mapped_model: str — backend model name ("glm5.1" or "dsv4p")
+        mapped_model: str — backend model name ("glm5.1")
         request_id: str — unique request ID for logging
         metrics: dict — metrics dict to update
         t_start: float — request start timestamp
