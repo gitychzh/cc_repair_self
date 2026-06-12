@@ -7,7 +7,7 @@ Non-429 errors (500/timeout/auth) handled by LiteLLM's own num_retries.
 
 Architecture:
   CC(40001) → this proxy (format conversion + metrics + key round-robin)
-      → 41003 LiteLLM (glm5.1k1~k7, each 1000 variants with 1 key, simple-shuffle)
+      → 41003 LiteLLM (glm5.1k1~k7, each 10 variants with 1 key, simple-shuffle)
       → 42001 LiteLLM (dsv4pk1~k7, each 11 variants with 1 key, simple-shuffle)
 
 Env vars:
@@ -142,7 +142,7 @@ _error_detail_lock = threading.Lock()
 
 # ─── Key round-robin counters ──────────────────────────────────────────────
 # R19: Even token distribution across ModelScope keys via round-robin.
-# Each model group (glm5.1k1~k7) has 1000 variants with ONE key.
+# Each model group (glm5.1k1~k7) has 10 variants with ONE key.
 # Proxy cycles keys: request N → key_idx = counter % NUM_KEYS → model "glm5.1k{idx+1}"
 # On 429 from a key group, proxy cycles to next key group.
 # After all NUM_KEYS key groups return 429 → return 429 to agent with descriptive error.

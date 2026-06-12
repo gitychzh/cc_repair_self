@@ -1,10 +1,12 @@
-# Two-model architecture: 41001 (glm5.1-backup, 7key-groups×1000var=7000) + 41003 (glm5.1-primary, 7key-groups×1000var=7000) + 42001 (dsv4p, 7key-groups×11var=77)
+# Two-model architecture: 41001 (glm5.1-backup, 7key-groups×1000var=7000) + 41003 (glm5.1-primary, 7key-groups×10var=70) + 42001 (dsv4p, 7key-groups×11var=77)
 # proxy.py (40001/40002) — format conversion + metrics logging + key round-robin (429 cycles through all 7 keys)
 # LiteLLM handles variant-level routing within each key group — proxy cycles keys on 429
 #
 # Port assignments: 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p
-# ulimit nofile: 8192 soft / 65536 hard — prevents fd exhaustion with large deployment counts
-# (7000 deployments on both 41001 and 41003 need more than default 1024 soft limit)
+# R20: 41003 reduced from 7000 to 70 deployments (1000→10 variants per key group)
+#   - ModelScope quota is 2000/key/day; 10 variants × 200/id/key = 2000/key = per-key cap
+#   - 41001 backup still uses 1000 variants (7000 deploys) — will be reduced after 41003 proven stable
+# ulimit nofile: 41001/41003 use 8192/2048 soft / 65536 hard; 42001 uses 4096 soft
 
 services:
   cc_postgres:
@@ -156,18 +158,17 @@ services:
       - --port
       - "4000"
 
-  # ─── TEMPORARY TEST: 1000-variant quota exploration ───
-  # Purpose: test whether ModelScope quota is per-(key,model_id)
-  # — each case variant gets independent 200/id/day quota.
-  # 1000 variants × 7 keys = 7000 deployments, rpm=1 each = 7000 RPM capacity.
-  # Will be evaluated after quota validation and removed if not beneficial.
+  # ─── R20: Primary glm5.1 (70 deployments, 7 key groups × 10 variants) ───
+  # Reduced from 7000 (1000 variants) to 70 (10 variants) per key group.
+  # 10 variants × 200/id/key/day = 2000/key/day = per-key RPM cap. More variants don't add capacity.
+  # 41001 backup still uses 1000 variants — will be reduced after 41003 proven stable for ≥2 hours.
   glm5.1_test41003:
     image: litellm/litellm:v1.87.0
     container_name: glm5.1_test41003
     restart: unless-stopped
     ulimits:
       nofile:
-        soft: 8192
+        soft: 2048
         hard: 65536
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -195,11 +196,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2048M
-          cpus: "2.0"
+          memory: 1024M
+          cpus: "1.0"
         reservations:
-          memory: 768M
-          cpus: "0.5"
+          memory: 256M
+          cpus: "0.25"
     healthcheck:
       test:
         - CMD-SHELL
@@ -207,7 +208,7 @@ services:
       interval: 60s
       timeout: 30s
       retries: 3
-      start_period: 180s
+      start_period: 60s
     logging: *id001
     command:
       - --config
@@ -222,7 +223,7 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # glm5.1 routing → 41003 (primary, 1000var×7keys=7000 deploys)
+      # glm5.1 routing → 41003 (primary, 10var×7keys=70 deploys)
       LITELLM_URL_GLM51: http://glm5.1_test41003:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://glm5.1_test41003:4000/v1/models
       LITELLM_URL_DSV4P: http://dsv4p_uni42001:4000/v1/chat/completions

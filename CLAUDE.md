@@ -10,7 +10,7 @@
 
 ```
 Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
-             → :41003 LiteLLM (glm5.1k1~k7, 7 key groups × 1000 variants = 7000 dep) [PRIMARY]
+             → :41003 LiteLLM (glm5.1k1~k7, 7 key groups × 10 variants = 70 dep) [PRIMARY]
              → :42001 LiteLLM (dsv4pk1~k7, 7 key groups × 11 variants = 77 dep)
              → :41001 LiteLLM (glm5.1k1~k7, 7 key groups × 1000 variants = 7000 dep) [BACKUP]
              → ModelScope API
@@ -41,7 +41,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
 **DSv4P (11 variants, 在 42001):**
 `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
 
-**GLM-5.1: 1000 variants on 41003（详见 configs/litellm-glm51-test/config.yaml，禁止增删改）**
+**GLM-5.1: 10 variants on 41003（详见 configs/litellm-glm51-test/config.yaml，R20 reduced from 1000 to 10）。41001 BACKUP仍用1000 variants。**
 
 ## 关键原则（长期知识）
 
@@ -77,13 +77,13 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
 | autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
 
-### LiteLLM router_settings (41003 glm5.1-primary, 7 key groups × 1000 dep each)
+### LiteLLM router_settings (41003 glm5.1-primary, 7 key groups × 10 dep each)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
 | num_retries | 2 | proxy key cycling替代了LiteLLM的429 retry |
 | cooldown_time | 10 | RPM 1-min窗口，10s proportional |
-| routing_strategy | simple-shuffle | per key group 1000 dep pool |
+| routing_strategy | simple-shuffle | per key group 10 dep pool |
 | RateLimitErrorAllowedFails | 1 | 429 → proxy cycles to next key group |
 | TimeoutErrorAllowedFails | 2 | |
 | InternalServerErrorAllowedFails | 3 | ModelScope null choices |
@@ -108,7 +108,7 @@ configs/
   docker-compose.yml       # Docker编排（6个容器）
   .env.template             # 环境变量模板
   litellm-glm51/config.yaml       # 41001 LiteLLM配置（1000变体×7keys，BACKUP）
-  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（1000变体×7keys，PRIMARY）
+  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（10变体×7keys=70 dep，PRIMARY）
   litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（11变体×7keys）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
