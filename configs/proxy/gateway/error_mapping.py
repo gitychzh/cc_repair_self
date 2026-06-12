@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Error format conversion: OpenAI → Anthropic error types.
+"""Error format conversion for both Anthropic and OpenAI formats.
 
-CC treats different error types differently:
-- authentication_error → CC hard-stops (fatal, won't retry)
-- invalid_request_error → CC stops (client error, won't retry)
-- rate_limit_error → CC retries with backoff
-- api_error → CC retries (server error, recoverable)
+Anthropic error types (for CC):
+  - authentication_error → CC hard-stops (fatal, won't retry)
+  - invalid_request_error → CC stops (client error, won't retry)
+  - rate_limit_error → CC retries with backoff
+  - api_error → CC retries (server error, recoverable)
 
-Mapping strategy documented in detail in _convert_error docstring.
+OpenAI error format (for OpenClaw/OpenCode/Hermes):
+  - {"error": {"message": "...", "type": "...", "code": "..."}}
+  - Types: rate_limit_error, invalid_request_error, server_error, authentication_error
+  - Codes: "429", "400", "502", "401"
+
+Mapping strategy documented in detail in convert_error docstring.
 """
+import json
+
 from .logger import _log
 
 
@@ -135,13 +142,11 @@ def is_input_overflow(error_json, resp_status):
 
 def json_to_str_lower(error_json):
     """Convert error JSON to lowercase string for pattern matching."""
-    import json
     return json.dumps(error_json).lower()
 
 
 def is_quota_exhaustion(error_json):
     """Detect if a 429 error is quota exhaustion vs RPM throttle."""
-    import json
     err_msg_lower = json.dumps(error_json).lower()
     return (
         "quota" in err_msg_lower
@@ -150,3 +155,100 @@ def is_quota_exhaustion(error_json):
         or "balance" in err_msg_lower
         or "limit reached" in err_msg_lower
     )
+
+
+# ─── OpenAI-format error conversion ────────────────────────────────────────
+
+def format_openai_error_all_keys_exhausted(result, mapped_model, request_model):
+    """Format all-keys-exhausted error as OpenAI error format.
+
+    For OpenAI agents (OpenClaw/OpenCode/Hermes), errors must be in OpenAI format:
+      {"error": {"message": "...", "type": "...", "code": "429"}}
+
+    Mapping (same logic as Anthropic, different format):
+      - All 429 → rate_limit_error + code "429" (agent retries with backoff)
+      - Has 500/502/timeout → server_error + code "502" (agent retries)
+      - Has connection error → server_error + code "502" (agent retries)
+      NEVER use code "529" — same disaster as CC overloaded_error for some agents.
+    """
+    if result.all_429:
+        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        return {
+            "error": {
+                "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys have exhausted their "
+                           f"token quota for model {mapped_model}. Please wait for quota recovery "
+                           f"(typically 15 minutes). Keys cycled: {cycled_keys}",
+                "type": "rate_limit_error",
+                "code": "429",
+            }
+        }, 429
+    else:
+        failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
+        timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+        connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+        return {
+            "error": {
+                "message": f"All {len(result.key_cycle_attempts)} key groups failed for model {mapped_model} "
+                           f"after {result.elapsed_ms/1000:.1f}s. Failure types: {failure_types}. "
+                           f"Timeout keys: {timeout_keys}. Connection error keys: {connerr_keys}. "
+                           f"Please retry — upstream may recover.",
+                "type": "server_error",
+                "code": "502",
+            }
+        }, 502
+
+
+def format_openai_error_upstream(error_json, request_model, resp_status):
+    """Format a non-cycling upstream error as OpenAI error format.
+
+    Used for errors that don't cycle (400 input overflow, 400 inappropriate content,
+    401/403 auth, etc). Same classification logic as convert_error(), but OpenAI format.
+
+    Mapping:
+      - 429 quota/rate → rate_limit_error + code "429"
+      - 400 input overflow → invalid_request_error + code "400"
+      - 400 inappropriate content → invalid_request_error + code "400"
+      - 400 InvalidParameter (thinking_budget) → server_error + code "400" (recoverable by param fix)
+      - 401/403 auth → authentication_error + code "401" (but NOT fatal like Anthropic)
+      - Everything else → server_error
+    """
+    err = error_json.get("error", error_json)
+    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+    msg_lower = msg.lower()
+
+    # Quota exhaustion → rate_limit_error
+    err_code = ""
+    if isinstance(err, dict):
+        err_code = (err.get("code") or "").lower()
+    is_quota = (
+        "insufficient_quota" in err_code
+        or ("quota" in msg_lower and "exceeded" in msg_lower)
+        or ("exceeded your current quota" in msg_lower)
+    )
+
+    if is_quota:
+        return {"error": {"message": msg, "type": "rate_limit_error", "code": "429"}}, 429
+    elif "rate" in msg_lower or "429" in msg_lower:
+        return {"error": {"message": msg, "type": "rate_limit_error", "code": "429"}}, 429
+
+    # Input overflow → invalid_request_error (agent should stop, not retry)
+    elif ("range of input length" in msg_lower
+          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))
+          and "thinking_budget" not in msg_lower):
+        return {"error": {"message": msg, "type": "invalid_request_error", "code": "400"}}, 400
+
+    # Inappropriate content → invalid_request_error (same content always rejected)
+    elif "inappropriate content" in msg_lower:
+        return {"error": {"message": msg, "type": "invalid_request_error", "code": "400"}}, 400
+
+    # 401/403 auth → authentication_error (NOT fatal — OpenAI agents retry differently)
+    elif resp_status in (401, 403):
+        return {"error": {"message": msg, "type": "authentication_error", "code": str(resp_status)}}, resp_status
+
+    # 400 InvalidParameter (thinking_budget etc) → server_error (recoverable)
+    elif resp_status == 400 and "invalidparameter" in msg_lower:
+        return {"error": {"message": msg, "type": "server_error", "code": "400"}}, 400
+
+    # Everything else → server_error
+    else:
+        return {"error": {"message": msg, "type": "server_error", "code": str(resp_status)}}, resp_status

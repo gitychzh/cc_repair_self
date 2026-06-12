@@ -9,12 +9,25 @@
 ## 架构
 
 ```
-Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D round-robin)
-             → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 dep) [UNIFIED]
-             → ModelScope API
+                    :40001/40002 proxy gateway (R23.1 multi-agent)
+                    ├── _cc (Claude Code) → /v1/messages → Anthropic→OpenAI转换 → upstream.py v×k cycling + variant fallback
+                    ├── _ol (OpenClaw)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    ├── _hm (Hermes)      → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    │
+                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 dep) [UNIFIED]
+                    → ModelScope API
 ```
 
-核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin + variant fallback (R23) + error cycling（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy gateway 做格式转换(CC) / 直通(OpenAI agents) + metrics logging + variant×key 2D round-robin + variant fallback (R23) + error cycling（所有agent类型共享upstream.py的v×k cycling和错误处理，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
+
+**Agent Suffix System (R23.1):**
+- 模型ID格式：`{base_model}{agent_suffix}` → 如 `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`
+- 无suffix = 默认`_cc`（向后兼容：`glm5.1` = `glm5.1_cc`）
+- `_cc` → Anthropic格式（/v1/messages），需要格式转换 + force-stream-for-nonstream
+- `_ol/_oc/_hm` → OpenAI格式（/v1/chat/completions），直通passthrough，不需要force-stream-for-nonstream
+- 所有agent共享相同的error cycling + variant fallback：429/500/502 key cycling + timeout cycling + thinking_budget fix retry
+- 错误格式根据agent类型：_cc返回Anthropic格式错误，_ol/_oc/_hm返回OpenAI格式错误
 
 **Variant×Key 2D Round-Robin + Variant Fallback (R21→R23) 机制：**
 - Proxy 维护 2D轮换 counter：request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS → model `glm5.1v{V}k{K}`
@@ -32,7 +45,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 |------|------|
 | **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改**（R21用户主动删除dsv4p v11） |
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
-| frontend model_name (agent-facing) | `glm5.1`, `dsv4p` — CC/agent请求使用这两个名字 |
+| frontend model_name (agent-facing) | `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `dsv4p_cc/ol/oc/hm` — R23.1 suffix system; backward compat: `glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc |
 | LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7`, `dsv4pv1k1`~`dsv4pv10k7` — proxy精确指定variant+key |
 | Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001/40002` |
 | port assignments | 41001=unified(ms_uni41001) |
@@ -112,7 +125,15 @@ configs/
   litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 + 10v×7k dsv4p = 140 dep）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
-    Dockerfile / proxy.py         # 格式转换代理（variant×key 2D round-robin+metrics）
+    Dockerfile                    # 镜像构建
+    proxy.py                      # 入口（启动gateway HTTPServer）
+    gateway/                      # R23.1 模块化gateway包
+      __init__.py                 # 包导出
+      config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type()
+      handlers.py                 # 请求调度（CC→_handle_messages, OpenAI→_handle_openai_with_cycling）
+      upstream.py                 # 共享v×k cycling + error handling（UpstreamResult + execute_request）
+      error_mapping.py            # 错误格式转换（Anthropic convert_error + OpenAI format_*）
+      format_converter.py         # Anthropic→OpenAI格式转换
   claude/
     settings-opc_uname.json        # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22)
     settings-opc2_uname.json       # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22, 但opc2_uname本机仍=300000需同步)
@@ -127,7 +148,7 @@ scripts/
 | 文件 | 路径 | 修改后需 |
 |------|------|----------|
 | LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001` |
-| 转换代理 | `/opt/cc-infra/proxy/proxy.py` | rebuild + recreate proxy容器 |
+| 转换代理 | `/opt/cc-infra/proxy/gateway/` (模块包: config.py, handlers.py, upstream.py, error_mapping.py, format_converter.py) | rebuild + recreate proxy容器 |
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
 | Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
@@ -164,19 +185,25 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ## 测试请求
 
 ```bash
-# Anthropic格式（glm5.1）
+# Anthropic格式 — CC (_cc)
 curl -s -X POST http://127.0.0.1:40001/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: sk-litellm-local" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# Anthropic格式（dsv4p）
+# Anthropic格式 — CC (_cc 显式suffix)
 curl -s -X POST http://127.0.0.1:40001/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: sk-litellm-local" \
   -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"dsv4p","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
+  -d '{"model":"glm5.1_cc","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
+
+# OpenAI格式 — OpenClaw/OpenCode/Hermes (_ol/_oc/_hm)
+curl -s -X POST http://127.0.0.1:40001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-litellm-local" \
+  -d '{"model":"glm5.1_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 ```
 
 ## 网络代理（opc_uname端如需）

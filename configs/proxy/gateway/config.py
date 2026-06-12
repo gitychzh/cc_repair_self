@@ -6,6 +6,7 @@ Immutable constraints (variant model IDs, rpm=1, frontend model names,
 container names, port assignments) are documented in CLAUDE.md.
 
 R21: Added NUM_VARIANTS, VARIANT_IDS, v×k 2D round-robin support.
+R23: Added AGENT_SUFFIXES, agent type detection, suffix-based model IDs.
 Proxy precisely specifies variant+key combo → LiteLLM just forwards.
 """
 import os
@@ -51,18 +52,92 @@ MODEL_UPSTREAMS = {
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
 
+# ─── Agent type suffixes (R23) ────────────────────────────────────────────
+# Suffix determines: 1) Response format (anthropic vs openai)  2) Error format
+# "_cc" → Anthropic format (Claude Code)
+# "_ol" → OpenAI format (OpenClaw)
+# "_oc" → OpenAI format (OpenCode)
+# "_hm" → OpenAI format (Hermes)
+AGENT_SUFFIXES = {
+    "_cc": {"name": "Claude Code", "format": "anthropic"},
+    "_ol": {"name": "OpenClaw",    "format": "openai"},
+    "_oc": {"name": "OpenCode",    "format": "openai"},
+    "_hm": {"name": "Hermes",      "format": "openai"},
+}
+DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
+
+# Base model names (backend routing targets)
+BASE_MODELS = ["glm5.1", "dsv4p"]
+
+def detect_agent_type(model_id):
+    """Detect agent type from model ID suffix.
+
+    Args:
+        model_id: model name, e.g. "glm5.1_cc", "glm5.1_ol", "glm5.1", "claude-opus-4-8"
+
+    Returns:
+        (base_model, agent_suffix, response_format)
+        base_model: backend model name ("glm5.1" or "dsv4p")
+        agent_suffix: "_cc", "_ol", "_oc", "_hm" or DEFAULT_AGENT_SUFFIX
+        response_format: "anthropic" or "openai"
+
+    Examples:
+        "glm5.1_cc" → ("glm5.1", "_cc", "anthropic")
+        "glm5.1_ol" → ("glm5.1", "_ol", "openai")
+        "glm5.1"    → ("glm5.1", "_cc", "anthropic")  # backward compat
+        "claude-opus-4-8" → ("glm5.1", "_cc", "anthropic")  # MODEL_MAP lookup
+    """
+    # Check for explicit suffix
+    for suffix, info in AGENT_SUFFIXES.items():
+        if model_id.endswith(suffix):
+            base = model_id[:-len(suffix)]
+            # Validate base is a known backend model
+            mapped = MODEL_MAP.get(base, None)
+            if mapped and mapped in MODEL_UPSTREAMS:
+                return (mapped, suffix, info["format"])
+            # Base with suffix might be directly a backend model name
+            if base in MODEL_UPSTREAMS:
+                return (base, suffix, info["format"])
+
+    # No suffix → default to CC (Anthropic format)
+    # Try MODEL_MAP lookup first (e.g. "claude-opus-4-8" → "glm5.1")
+    mapped = MODEL_MAP.get(model_id, None)
+    if mapped and mapped in MODEL_UPSTREAMS:
+        return (mapped, DEFAULT_AGENT_SUFFIX, AGENT_SUFFIXES[DEFAULT_AGENT_SUFFIX]["format"])
+
+    # Direct backend model name (e.g. "glm5.1")
+    if model_id in MODEL_UPSTREAMS:
+        return (model_id, DEFAULT_AGENT_SUFFIX, AGENT_SUFFIXES[DEFAULT_AGENT_SUFFIX]["format"])
+
+    # Unknown model → default to glm5.1 with CC format
+    return (DEFAULT_UPSTREAM_MODEL, DEFAULT_AGENT_SUFFIX, AGENT_SUFFIXES[DEFAULT_AGENT_SUFFIX]["format"])
+
+def format_model_id(base_model, agent_suffix):
+    """Construct frontend model ID from base model + agent suffix.
+    e.g. ("glm5.1", "_cc") → "glm5.1_cc"
+    """
+    return f"{base_model}{agent_suffix}"
+
 # ─── Model name → LiteLLM model_name mapping ────────────────────────────
 # NEVER change the variant model IDs — each has independent 200/id/day quota.
-# Tier-based routing (inspired by cc-switch): Claude model tiers → backend models.
-# "opus" tier → glm5.1 (high-capability, with thinking)
-# "haiku" tier → dsv4p (lighter model, fast responses)
-# This allows other agents (OpenCode, Codex, etc.) to specify claude-tier names
-# or OpenAI-style names and get routed to appropriate backends automatically.
+# R23: Added suffix-based entries for multi-agent routing.
+# Suffix determines response format; MODEL_MAP determines backend routing.
 MODEL_MAP = {
-    # Our own model names (direct)
+    # R23: Suffix-based model IDs — suffix determines format, base determines backend
+    # Claude Code (_cc) — Anthropic format
+    "glm5.1_cc": "glm5.1", "dsv4p_cc": "dsv4p",
+    # OpenClaw (_ol) — OpenAI format
+    "glm5.1_ol": "glm5.1", "dsv4p_ol": "dsv4p",
+    # OpenCode (_oc) — OpenAI format
+    "glm5.1_oc": "glm5.1", "dsv4p_oc": "dsv4p",
+    # Hermes (_hm) — OpenAI format
+    "glm5.1_hm": "glm5.1", "dsv4p_hm": "dsv4p",
+
+    # Backward compat: no suffix = CC (Anthropic format)
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
     "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p", "deepseek-ai/deepseek-v4-pro": "dsv4p",
-    # Claude Code names → glm5.1 (with and without date suffixes)
+
+    # Claude Code names → glm5.1 (implicitly _cc / Anthropic format)
     # ALL Claude opus/sonnet names → glm5.1 for maximum quota capacity
     "claude-opus-4-8": "glm5.1",
     "claude-opus-4-7": "glm5.1",
@@ -78,7 +153,8 @@ MODEL_MAP = {
     "claude-3-5-sonnet-20241022": "glm5.1",
     "claude-3-5-haiku-20241022": "dsv4p",  # haiku tier → dsv4p
     "claude-3-opus-20240229": "glm5.1",
-    # OpenAI-style names for other agents (OpenCode, Codex, etc.)
+
+    # OpenAI-style alias names for other agents (no suffix = default _cc format)
     "gpt-4o": "glm5.1",
     "gpt-4o-mini": "dsv4p",
     "o3": "glm5.1",

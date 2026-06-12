@@ -1,12 +1,18 @@
-# Deploy Status — opc_uname + opc2_uname (R23, 2026-06-12)
+# Deploy Status — opc_uname + opc2_uname (R23.1, 2026-06-12)
 
-## Architecture (R23)
+## Architecture (R23.1 multi-agent)
 ```
-Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + variant×key 2D round-robin + variant fallback + metrics)
-    → 41001 ms_uni41001 LiteLLM (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 deploys) → ModelScope [UNIFIED]
+Agent(CC/_cc)      → 40001/40002(proxy, Anthropic format conversion + v×k 2D round-robin + variant fallback + error cycling)
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+Agent(OpenClaw/_ol) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+Agent(OpenCode/_oc) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
+Agent(Hermes/_hm)  → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
+    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED]
 ```
 
-Proxy does **format conversion + variant×key 2D round-robin + error cycling (429/500/502) + variant fallback (R23) + metrics logging**. No retry, no truncation, no auto-compact. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
+Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant fallback (R23) + error cycling (429/500/502) + metrics logging** for ALL agent types. OpenAI agents get passthrough (no format conversion) but same error cycling + variant fallback protection. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
 
 **Variant×Key 2D Round-Robin + Variant Fallback (R21→R23)**:
 - request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
@@ -243,7 +249,8 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R20 | 41003 variant reduction 1000→10; resource savings | Deploying, verified ✅ |
 | R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants | DEPLOYED ✅ |
 | R22 | Proxy 429+500+502 error cycling; LiteLLM num_retries=0 all allowed_fails=0; CC API_TIMEOUT_MS 600000 | DEPLOYED ✅ |
-| R23 | opc_uname: R21 gateway deployed+timeout cycling test ✅; opc2_uname: removed 41003/42001 containers+configs+refs | Config cleanup + gateway verified ✅ |
+| R23 | opc_uname: R21 gateway deployed+timeout cycling test ✅+variant fallback+retry-after=180s; opc2_uname: removed 41003/42001 containers | Config cleanup + gateway verified ✅ |
+| R23.1 | Multi-agent gateway refactoring: upstream.py shared module, AGENT_SUFFIXES (_cc/_ol/_oc/_hm), OpenAI error format, _handle_openai_with_cycling() | **DEPLOYED 2026-06-12 18:20 CST; CC/OpenClaw/OpenCode/Hermes all verified ✅** | (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
 
 ## 10 Variant Model IDs (ms_uni41001, R21)
 
@@ -256,3 +263,50 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 **NEVER modify/delete these — each variant has independent 200/id/day quota. rpm=1 per deployment is also immutable.**
 
 **Removed**: `deepseek-ai/DeEpSeek-V4-Pro` (dsv4p v11) — per user decision R21, losing 7×200=1400 req/day dsv4p capacity.
+
+## R23.1: Multi-Agent Gateway Refactoring (2026-06-12)
+
+### Changes
+
+**Module Refactoring (low coupling, high cohesion):**
+- **NEW** `gateway/upstream.py` — shared v×k cycling + error handling module used by ALL agent types
+  - `UpstreamResult` class: unified result from upstream executor
+  - `execute_request()` → UpstreamResult (extracted all v×k round-robin, 429/500/502 key cycling, timeout cycling, thinking_budget fix retry, variant fallback logic)
+
+- **MODIFIED** `gateway/config.py` — agent suffix system
+  - `AGENT_SUFFIXES` dict: _cc→anthropic, _ol/_oc/_hm→openai
+  - `detect_agent_type(model_id)` → (base_model, agent_suffix, response_format)
+  - Updated MODEL_MAP with all suffix entries
+
+- **MODIFIED** `gateway/handlers.py` — slim dispatcher using upstream.py
+  - `_handle_messages()` → Anthropic path for CC/_cc
+  - `_handle_openai_with_cycling()` → OpenAI path for _ol/_oc/_hm
+  - `_stream_openai_passthrough()` → SSE passthrough (byte-level, metrics extraction)
+  - Force-stream-for-nonstream ONLY for Anthropic path (CC), NOT for OpenAI agents
+
+- **MODIFIED** `gateway/error_mapping.py` — OpenAI error format handlers
+  - `format_openai_error_all_keys_exhausted()` + `format_openai_error_upstream()`
+
+### Agent Suffix Model IDs
+
+| Suffix | Agent | Format | Endpoint | Error Cycling |
+|--------|-------|--------|----------|---------------|
+| `_cc` | Claude Code | Anthropic→OpenAI conversion | /v1/messages | ✅ 429/500/502/timeout |
+| `_ol` | OpenClaw | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
+| `_oc` | OpenCode | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
+| `_hm` | Hermes | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
+
+Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm` (dsv4p variants reserved)
+Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
+
+### Test Results
+
+- **CC (_cc):** ✅ streaming, ✅ non-stream, ✅ backward compat, ✅ 429 key cycling
+- **OpenClaw (_ol):** ✅ streaming passthrough, ✅ non-stream, ✅ 429 error (OpenAI format), ✅ 500 key cycling
+- **OpenCode (_oc):** ✅ streaming, ✅ non-stream, ✅ agent=_oc detected
+- **Hermes (_hm):** ✅ non-stream, ✅ agent=_hm detected, ✅ 429 error (OpenAI format)
+
+### Pending
+
+- CC settings.json: update model to `glm5.1_cc` (currently `glm5.1`, backward compat works)
+- dsv4p suffix IDs (dsv4p_cc/ol/oc/hm): reserved, not yet prioritized (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
