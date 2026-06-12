@@ -2,7 +2,7 @@
 """Gateway proxy entry point.
 
 Architecture:
-  CC(40001/40002) → this proxy (format conversion + metrics + variant×key 2D round-robin)
+  CC/OL/OC/HM/CX(40001) → this proxy (format conversion + metrics + variant×key 2D round-robin)
       → 41001 ms_uni41001 LiteLLM (glm5.1 only, 70 dep)
 
 Env vars: see config.py for full list.

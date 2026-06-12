@@ -32,7 +32,7 @@ Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant
 | auth_to_api_40001 | :40001 | Proxy (all agents) | R24.2 multi-agent gateway: CC/_cc + OpenClaw/_ol + OpenCode/_oc + Hermes/_hm + Codex/_cx |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (only litellm_glm51 DB) |
 
-**40002 removed from仓库 compose (R24)**: 单 proxy 容器处理所有 agent 格式。但本机 `/opt/cc-infra/docker-compose.yml` 仍保留旧版含 40002，当前 4 个容器运行。待后续同步清理。
+**40002 removed (R24.2)**: 单 proxy 容器处理所有 agent 格式。opc2_uname 本机已同步清理 ✅。
 
 ## Deploy Method (R21+)
 ```bash
@@ -105,10 +105,10 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 修复: 所有 OpenAI agent 改为通过 proxy gateway (40001) 路由：
 - OpenClaw: baseUrl 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_ol`
-- Hermes: base_url 从 `41001` → `40001`, default 从 `glm5.1` → `glm5.1_hm`, fallback → 40002（本机 40002 容器仍在运行，仓库 compose 已删除它，待后续同步清理）
+- Hermes: base_url 从 `41001` → `40001`, default 从 `glm5.1` → `glm5.1_hm`, fallback 为空（40002 已删除）
 - OpenCode: baseURL 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_oc`
 
-⚠️ 注意: 仓库 R24 compose 已删除 40002 容器，但本机 `/opt/cc-infra/docker-compose.yml` 仍保留旧版含 40002 的配置。本机 4 个容器运行（ms_uni41001, cc_postgres, auth_to_api_40001, auth_to_api_40002）。需要后续同步本机 compose 到仓库版本。
+⚠️ R24.2: opc2_uname 本机 compose 已同步到仓库版本，40002 容器已删除并清理（3 容器运行）✅
 
 验证结果 ✅：
 - curl test glm5.1_ol via 40001 returns 200 ✅
@@ -130,7 +130,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | error_detail.{date}.jsonl | JSON行 | 详细错误：error_subcategory, upstream_error_body, key_cycle_attempts | 0-0.35MB/天 |
 
 **proxy 40001 logs**: 12MB总计（10天有数据，06-06/07/08空缺=proxy重建期间）
-**proxy 40002 logs**: 672KB总计（9天连续数据）
+**proxy 40002 logs**: 已删除（R24.2 清理）
 
 ### Docker容器日志
 
@@ -188,7 +188,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ### 1. R21 gateway code deployed to opc_uname container (opc_uname push)
 - **Issue**: Remote opc_uname container was running R19 gateway code (key-only round-robin, `glm5.1k1~k7` format)
 - **Root cause**: Docker container image was stale — R21 code was on disk but container wasn't rebuilt
-- **Fix**: `docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002`
+- **Fix**: `docker compose up -d --build --force-recreate auth_to_api_40001`
 - **Verified**: Logs show `v{V}k{K}` format, NUM_VARIANTS={glm5.1:10, dsv4p:10}
 
 ### 2. PROXY_TIMEOUT=2s timeout cycling test (opc_uname push)
@@ -203,7 +203,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ### 4. Removed 41003/42001 containers (opc2_uname push)
 - **These containers were retained but NOT routed since R21** — no traffic went through them
 - ms_uni41001 handles all glm5.1 + dsv4p traffic as sole upstream
-- **Removed from docker-compose.yml**: 6 containers → 4 containers (cc_postgres, ms_uni41001, auth_to_api_40001, auth_to_api_40002)
+- **Removed from docker-compose.yml**: 6 containers → 3 containers (cc_postgres, ms_uni41001, auth_to_api_40001)
 - **Deleted config files**: `configs/litellm-glm51-test/config.yaml` (839 lines), `configs/litellm-dsv4p/config.yaml` (923 lines)
 - **Removed PostgreSQL databases**: litellm_glm51_test and litellm_dsv4p from POSTGRES_MULTIPLE_DATABASES
 - **Updated scripts/docs**: Removed all 41003/42001 references

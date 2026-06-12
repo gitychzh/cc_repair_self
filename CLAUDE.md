@@ -9,7 +9,7 @@
 ## 架构
 
 ```
-                    :40001/40002 proxy gateway (R23.1 multi-agent)
+                    :40001 proxy gateway (R24 multi-agent)
                     ├── _cc (Claude Code) → /v1/messages → Anthropic→OpenAI转换 → upstream.py v×k cycling + variant fallback
                     ├── _ol (OpenClaw)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
                     ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
@@ -138,7 +138,7 @@ configs/
     statusline-command-opc_uname.sh / statusline-command.sh
   agents/                          # R24: Agent 配置模板（必须通过 proxy gateway，不能直连 LiteLLM）
     openclaw-opc2_uname.json       # OpenClaw → proxy:40001, model=glm5.1_ol
-    hermes-opc2_uname.yaml         # Hermes → proxy:40001/40002, model=glm5.1_hm
+    hermes-opc2_uname.yaml         # Hermes → proxy:40001, model=glm5.1_hm
     opencode-opc2_uname.jsonc      # OpenCode → proxy:40001, model=glm5.1_oc
   DEPLOY_STATUS.md                 # 当前部署状态
 scripts/
@@ -159,7 +159,7 @@ scripts/
 | Hermes配置 | `~/.hermes/config.yaml` | 重启hermes进程 |
 | OpenCode配置 | `~/.config/opencode/opencode.jsonc` | 重启opencode进程 |
 
-**⚠️ 所有 OpenAI agent（_ol/_oc/_hm）必须通过 proxy gateway (40001/40002) 而不能直连 LiteLLM (41001)！** LiteLLM 的 model_list 只有 v×k 路由名（glm5.1v1k1~v10k7），没有 `glm5.1` 别名。直连 41001 发送 `model=glm5.1` 会返回 400 Invalid model name。Proxy gateway 负责 model name 映射（glm5.1_ol→glm5.1→v×k routing）+ error cycling + variant fallback。
+**⚠️ 所有 OpenAI agent（_ol/_oc/_hm）必须通过 proxy gateway (40001) 而不能直连 LiteLLM (41001)！** LiteLLM 的 model_list 只有 v×k 路由名（glm5.1v1k1~v10k7），没有 `glm5.1` 别名。直连 41001 发送 `model=glm5.1` 会返回 400 Invalid model name。Proxy gateway 负责 model name ���射（glm5.1_ol→glm5.1→v×k routing）+ error cycling + variant fallback。
 
 ## 重启命令
 
@@ -168,7 +168,7 @@ scripts/
 docker restart ms_uni41001
 
 # proxy.py 变更（需要重建镜像）
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
 
 # 全量重建（包括容器名变更 glm5.1_uni41001 → ms_uni41001）
 cd /opt/cc-infra && docker compose up -d --force-recreate
