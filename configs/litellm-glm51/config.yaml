@@ -3850,13 +3850,18 @@ general_settings:
   background_health_checks: false
 
 router_settings:
-  num_retries: 2
+  # R21: Proxy handles all error cycling (429, 500, timeout, connection).
+  # LiteLLM is a pure pass-through — each model_name has exactly 1 deployment,
+  # so num_retries and allowed_fails have NO fallback deployment to try.
+  # Setting all to 0 prevents LiteLLM from deducting extra quota by retrying
+  # the same deployment on errors (ModelScope deducts quota per request, even errors).
+  num_retries: 0
   cooldown_time: 10
   routing_strategy: simple-shuffle
   enable_pre_call_checks: false
   allowed_fails_policy:
     AuthenticationErrorAllowedFails: 0
     BadRequestErrorAllowedFails: 0
-    RateLimitErrorAllowedFails: 1
-    TimeoutErrorAllowedFails: 2
-    InternalServerErrorAllowedFails: 3
+    RateLimitErrorAllowedFails: 0
+    TimeoutErrorAllowedFails: 0
+    InternalServerErrorAllowedFails: 0

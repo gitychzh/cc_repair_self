@@ -16,15 +16,16 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
              → ModelScope API
 ```
 
-核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429时同variant换下一个key，7 key全429才返回agent），不做压缩、不做截断。LiteLLM 只做转发（proxy精确指定variant+key组合），500/timeout由LiteLLM num_retries处理。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin + error cycling（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429/500/502时同variant换下一个key，7 key全失败才返回agent），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
 
 **Variant×Key 2D Round-Robin (R21) 机制：**
 - Proxy 维护 2D轮换 counter：request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS → model `glm5.1v{V}k{K}`
 - 轮询序列：v1k1→v1k2→...→v1k7→v2k1→v2k2→...→v10k7→回到v1k1
-- 429 时：同variant换下一个key（k→k+1），不变variant
-- 7 key 全部 429（同variant） → 返回 429 给 agent（所有key的token quota耗尽）
-- 每个key的 429 尝试都记录在 error_detail 日志中（含variant_idx）
-- 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 429 cycling 信息
+- 429/500/502 时：同variant换下一个key（k→k+1），不变variant（ModelScope每种错误都扣quota，cycling避免浪费）
+- 7 key 全部失败（同variant） → 根据错误类型分类返回：全429→rate_limit_error；有500→api_error；有502→api_error；有timeout→502 api_error
+- 每个key的 cycling 尝试都记录在 error_detail 日志中（含variant_idx、error_type）
+- 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 cycling 信息
+- 不cycling的错误：400 input overflow、400 inappropriate content、400 thinking_budget InvalidParameter、401/403 AuthenticationError
 
 ## 不可变更约束（NEVER CHANGE）
 
@@ -57,7 +58,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 - **CC auto-compact质量远低于手动/compact** — 自动compact用stripNonEssential=true（截断tool输出，tools=[]），手动/compact用stripNonEssential=false（完整上下文）。CC提示compact时，主动/compact加自定义指令可获得更好的摘要。
 - **/health endpoint会触发fd耗尽** — LiteLLM的/health触发per-deployment checks→OSError Too many open files。用/health/liveliness监控LiteLLM。Proxy的/health是简单状态检查（只返回{"status":"ok"}），SAFE用于Docker healthcheck。
 - **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
-- **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。
+- **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。ModelScope对每种错误（429/500/502）都扣quota，所以必须在proxy层做error cycling而非让LiteLLM重试同一deployment。
 - **proxy超时日志详细记录** — socket.timeout现在单独捕获（不再笼统归为ConnectionError），记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms（超了PROXY_TIMEOUT多少）。key cycling时的timeout也单独记录到error_detail。stream和collect_stream的超时同样详细记录。全key失败时区分429（rate_limit_error）vs timeout/connection（502 api_error），避免529→CC auto-compact灾难。
 
 ## 可调整参数（有数据支撑才能改）
@@ -71,7 +72,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 | MODEL_INPUT_TOKEN_SAFETY_DSV4P | 170000 | 120000-190000 | 同上 |
 | MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
 | MAX_SCHEMA_DESC | 600 | 300-1200 | Schema描述截断上限chars |
-| PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒 |
+| PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒。3天数据：P99=85s，max=210s，从未触发timeout |
 
 ### CC settings (claude/settings-*.json)
 
@@ -80,17 +81,18 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 | contextWindow | 170000 | 120000-190000 | CC认知的上下文容量上限 |
 | autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
+| API_TIMEOUT_MS | 600000 | 300000-1200000 | CC→proxy HTTP总超时。R21改为600000(10min)，CC SDK默认值。数据：proxy cycling(7×2s 429) + 成功key(210s) = 224s，在600s内安全 |
 
 ### LiteLLM router_settings (41001 ms_uni41001, 14 groups × 10 dep each = 140 dep)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
-| num_retries | 2 | proxy key cycling替代了LiteLLM的429 retry |
-| cooldown_time | 10 | RPM 1-min窗口，10s proportional |
+| num_retries | 0 | R21：proxy处理所有error cycling，LiteLLM纯转发。单dep per model_name无fallback，重试只会浪费quota |
+| cooldown_time | 10 | RPM 1-min窗口，10s proportional（不影响R21，proxy精确指定model_name） |
 | routing_strategy | simple-shuffle | proxy精确指定model，LiteLLM只转发 |
-| RateLimitErrorAllowedFails | 1 | 429 → proxy cycles to next key |
-| TimeoutErrorAllowedFails | 2 | |
-| InternalServerErrorAllowedFails | 3 | ModelScope null choices |
+| RateLimitErrorAllowedFails | 0 | 429 cycling由proxy处理，LiteLLM不重试（避免扣额外quota） |
+| TimeoutErrorAllowedFails | 0 | timeout cycling由proxy处理 |
+| InternalServerErrorAllowedFails | 0 | 500/choice:null cycling由proxy处理（R21新增） |
 | AuthenticationErrorAllowedFails | 0 | |
 | BadRequestErrorAllowedFails | 0 | |
 

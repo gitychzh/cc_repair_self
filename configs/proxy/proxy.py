@@ -878,22 +878,31 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     conn.close()
                     err_str = json.dumps(error_json)
 
-                    # ─── 429 → cycle to next key (R19 key round-robin) ───
-                    # On 429 from one key group, proxy cycles to the next key group.
-                    # After all NUM_KEYS groups return 429 → all keys exhausted → return 429 to agent.
-                    if resp.status == 429:
+                    # ─── Error types that should cycle to next key (same variant) ───
+                    # R21: ModelScope deducts quota for EVERY request, regardless of error type.
+                    # 429, 500/choice:null, timeout — all count as a quota-consuming request.
+                    # So any "wasted" request should cycle to the next key to try fresh quota.
+
+                    should_cycle_to_next_key = resp.status in (429, 500, 502)
+
+                    if should_cycle_to_next_key:
+                        cycle_reason = {
+                            429: "429_rate_limit",
+                            500: "500_internal_server_error",
+                            502: "502_bad_gateway",
+                        }.get(resp.status, "unknown")
                         key_cycle_attempts.append({
                             "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
                             "error_body": err_str[:500],
+                            "error_type": cycle_reason,
                         })
-                        # Log each key's 429 in error_detail for analysis
                         _log_error_detail({
                             "request_id": request_id,
                             "timestamp": datetime.datetime.now().isoformat(),
-                            "error_subcategory": "429_key_cycle_attempt",
-                            "upstream_status": 429,
+                            "error_subcategory": f"{cycle_reason}_key_cycle_attempt",
+                            "upstream_status": resp.status,
                             "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
@@ -901,10 +910,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             "total_keys": NUM_KEYS,
                             "upstream_error_body_full": err_str[:3000],
                         })
-                        _log("KEY-429", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
-                        continue  # Try next key in round-robin
+                        _log("KEY-CYCLE", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → {resp.status} ({cycle_reason}), cycling to next key")
+                        continue  # Try next key
 
-                    # ─── Non-429 errors: resilience retry (unchanged logic) ───
+                    # ─── Non-cycling errors: resilience retry ───
 
                     # Resilience retry for 401/403 AuthenticationError:
                     should_resilience_retry = (
@@ -1159,10 +1168,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 })
                 continue  # Try next key
 
-        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors/timeout ───
-        # This means every key group failed. Could be 429 (quota exhausted), timeout, or connection error.
-        # Classify the failure type for more precise error reporting.
-        all_429 = all(a.get("error_type") in (None, "429") for a in key_cycle_attempts)
+        # ─── All keys exhausted ───
+        # Every key in this variant failed. Classify the failure type for precise error reporting.
+        # Error types: "429_rate_limit", "500_internal_server_error", "502_bad_gateway",
+        # "SocketTimeout", "ConnectionRefusedError", "ConnectionError"
+        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit") for a in key_cycle_attempts)
+        has_500 = any(a.get("error_type") == "500_internal_server_error" for a in key_cycle_attempts)
+        has_502 = any(a.get("error_type") == "502_bad_gateway" for a in key_cycle_attempts)
         has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
         has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError") for a in key_cycle_attempts)
         elapsed_ms = int((time.time() - t_start) * 1000)
@@ -1171,6 +1183,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             error_subcategory = "429_all_keys_exhausted"
             _log("ALL-KEYS-429", f"All {NUM_KEYS} keys 429 for {mapped_model} v{start_variant_idx+1}. "
                                  f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+        elif has_500 or has_502:
+            error_subcategory = "all_keys_500_or_502"
+            _log("ALL-KEYS-500/502", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes 500/502). "
+                                     f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]} "
+                                     f"elapsed={elapsed_ms}ms")
         elif has_timeout:
             error_subcategory = "all_keys_timeout_or_429"
             _log("ALL-KEYS-TIMEOUT", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes timeouts). "
@@ -1188,15 +1205,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "model": mapped_model,
             "total_keys": NUM_KEYS,
             "key_cycle_attempts": key_cycle_attempts,
-            "key_cycle_attempt_types": [a.get("error_type", "429") for a in key_cycle_attempts],
+            "key_cycle_attempt_types": [a.get("error_type", "429_rate_limit") for a in key_cycle_attempts],
             "elapsed_since_request_start_ms": elapsed_ms,
             "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
             "all_429": all_429,
+            "has_500": has_500,
+            "has_502": has_502,
             "has_timeout": has_timeout,
             "has_connection_error": has_conn_err,
             "upstream_error_body_full": json.dumps(key_cycle_attempts)[:3000],
         })
-        metrics["status"] = 502 if has_timeout or has_conn_err else 429
+        metrics["status"] = 429 if all_429 else 502
         metrics["error_type"] = error_subcategory
         metrics["key_cycle_attempts"] = key_cycle_attempts
         metrics["key_cycle_attempt_types"] = [a.get("error_type", "429") for a in key_cycle_attempts]

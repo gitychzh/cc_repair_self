@@ -6,7 +6,7 @@
     "HTTP_PROXY": "http://127.0.0.1:7880",
     "NO_PROXY": "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192",
-    "API_TIMEOUT_MS": "300000",
+    "API_TIMEOUT_MS": "600000",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "155000"
   },
   "permissions": {
