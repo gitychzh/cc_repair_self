@@ -23,7 +23,7 @@ Proxy does **format conversion + key round-robin (429 cycling) + metrics logging
 | glm5.1_uni41001 | :41001 | Backup glm5.1 | 7 key groups × 1000 deploys = 7000, ulimits nofile=8192, memory 2GiB |
 | dsv4p_uni42001 | :42001 | dsv4p | 7 key groups × 11 deploys = 77, ulimits nofile=4096, memory 2GiB |
 | auth_to_api_40001 | :40001 | Proxy (opc_uname) | R19 gateway package + key round-robin ✅ |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R20 rebuild in progress (base image downloading) |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R20 key round-robin + timeout logging ✅ deployed 10:38 |
 | cc_postgres | :5432 | LiteLLM DB | — |
 
 ## Deploy Method
@@ -75,13 +75,14 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | 429 errors | 1 | 49 (token quota burst) | TBD | R19 key cycling should reduce |
 | P99 TTFB | 65.0s | 49.8s | TBD | — |
 
-### opc2_uname 40001 (R20 deploying)
+### opc2_uname 40001 (R20 deployed)
 | Metric | 06-09 | 06-10 | 06-11 | 06-12 (R20) | Trend |
 |--------|-------|-------|-------|-------------|-------|
-| Total requests | 638 | 771 | 248 | TBD | — |
-| Stable success rate | 100% | 99.9% | 99.6% | TBD | — |
-| 429 errors | 0 | 0 | 1 | TBD | — |
-| TTFB p99 | 42.5s | 56.8s | 39.8s | TBD | — |
+| Total requests | 638 | 771 | 248 | 237 | — |
+| Stable success rate | 100% | 99.9% | 99.6% | 89.5% (100% excl deploy transition) | 429=0, 502=deploy transition |
+| 429 errors | 0 | 0 | 1 | 0 | key cycling working ✅ |
+| TTFB p99 | 42.5s | 56.8s | 39.8s | 71.6s | — |
+| Key round-robin active | — | — | — | ✅ 24 requests, 100% success | R19/R20 key cycling verified |
 
 ## Key Issues & Notes
 
@@ -128,8 +129,11 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 ### 3. Proxy rebuild on opc2_uname (R20)
 - opc2_uname proxy was running old code without key round-robin
-- Deploying R19+ proxy with key round-robin to opc2_uname
+- Deploying R19+ proxy with key round-robin + timeout logging enhancement (R19.1)
 - LiteLLM 41003 already restarted with new 10-variant config ✅
+- Proxy deployed at 10:38, key round-robin verified ✅
+- 6x 400 "Invalid model name" errors during transition window (09:55~10:23) — old proxy sent `glm5.1` to new LiteLLM (only accepts `glm5.1k1~k7`)
+- After new proxy deployed: 24 requests, 100% success, 2x 429 cycling events worked correctly
 
 ## R19 Changes (2026-06-12)
 
@@ -170,7 +174,8 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39%), reservations 512M→768M | dsv4p OOM prevented ✅ |
 | R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented ✅ |
 | R19 | Key round-robin (7 key groups per model, proxy 429 cycling); LiteLLM num_retries 8→2/5→2; RateLimitErrorAllowedFails 5→1/3→1; /v1/models filters key groups; Deploy crash on opc_uname (wrong order) → lesson learned | Key cycling active ✅, /v1/models canonical only ✅ |
-| R20 | 41003 variant reduction 1000→10 per key group (7000→70 deploys); Resource savings: nofile 8192→2048, memory 2GiB→1GiB, CPU 2→1; 41001 BACKUP unchanged | Deploying on opc2_uname first, verify ≥2 hours |
+| R20 | 41003 variant reduction 1000→10 per key group (7000→70 deploys); Resource savings: nofile 8192→2048, memory 2GiB→1GiB, CPU 2→1; 41001 BACKUP unchanged | Deploying on opc2_uname, key cycling verified ✅ |
+| R19.1 | socket.timeout单独捕获（3路径）+ timeout_exceeded_by_ms字段 + 全key失败分类(429 vs timeout vs conn) + 2h CronCreate优化任务 | Deployed on opc2_uname proxy ✅, no timeout events observed yet |
 
 ## 10 Active Variant Model IDs (41003 PRIMARY, R20)
 
