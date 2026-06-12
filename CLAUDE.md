@@ -129,11 +129,14 @@ configs/
     proxy.py                      # 入口（启动gateway HTTPServer）
     gateway/                      # R23.1 模块化gateway包
       __init__.py                 # 包导出
+      app.py                      # 入口（ThreadedHTTPServer + main）
       config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type()
       handlers.py                 # 请求调度（CC→_handle_messages, OpenAI→_handle_openai_with_cycling）
-      upstream.py                 # 共享v×k cycling + error handling（UpstreamResult + execute_request）
+      upstream.py                 # 共享v×k cycling + variant fallback + error handling（UpstreamResult + execute_request）
+      converters.py               # Anthropic↔OpenAI格式转换 + 文本估算
+      stream.py                   # SSE流转换（Anthropic格式）
       error_mapping.py            # 错误格式转换（Anthropic convert_error + OpenAI format_*）
-      format_converter.py         # Anthropic→OpenAI格式转换
+      logger.py                   # 日志（_log, _log_metrics, _log_error_detail）
   claude/
     settings-opc_uname.json        # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22)
     settings-opc2_uname.json       # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22, 但opc2_uname本机仍=300000需同步)
