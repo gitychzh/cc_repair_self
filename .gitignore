@@ -20,3 +20,11 @@ __pycache__/
 
 # Local backups (deployment state snapshots, not for sharing)
 backups/
+
+# Deleted LiteLLM configs (41003/42001, removed in R23)
+configs/litellm-glm51-test/
+configs/litellm-dsv4p/
+
+# Old plan files (auto-generated, not needed)
+PLAN.md
+plan.md
