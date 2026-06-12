@@ -47,7 +47,7 @@
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
 | frontend model_name (agent-facing) | `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm` — R23.1 suffix system; backward compat: `glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc |
 | LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7` — proxy精确指定variant+key |
-| Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001/40002` |
+| Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001` |
 | port assignments | 41001=unified(ms_uni41001) |
 
 ### 10 Variant Model IDs（R21, ms_uni41001）
@@ -115,7 +115,7 @@
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（4个容器：cc_postgres, ms_uni41001, auth_to_api_40001/40002）
+  docker-compose.yml       # Docker编排（3个容器：cc_postgres, ms_uni41001, auth_to_api_40001）
   .env.template             # 环境变量模板
   litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 = 70 dep）
   postgres/init-db.sh             # PostgreSQL初始化脚本

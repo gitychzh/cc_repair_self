@@ -1,15 +1,16 @@
-# Deploy Status — opc_uname + opc2_uname (R24, 2026-06-12)
+# Deploy Status — opc_uname + opc2_uname (R24.2, 2026-06-12)
 
-## Architecture (R24 — glm5.1 only)
+## Architecture (R24.2 — glm5.1 only, single proxy container)
 ```
-Agent(CC/_cc)      → 40001/40002(proxy, Anthropic format conversion + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
-Agent(OpenClaw/_ol) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
-Agent(OpenCode/_oc) → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
-Agent(Hermes/_hm)  → 40001/40002(proxy, OpenAI passthrough + v×k 2D round-robin + variant fallback + error cycling)
-    → 41001 ms_uni41001 LiteLLM → ModelScope [UNIFIED, glm5.1 only]
+                    :40001 proxy gateway (R24.2 multi-agent unified)
+                    ├── _cc (Claude Code)  → /v1/messages → Anthropic→OpenAI conversion → upstream.py v×k cycling + variant fallback
+                    ├── _ol (OpenClaw)     → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    ├── _oc (OpenCode)     → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    ├── _hm (Hermes)       → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
+                    ├── _cx (Codex CLI)    → /v1/responses → Responses↔Chat Completions conversion → upstream.py v×k cycling + variant fallback [R24.2 NEW]
+                    │
+                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) [UNIFIED, glm5.1 only]
+                    → ModelScope API
 ```
 
 Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant fallback (R23) + error cycling (429/500/502) + metrics logging** for ALL agent types. OpenAI agents get passthrough (no format conversion) but same error cycling + variant fallback protection. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
@@ -24,13 +25,14 @@ Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant
 
 **R24: All agents route to glm5.1 only**. opus/sonnet/haiku/mini aliases all → glm5.1 (dsv4p removed entirely).
 
-## Containers (R24)
+## Containers (R24.2)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | Unified LiteLLM | 7 groups × 10 variants = 70 dep (glm5.1 only), ulimits nofile=2048, memory 1GiB |
-| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R24 variant×key 2D round-robin + variant fallback → ms_uni41001 |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R24 variant×key 2D round-robin + variant fallback → ms_uni41001 |
+| auth_to_api_40001 | :40001 | Proxy (all agents) | R24.2 multi-agent gateway: CC/_cc + OpenClaw/_ol + OpenCode/_oc + Hermes/_hm + Codex/_cx |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (only litellm_glm51 DB) |
+
+**40002 removed from仓库 compose (R24)**: 单 proxy 容器处理所有 agent 格式。但本机 `/opt/cc-infra/docker-compose.yml` 仍保留旧版含 40002，当前 4 个容器运行。待后续同步清理。
 
 ## Deploy Method (R21+)
 ```bash
@@ -38,7 +40,7 @@ Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant
 docker restart ms_uni41001
 
 # proxy change → rebuild (need new Dockerfile build)
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
 
 # Full rebuild
 cd /opt/cc-infra && docker compose up -d --force-recreate
@@ -52,15 +54,15 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 **Deploy order for R21 on opc_uname**:
 1. Copy new litellm-glm51/config.yaml → /opt/cc-infra/litellm-glm51/config.yaml
 2. Copy new docker-compose.yml → /opt/cc-infra/docker-compose.yml
-3. Copy new proxy.py → /opt/cc-infra/proxy/proxy.py
+3. Copy new gateway/ package → /opt/cc-infra/proxy/gateway/
 4. Start ms_uni41001: `cd /opt/cc-infra && docker compose up -d ms_uni41001`
 5. Wait for ms_uni41001 to become healthy: `docker ps` check
-6. Rebuild proxy: `cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002`
+6. Rebuild proxy: `cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001`
 7. Verify: curl test glm5.1, check /v1/models
 
 **⚠️ opc2_uname NOT YET DEPLOYED** — will only deploy after opc_uname proven stable for ≥2 hours.
 
-**opc_uname R24 DEPLOYED 2026-06-12**: All containers healthy (4 containers only). Curl test glm5.1_cc returns 200. dsv4p removed entirely.
+**opc_uname R24.2 DEPLOYED 2026-06-12**: 3 containers healthy (40002 removed). Curl test glm5.1_cc + glm5.1_cx returns 200. Codex CLI connectivity verified ✅
 
 ## Current Parameters (R24)
 
@@ -88,14 +90,14 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ## opc2_uname Link Verification (R24.2, 2026-06-12)
 
 **opc2_uname 所有配置与仓库完全一致** ✅：
-- gateway module: all 9 files synced (app.py, config.py, converters.py, error_mapping.py, handlers.py, __init__.py, logger.py, stream.py, upstream.py)
-- docker-compose.yml: R24 version (4 containers only, no dsv4p env vars)
+- gateway module: all 10 files synced (config.py, converters.py, codex.py, error_mapping.py, handlers.py, __init__.py, logger.py, stream.py, upstream.py + proxy.py entry point)
+- docker-compose.yml: R24.2 version (3 containers only, 40002 removed, no dsv4p env vars)
 - litellm-glm51/config.yaml: R24 version (70 dep glm5.1 only)
-- 4个容器全部 healthy (ms_uni41001, cc_postgres, auth_to_api_40001, auth_to_api_40002)
+- 3个容器全部 healthy (ms_uni41001, cc_postgres, auth_to_api_40001)
 - Proxy env vars: NUM_KEYS=7, NUM_VARIANTS_GLM51=10, PROXY_TIMEOUT=300
 - CC settings.json: model=glm5.1_cc, API_TIMEOUT_MS=600000 ✅
 - curl test glm5.1_cc via 40001 returns 200 ✅
-- dsv4p model returns proper error (no longer supported) ✅
+- Codex CLI config: ~/.codex/config.toml → base_url=opc_uname:40001, model=glm5.1_cx, wire_api=responses ✅
 
 **R24.2: OpenAI agent 配置修复（opc2_uname 2026-06-12）**
 
@@ -103,13 +105,14 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 修复: 所有 OpenAI agent 改为通过 proxy gateway (40001) 路由：
 - OpenClaw: baseUrl 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_ol`
-- Hermes: base_url 从 `41001` → `40001`, default 从 `glm5.1` → `glm5.1_hm`, fallback → 40002
+- Hermes: base_url 从 `41001` → `40001`, default 从 `glm5.1` → `glm5.1_hm`, fallback → 40002（本机 40002 容器仍在运行，仓库 compose 已删除它，待后续同步清理）
 - OpenCode: baseURL 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_oc`
+
+⚠️ 注意: 仓库 R24 compose 已删除 40002 容器，但本机 `/opt/cc-infra/docker-compose.yml` 仍保留旧版含 40002 的配置。本机 4 个容器运行（ms_uni41001, cc_postgres, auth_to_api_40001, auth_to_api_40002）。需要后续同步本机 compose 到仓库版本。
 
 验证结果 ✅：
 - curl test glm5.1_ol via 40001 returns 200 ✅
 - curl test glm5.1_hm via 40001 returns 200 ✅
-- curl test glm5.1_hm via 40002 (fallback) returns 200 ✅
 - curl test glm5.1_oc via 40001 returns 200 ✅
 - Streaming passthrough 40001 _ol returns SSE chunks ✅
 - contextWindow 从 131072 → 170000（与 proxy /v1/models 一致）
@@ -261,7 +264,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R22 | Proxy 429+500+502 error cycling; LiteLLM num_retries=0 all allowed_fails=0; CC API_TIMEOUT_MS 600000 | DEPLOYED ✅ |
 | R23 | opc_uname: R21 gateway deployed+timeout cycling test ✅+variant fallback+retry-after=180s; opc2_uname: removed 41003/42001 containers | Config cleanup + gateway verified ✅ |
 | R23.1 | Multi-agent gateway refactoring: upstream.py shared module, AGENT_SUFFIXES (_cc/_ol/_oc/_hm), OpenAI error format, _handle_openai_with_cycling() | **DEPLOYED 2026-06-12 18:20 CST; CC/OpenClaw/OpenCode/Hermes all verified ✅** |
-| R24 | dsv4p removed entirely (70 dep→140 dep removed, 41003/42001 containers stopped+removed, config cleanup); CC settings model=glm5.1_cc; opc2_uname gateway synced | **DEPLOYED 2026-06-12; both machines verified ✅** | (R23.1: multi-agent gateway refactoring — upstream.py shared module + AGENT_SUFFIXES (_cc/_ol/_oc/_hm) + OpenAI error format + all agents verified)
+| R24.2 | Codex _cx Responses API support + 40002 container removed + proxy.py monolith deleted (2217 lines → gateway/ package); codex.py bidirectional conversion | **DEPLOYED 2026-06-12; CC/OpenClaw/OpenCode/Hermes/Codex all verified ✅** |
 
 ## 10 Variant Model IDs (ms_uni41001, R24 — glm5.1 only)
 
@@ -303,8 +306,9 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | `_ol` | OpenClaw | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
 | `_oc` | OpenCode | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
 | `_hm` | Hermes | OpenAI passthrough | /v1/chat/completions | ✅ 429/500/502/timeout |
+| `_cx` | Codex CLI | Responses↔Chat Completions conversion | /v1/responses | ✅ 429/500/502/timeout |
 
-Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`
+Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `glm5.1_cx`
 Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
 
 ### Test Results
@@ -325,4 +329,53 @@ Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
 7. **dsv4p removed from proxy config** ✅ (MODEL_UPSTREAMS, MODEL_MAP, VARIANT_IDS, THINKING_SUPPORT, etc.)
 8. **dsv4p env vars removed from docker-compose.yml** ✅ (LITELLM_URL_DSV4P, MODEL_INPUT_TOKEN_SAFETY_DSV4P, NUM_VARIANTS_DSV4P)
 9. **All aliases now → glm5.1** ✅ (haiku/mini/tier previously → dsv4p, now all → glm5.1)
-10. **Both machines rebuilt + verified** ✅ (4 containers healthy, curl glm5.1_cc returns 200)
+10. **Both machines rebuilt + verified** ✅ (3 containers healthy, curl glm5.1_cc returns 200)
+
+### R24.2: Codex _cx Responses API + Container Merge (2026-06-12)
+
+**Architecture change**: 40002 proxy container removed entirely. Single 40001 container now handles ALL 5 agent formats.
+
+1. **NEW `gateway/codex.py`** (~900 lines) — Responses API ↔ Chat Completions bidirectional conversion module
+   - `responses_to_chat_body()` — Converts Codex Responses API request → Chat Completions request
+     - Maps `instructions` → system message, `input` → messages array (string or array)
+     - Maps `function` type tools → Chat Completions tools format
+     - Maps `max_output_tokens` → `max_completion_tokens`
+   - `chat_to_responses()` — Converts Chat Completions response → Responses API response
+     - Creates `output[]` array with `message` (output_text) + `function_call` items
+     - Maps tool_calls → separate function_call items with `call_id`
+   - `stream_responses_passthrough()` — Converts Chat Completions SSE → Responses API named SSE events
+     - Emits: response.created, response.in_progress, response.output_item.added, response.content_part.added, response.output_text.delta, response.function_call_arguments.delta, etc.
+   - `handle_codex_responses()` — End-to-end handler (format convert → force-stream → execute_request → dispatch)
+   - `_collect_stream_to_responses()` — Collect forced stream → synthesize non-stream Responses API response
+
+2. **MODIFIED `gateway/config.py`** — Added `_cx` suffix
+   - `AGENT_SUFFIXES["_cx"] = {"name": "Codex", "format": "responses"}`
+   - `MODEL_MAP["glm5.1_cx"] = "glm5.1"` (no dsv4p_cx — dsv4p removed in R24)
+
+3. **MODIFIED `gateway/handlers.py`** — Added /v1/responses route
+   - `do_POST()` and `do_HEAD()` now handle `/v1/responses`
+   - `_handle_codex_responses()` → detect agent type → map model → delegate to codex module
+
+4. **MODIFIED `gateway/error_mapping.py`** — Responses API error formats
+   - `format_responses_error_all_keys_exhausted()` — flat format: `{"error": {"type", "code", "message"}}`
+   - `format_responses_error_upstream()` — upstream error in Responses API format
+
+5. **DELETED `proxy/proxy.py`** (2217 lines) — Old monolithic proxy, replaced by gateway/ package in R23.1
+
+6. **MODIFIED `docker-compose.yml`** — 40002 container removed
+   - Single proxy container (auth_to_api_40001) handles all formats
+   - 3 containers: cc_postgres, ms_uni41001, auth_to_api_40001
+
+7. **Bug fixes (R24.1 + R24.2)**:
+   - Usage extraction: `chunk_data.get("completion_tokens")` → `chunk_usage.get("completion_tokens")`
+   - stream_options for force-stream: Added `stream_options={"include_usage": True}` after `oai_body["stream"] = True` (was missing for non-stream Responses API requests → usage=0)
+
+### Test Results (R24.2)
+
+- **CC (_cc):** ✅ /v1/messages returns 200, streaming works
+- **OpenClaw/_ol, OpenCode/_oc, Hermes/_hm:** ✅ all passthrough formats verified
+- **Codex (_cx):** ✅ /v1/responses non-stream returns 200 with correct Responses API format
+- **Codex (_cx):** ✅ /v1/responses streaming returns SSE with named events
+- **Codex CLI:** ✅ connectivity verified (connects to opc_uname:40001, sends /v1/responses requests)
+- **40002 container:** ✅ removed (docker rm + --remove-orphans)
+- **proxy.py:** ✅ deleted from repo (replaced by gateway/ package)
