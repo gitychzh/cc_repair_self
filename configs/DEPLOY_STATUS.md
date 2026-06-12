@@ -62,7 +62,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 **⚠️ opc2_uname NOT YET DEPLOYED** — will only deploy after opc_uname proven stable for ≥2 hours.
 
-**opc_uname R24.2 DEPLOYED 2026-06-12**: 3 containers healthy (40002 removed). Curl test glm5.1_cc + glm5.1_cx returns 200. Codex CLI connectivity verified ✅
+**opc_uname R24.4 DEPLOYED 2026-06-12**: 3 containers healthy (40002 removed). Codex CLI end-to-end verified ✅ (exec mode: "echo hello world" → output "hello world"). All agent types (CC/OpenClaw/OpenCode/Hermes/Codex) functional.
 
 ## Current Parameters (R24)
 
@@ -265,6 +265,8 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R23 | opc_uname: R21 gateway deployed+timeout cycling test ✅+variant fallback+retry-after=180s; opc2_uname: removed 41003/42001 containers | Config cleanup + gateway verified ✅ |
 | R23.1 | Multi-agent gateway refactoring: upstream.py shared module, AGENT_SUFFIXES (_cc/_ol/_oc/_hm), OpenAI error format, _handle_openai_with_cycling() | **DEPLOYED 2026-06-12 18:20 CST; CC/OpenClaw/OpenCode/Hermes all verified ✅** |
 | R24.2 | Codex _cx Responses API support + 40002 container removed + proxy.py monolith deleted (2217 lines → gateway/ package); codex.py bidirectional conversion | **DEPLOYED 2026-06-12; CC/OpenClaw/OpenCode/Hermes/Codex all verified ✅** |
+| R24.3 | Fix Codex streaming: merge reasoning_content+content into output_text delta (GLM-5.1 sends both in same delta chunk, content="" during reasoning was falsy → 0 text) | **DEPLOYED ✅; streaming delta events now include reasoning** |
+| R24.4 | Fix Codex tools: filter function(no-name) + non-function types; Codex CLI 0.134.0 sends 10 tools without name property → LiteLLM 400; skip tool_choice if all tools skipped | **DEPLOYED ✅; Codex CLI end-to-end verified: "echo hello world" → output "hello world"** |
 
 ## 10 Variant Model IDs (ms_uni41001, R24 — glm5.1 only)
 
@@ -366,16 +368,19 @@ Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
    - Single proxy container (auth_to_api_40001) handles all formats
    - 3 containers: cc_postgres, ms_uni41001, auth_to_api_40001
 
-7. **Bug fixes (R24.1 + R24.2)**:
+7. **Bug fixes (R24.1 + R24.2 + R24.3 + R24.4)**:
    - Usage extraction: `chunk_data.get("completion_tokens")` → `chunk_usage.get("completion_tokens")`
    - stream_options for force-stream: Added `stream_options={"include_usage": True}` after `oai_body["stream"] = True` (was missing for non-stream Responses API requests → usage=0)
+   - **R24.3: Streaming reasoning merge** — GLM-5.1 sends `reasoning_content` and `content` in the same delta chunk. During reasoning, `content=""` was falsy in `if text_delta:` check, causing ALL output_text.delta events to be skipped (201 tokens generated but 0 text in stream). Fixed by merging `reasoning_content + content` into `merged_delta` for Codex `output_text` events. Responses API has no separate reasoning output type — Codex needs full model output as `output_text`. Same fix applied to `_collect_stream_to_responses()` for non-stream mode.
+   - **R24.4: Codex tools filtering** — Codex CLI 0.134.0 sends 10 internal tools (shell etc.) as `function` type WITHOUT `name` property → LiteLLM 400 `'name' is a required property`. Fixed by filtering out function tools without name, skipping non-function types (web_search, file_search, code_interpreter, etc. — not supported by ModelScope). If all tools skipped, also skip `tool_choice`.
 
-### Test Results (R24.2)
+### Test Results (R24.4 — FINAL)
 
-- **CC (_cc):** ✅ /v1/messages returns 200, streaming works
+- **CC (_cc):** ✅ /v1/messages returns 200, streaming + non-stream work
 - **OpenClaw/_ol, OpenCode/_oc, Hermes/_hm:** ✅ all passthrough formats verified
-- **Codex (_cx):** ✅ /v1/responses non-stream returns 200 with correct Responses API format
-- **Codex (_cx):** ✅ /v1/responses streaming returns SSE with named events
-- **Codex CLI:** ✅ connectivity verified (connects to opc_uname:40001, sends /v1/responses requests)
+- **Codex (_cx):** ✅ /v1/responses non-stream returns 200 with reasoning+content merged in output_text
+- **Codex (_cx):** ✅ /v1/responses streaming returns SSE with named events + reasoning+content merged delta
+- **Codex CLI:** ✅ end-to-end verified — `codex exec "echo hello world"` → output "hello world"
+- **Codex CLI:** ✅ `codex exec "what is 2+2"` → output "4"
 - **40002 container:** ✅ removed (docker rm + --remove-orphans)
 - **proxy.py:** ✅ deleted from repo (replaced by gateway/ package)
