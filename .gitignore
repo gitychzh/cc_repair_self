@@ -1,5 +1,6 @@
 # Logs and temp files
 *.log
+claude_output.log
 
 # Round artifacts (generated, not needed)
 round_*
@@ -11,12 +12,16 @@ configs/.env
 
 # Python cache
 __pycache__/
+*.pyc
+
+# Proxy runtime logs (not for git)
+configs/logs/proxy/
+
+# Session analysis logs (temporary)
+logs/
 
 # OS files
 .DS_Store
-
-# Allow analysis data
-!logs/round_*_analysis.json
 
 # Local backups (deployment state snapshots, not for sharing)
 backups/
@@ -28,3 +33,6 @@ configs/litellm-dsv4p/
 # Old plan files (auto-generated, not needed)
 PLAN.md
 plan.md
+
+# Cross-optimize requests (outdated after each round)
+cross_optimize/
