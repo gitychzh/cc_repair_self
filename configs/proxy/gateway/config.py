@@ -40,10 +40,15 @@ def _ensure_url_path(url: str, path: str) -> str:
 
 # ─── Per-model upstream routing ──────────────────────────────────────────
 # R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed entirely)
+# R26: Added LiteLLM fallback — when primary LiteLLM container unavailable,
+#   proxy auto-switches to fallback LiteLLM URL (ms_uni41002).
+#   Only triggers on ConnectionRefused (container down), NOT on 429/500/502 (ModelScope issues).
 MODEL_UPSTREAMS = {
     "glm5.1": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
         "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
+        "fallback_chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51_FALLBACK", "http://ms_uni41002:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "fallback_models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51_FALLBACK", "http://ms_uni41002:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"

@@ -9,18 +9,23 @@
 ## 架构
 
 ```
-                    :40001 proxy gateway (R24.4 multi-agent)
-                    ├── _cc (Claude Code) → /v1/messages → Anthropic→OpenAI转换 → upstream.py v×k cycling + variant fallback
-                    ├── _ol (OpenClaw)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
-                    ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
-                    ├── _hm (Hermes)      → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback
-                    ├── _cx (Codex CLI)   → /v1/responses → Responses↔Chat Completions转换 → upstream.py v×k cycling + variant fallback
+                    :40001 proxy gateway (R24.4 multi-agent, PRIMARY)
+                    ├── _cc (Claude Code) → /v1/messages → Anthropic→OpenAI转换 → upstream.py v×k cycling + variant fallback + LiteLLM fallback
+                    ├── _ol (OpenClaw)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback + LiteLLM fallback
+                    ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback + LiteLLM fallback
+                    ├── _hm (Hermes)      → /v1/chat/completions → OpenAI passthrough → upstream.py v×k cycling + variant fallback + LiteLLM fallback
+                    ├── _cx (Codex CLI)   → /v1/responses → Responses↔Chat Completions转换 → upstream.py v×k cycling + variant fallback + LiteLLM fallback
                     │
-                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) [UNIFIED]
+                    :40002 proxy gateway (R25 FALLBACK — identical config, same LiteLLM fallback)
+                    ├── Same agent types, same format conversion, same v×k cycling, same LiteLLM fallback
+                    ├── 40001重启/不可用时，agents自动fallback到40002
+                    │
+                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) [PRIMARY]
+                    → :41002 LiteLLM ms_uni41002 (glm5.1v1k1~v10k7 = 70 dep) [FALLBACK — identical config, same keys]
                     → ModelScope API
 ```
 
-核心原则：**proxy gateway 做格式转换(CC) / 直通(OpenAI agents) + metrics logging + variant×key 2D round-robin + variant fallback (R23) + error cycling（所有agent类型共享upstream.py的v×k cycling和错误处理，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy gateway 做格式转换(CC) / 直通(OpenAI agents) + metrics logging + variant×key 2D round-robin + variant fallback (R23) + LiteLLM fallback (R26) + error cycling（所有agent类型共享upstream.py的v×k cycling和错误处理，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s。当所有key都是ConnectionRefused/ConnectionError/SocketTimeout→自动尝试fallback LiteLLM容器ms_uni41002），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
 
 **Agent Suffix System (R23.1):**
 - 模型ID格式：`{base_model}{agent_suffix}` → 如 `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `glm5.1_cx`
@@ -28,7 +33,7 @@
 - `_cc` → Anthropic格式（/v1/messages），需要格式转换 + force-stream-for-nonstream
 - `_ol/_oc/_hm` → OpenAI格式（/v1/chat/completions），直通passthrough，不需要force-stream-for-nonstream
 - `_cx` → Responses格式（/v1/responses），Responses↔Chat Completions双向转换 + force-stream-for-nonstream
-- 所有agent共享相同的error cycling + variant fallback：429/500/502 key cycling + timeout cycling + thinking_budget fix retry
+- 所有agent共享相同的error cycling + variant fallback + LiteLLM fallback：429/500/502 key cycling + timeout cycling + thinking_budget fix retry + LiteLLM connection fallback (R26)
 - 错误格式根据agent类型：_cc返回Anthropic格式错误，_ol/_oc/_hm返回OpenAI格式错误，_cx返回Responses格式错误
 
 **Variant×Key 2D Round-Robin + Variant Fallback (R21→R23) 机制：**
@@ -41,6 +46,13 @@
 - 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 cycling 信息
 - 不cycling的错误：400 input overflow、400 inappropriate content、400 thinking_budget InvalidParameter、401/403 AuthenticationError
 
+**LiteLLM Fallback (R26) 机制：**
+- 当proxy的所有key cycling尝试都是ConnectionRefused/ConnectionError/SocketTimeout（说明LiteLLM容器不可用）
+- Proxy自动切换到fallback LiteLLM URL（ms_uni41002:4000），从同一(variant_idx, key_idx)重新执行完整的key cycling
+- 只在纯连接错误时触发 — 429/500/502不触发（ModelScope quota是per-key的，同key在不同LiteLLM容器=同quota，换容器无意义）
+- 混合错误（429+connection）不触发 — 429证明LiteLLM容器还活着，只是quota耗尽
+- Fallback LiteLLM也失败 → 返回all_keys_exhausted错误给agent
+
 ## 不可变更约束（NEVER CHANGE）
 
 | 约束 | 原因 |
@@ -49,10 +61,10 @@
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
 | frontend model_name (agent-facing) | `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `glm5.1_cx` — R23.1/R24 suffix system; backward compat: `glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc |
 | LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7` — proxy精确指定variant+key |
-| Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001` |
-| port assignments | 41001=unified(ms_uni41001) |
+| Docker container names | `ms_uni41001`, `ms_uni41002`, `cc_postgres`, `auth_to_api_40001`, `auth_to_api_40002` |
+| port assignments | 41001=unified(ms_uni41001,PRIMARY), 41002=unified(ms_uni41002,FALLBACK), 40001=proxy(primary), 40002=proxy(fallback) |
 
-### 10 Variant Model IDs（R21, ms_uni41001）
+### 10 Variant Model IDs（R21, ms_uni41001 + ms_uni41002）
 
 **GLM-5.1 (10 variants):**
 `ZHIPUAI/GLM-5.1`, `ZHIPUAI/GLm-5.1`, `ZHIPUAI/GlM-5.1`, `ZHIPUAI/Glm-5.1`, `ZHIPUAI/gLM-5.1`, `ZHIPUAI/gLm-5.1`, `ZHIPUAI/glM-5.1`, `ZHIPUAI/glm-5.1`, `ZHIPUAi/GLM-5.1`, `ZHIPUAi/GLm-5.1`
@@ -72,6 +84,7 @@
 - **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。ModelScope对每种错误（429/500/502）都扣quota，所以必须在proxy层做error cycling而非让LiteLLM重试同一deployment。
 - **多CC进程加速token quota耗尽** — Jun 12 429灾难：5个CC进程同时消耗quota→7key全429→proxy 7×429 cycling→返回rate_limit_error(retry-after=30s)→CC每30秒重试→每次重试浪费7个quota→23次ALL-KEYS-429×7=161个quota浪费→恶性循环。R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
 - **proxy超时日志详细记录** — socket.timeout现在单独捕获（不再笼统归为ConnectionError），记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms（超了PROXY_TIMEOUT多少）。key cycling时的timeout也单独记录到error_detail。stream和collect_stream的超时同样详细记录。全key失败时区分429（rate_limit_error）vs timeout/connection（502 api_error），避免529→CC auto-compact灾难。
+- **LiteLLM fallback只在连接错误时触发(R26)** — 所有key都是ConnectionRefused/ConnectionError/SocketTimeout→LiteLLM容器不可用→自动尝试41002。429/500/502不触发（ModelScope quota是per-key的，41001和41002用同一组key=同quota）。混合错误也不触发（429证明LiteLLM还活着）。
 
 ## 可调整参数（有数据支撑才能改）
 
@@ -94,7 +107,7 @@
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
 | API_TIMEOUT_MS | 600000 | 300000-1200000 | CC→proxy HTTP总超时。R21改为600000(10min)，CC SDK默认值。数据：proxy cycling(7×2s 429) + 成功key(210s) = 224s，在600s内安全 |
 
-### LiteLLM router_settings (41001 ms_uni41001, 7 groups × 10 dep each = 70 dep)
+### LiteLLM router_settings (41001/41002 ms_uni41001/ms_uni41002, 7 groups × 10 dep each = 70 dep)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
@@ -117,19 +130,19 @@
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（3个容器：cc_postgres, ms_uni41001, auth_to_api_40001）
+  docker-compose.yml       # Docker编排（5个容器：cc_postgres, ms_uni41001, ms_uni41002, auth_to_api_40001, auth_to_api_40002）
   .env.template             # 环境变量模板
-  litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 = 70 dep）
-  postgres/init-db.sh             # PostgreSQL初始化脚本
+  litellm-glm51/config.yaml       # 41001+41002 LiteLLM配置（10v×7k glm5.1 = 70 dep，两个容器共享同一config.yaml）
+  postgres/init-db.sh             # PostgreSQL初始化脚本（创建 litellm_glm51 + litellm_glm51_fallback DBs）
   proxy/
     Dockerfile                    # 镜像构建
     gateway_main.py               # 入口（启动gateway HTTPServer）
-    gateway/                      # R23.1+R24 模块化gateway包
+    gateway/                      # R23.1+R24+R26 模块化gateway包
       __init__.py                 # 包导出
-      app.py                      # 入口（ThreadedHTTPServer + main）
-      config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type()
+      app.py                      # 入口（ThreadedHTTPServer + main, 显示primary+fallback LiteLLM URL）
+      config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type() + fallback upstream URLs (R26)
       handlers.py                 # 请求调度（CC→_handle_messages, OpenAI→_handle_openai_with_cycling, Codex→_handle_codex_responses）
-      upstream.py                 # 共享v×k cycling + variant fallback + error handling（UpstreamResult + execute_request）
+      upstream.py                 # 共享v×k cycling + variant fallback + LiteLLM fallback (R26) + error handling（UpstreamResult + execute_request）
       converters.py               # Anthropic↔OpenAI格式转换 + 文本估算
       codex.py                    # R24: Responses↔Chat Completions双向转换 + streaming + error format
       stream.py                   # SSE流转换（Anthropic格式）
@@ -140,9 +153,10 @@ configs/
     settings-opc2_uname.json       # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22, 但opc2_uname本机仍=300000需同步)
     statusline-command-opc_uname.sh / statusline-command.sh
   agents/                          # R24: Agent 配置模板（必须通过 proxy gateway，不能直连 LiteLLM）
-    openclaw-opc2_uname.json       # OpenClaw → proxy:40001, model=glm5.1_ol
-    hermes-opc2_uname.yaml         # Hermes → proxy:40001, model=glm5.1_hm
-    opencode-opc2_uname.jsonc      # OpenCode → proxy:40001, model=glm5.1_oc
+    openclaw-opc2_uname.json       # OpenClaw → proxy:40001 primary, 40002 fallback, model=glm5.1_ol
+    hermes-opc2_uname.yaml         # Hermes → proxy:40001 primary, 40002 fallback, model=glm5.1_hm
+    opencode-opc2_uname.jsonc      # OpenCode → proxy:40001 primary, 40002 fallback, model=glm5.1_oc
+    codex-opc2_uname.toml          # Codex → proxy:40001 primary, 40002 fallback (manual switch), model=glm5.1_cx
   DEPLOY_STATUS.md                 # 当前部署状态
 scripts/
   backup_config.sh / deploy.sh / health_check.sh / restart_claude.sh / rollback.sh / sync_config.sh / ts_keepalive.sh
@@ -152,7 +166,7 @@ scripts/
 
 | 文件 | 路径 | 修改后需 |
 |------|------|----------|
-| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001` |
+| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001 ms_uni41002`（两个容器共享同一配置文件） |
 | 转换代理 | `/opt/cc-infra/proxy/gateway/` (模块包: config.py, handlers.py, upstream.py, error_mapping.py, converters.py, stream.py, app.py, logger.py) | rebuild + recreate proxy容器 |
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
@@ -163,18 +177,24 @@ scripts/
 | OpenCode配置 | `~/.config/opencode/opencode.jsonc` | 重启opencode进程 |
 | Codex配置 | `~/.codex/config.toml` | 重启codex进程 |
 
-**⚠️ 所有 OpenAI agent（_ol/_oc/_hm）必须通过 proxy gateway (40001) 而不能直连 LiteLLM (41001)！** LiteLLM 的 model_list 只有 v×k 路由名（glm5.1v1k1~v10k7），没有 `glm5.1` 别名。直连 41001 发送 `model=glm5.1` 会返回 400 Invalid model name。Proxy gateway 负责 model name ���射（glm5.1_ol→glm5.1→v×k routing）+ error cycling + variant fallback。
+**⚠️ 所有 OpenAI agent（_ol/_oc/_hm）必须通过 proxy gateway (40001/40002) 而不能直连 LiteLLM (41001/41002)！** LiteLLM 的 model_list 只有 v×k 路由名（glm5.1v1k1~v10k7），没有 `glm5.1` 别名。直连 41001 发送 `model=glm5.1` 会返回 400 Invalid model name。Proxy gateway 负责 model name 映射（glm5.1_ol→glm5.1→v×k routing）+ error cycling + variant fallback + LiteLLM fallback。
 
 ## 重启命令
 
 ```bash
-# LiteLLM 配置变更（ms_uni41001）
+# LiteLLM 配置变更（ms_uni41001 + ms_uni41002 共享同一 config.yaml）
+docker restart ms_uni41001 ms_uni41002
+
+# 只重启主 LiteLLM
 docker restart ms_uni41001
 
-# proxy.py 变更（需要重建镜像）
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+# 只重启 fallback LiteLLM
+docker restart ms_uni41002
 
-# 全量重建（包括容器名变更 glm5.1_uni41001 → ms_uni41001）
+# proxy.py 变更（需要重建镜像 — 同时重建40001和40002）
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
+
+# 全量重建（5个容器）
 cd /opt/cc-infra && docker compose up -d --force-recreate
 
 # Claude Code 重启
@@ -196,31 +216,54 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ## 测试请求
 
 ```bash
-# Anthropic格式 — CC (_cc)
+# Anthropic格式 — CC (_cc) via 40001 (PRIMARY)
 curl -s -X POST http://127.0.0.1:40001/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: sk-litellm-local" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# Anthropic格式 — CC (_cc 显式suffix)
+# Anthropic格式 — CC (_cc 显式suffix) via 40001
 curl -s -X POST http://127.0.0.1:40001/v1/messages \
   -H "Content-Type: application/json" \
   -H "x-api-key: sk-litellm-local" \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"glm5.1_cc","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# OpenAI格式 — OpenClaw/OpenCode/Hermes (_ol/_oc/_hm)
+# Anthropic格式 — CC (_cc) via 40002 (FALLBACK, R25)
+curl -s -X POST http://127.0.0.1:40002/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: sk-litellm-local" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
+
+# OpenAI格式 — OpenClaw/OpenCode/Hermes (_ol/_oc/_hm) via 40001
 curl -s -X POST http://127.0.0.1:40001/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-litellm-local" \
   -d '{"model":"glm5.1_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# Responses格式 — Codex CLI (_cx)
+# OpenAI格式 — via 40002 (FALLBACK)
+curl -s -X POST http://127.0.0.1:40002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-litellm-local" \
+  -d '{"model":"glm5.1_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
+
+# Responses格式 — Codex CLI (_cx) via 40001
 curl -s -X POST http://127.0.0.1:40001/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-litellm-local" \
   -d '{"model":"glm5.1_cx","input":"test","max_output_tokens":50}'
+
+# Responses格式 — Codex CLI (_cx) via 40002 (FALLBACK)
+curl -s -X POST http://127.0.0.1:40002/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-litellm-local" \
+  -d '{"model":"glm5.1_cx","input":"test","max_output_tokens":50}'
+
+# LiteLLM 直连健康检查（监控用，不要用/health）
+curl -s http://127.0.0.1:41001/health/liveliness
+curl -s http://127.0.0.1:41002/health/liveliness
 ```
 
 ## 网络代理（opc_uname端如需）

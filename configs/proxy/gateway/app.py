@@ -22,7 +22,12 @@ class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
 def main():
     server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
-    _log("START", f"GLM-5.1 gateway: {MODEL_UPSTREAMS['glm5.1']['chat_url']}")
+    _log("START", f"GLM-5.1 primary gateway: {MODEL_UPSTREAMS['glm5.1']['chat_url']}")
+    fb_url = MODEL_UPSTREAMS['glm5.1'].get('fallback_chat_url', '')
+    if fb_url:
+        _log("START", f"GLM-5.1 fallback gateway: {fb_url}")
+    else:
+        _log("START", f"GLM-5.1 fallback gateway: not configured")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

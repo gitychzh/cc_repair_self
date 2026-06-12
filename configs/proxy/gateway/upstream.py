@@ -418,12 +418,184 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
             continue  # Try next key
 
     # ─── All keys exhausted in start variant ───
+    # Check if all errors are connection errors → primary LiteLLM container may be down
+    all_conn_err = all(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "SocketTimeout") for a in key_cycle_attempts)
+
+    # ─── LiteLLM Fallback (R26) ───
+    # When ALL keys failed with connection errors (ConnectionRefused/ConnectionError/SocketTimeout),
+    # the primary LiteLLM container (ms_uni41001) is likely unavailable.
+    # Try the fallback LiteLLM container (ms_uni41002) with the same v×k cycling logic.
+    # Only trigger on connection errors — 429/500/502 are ModelScope issues (same keys = same quota).
+    litellm_fallback_success = False
+    litellm_fallback_url = None
+
+    if all_conn_err:
+        fallback_upstream = MODEL_UPSTREAMS.get(mapped_model, MODEL_UPSTREAMS.get(DEFAULT_UPSTREAM_MODEL, {}))
+        fallback_chat_url = fallback_upstream.get("fallback_chat_url")
+        if fallback_chat_url:
+            litellm_fallback_url = fallback_chat_url
+            _log("LITELLM-FALLBACK-START", f"All {NUM_KEYS} keys failed with connection errors on primary LiteLLM. "
+                                            f"Trying fallback LiteLLM: {fallback_chat_url}")
+            _log_error_detail({
+                "request_id": request_id,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": "litellm_fallback_triggered",
+                "primary_litellm_url": litellm_url,
+                "fallback_litellm_url": fallback_chat_url,
+                "primary_key_cycle_attempts": [a.get("error_type") for a in key_cycle_attempts],
+                "variant_idx": start_variant_idx,
+                "start_key_idx": start_key_idx,
+            })
+
+            # Re-execute full key cycling on fallback LiteLLM
+            parsed_fallback = urllib.parse.urlparse(fallback_chat_url)
+            for fb_attempt_idx in range(NUM_KEYS):
+                fb_key_idx = (start_key_idx + fb_attempt_idx) % NUM_KEYS
+                litellm_model_fb = f"{litellm_model_base}v{start_variant_idx+1}k{fb_key_idx+1}"
+                oai_body_fallback = dict(oai_body)
+                oai_body_fallback["model"] = litellm_model_fb
+
+                _log("LITELLM-FB-KEY", f"fallback attempt {fb_attempt_idx+1}/{NUM_KEYS}: "
+                                         f"v{start_variant_idx+1} k{fb_key_idx+1} → model={litellm_model_fb}")
+
+                auth_key_fb = handler.headers.get("x-api-key") or handler.headers.get("X-Api-Key") or LITELLM_KEY
+                headers_fb = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {auth_key_fb}",
+                    "Content-Length": str(len(json.dumps(oai_body_fallback).encode("utf-8"))),
+                }
+                oai_data_fb = json.dumps(oai_body_fallback).encode("utf-8")
+
+                try:
+                    conn_fb = handler._make_upstream_conn(parsed_fallback)
+                    conn_fb.request("POST", parsed_fallback.path, body=oai_data_fb, headers=headers_fb)
+                    resp_fb = conn_fb.getresponse()
+
+                    # Extract LiteLLM routing/quota headers
+                    for hdr_key, metrics_key in [
+                        ("x-litellm-model-id", "litellm_model_id"),
+                        ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
+                    ]:
+                        val_fb = resp_fb.getheader(hdr_key)
+                        if val_fb:
+                            metrics[metrics_key] = val_fb
+
+                    # Extract ModelScope quota headers
+                    for hdr_key, metrics_key in [
+                        ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
+                        ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
+                    ]:
+                        val_fb = resp_fb.getheader(hdr_key)
+                        if val_fb:
+                            metrics[metrics_key] = int(val_fb)
+
+                    if resp_fb.status >= 400:
+                        error_body_fb = resp_fb.read()
+                        try:
+                            error_json_fb = json.loads(error_body_fb)
+                        except Exception:
+                            error_json_fb = {"error": error_body_fb.decode("utf-8", errors="replace")}
+                        conn_fb.close()
+                        err_str_fb = json.dumps(error_json_fb)
+
+                        # 429/500/502 on fallback — continue cycling (same logic as primary)
+                        if resp_fb.status in (429, 500, 502):
+                            cycle_reason_fb = {
+                                429: "429_rate_limit_fallback",
+                                500: "500_internal_server_error_fallback",
+                                502: "502_bad_gateway_fallback",
+                            }.get(resp_fb.status, "unknown_fallback")
+                            key_cycle_attempts.append({
+                                "variant_idx": start_variant_idx,
+                                "key_idx": fb_key_idx,
+                                "litellm_model": litellm_model_fb,
+                                "error_body": err_str_fb[:500],
+                                "error_type": cycle_reason_fb,
+                                "litellm_fallback": True,
+                            })
+                            _log("LITELLM-FB-CYCLE", f"v{start_variant_idx+1} k{fb_key_idx+1}/{NUM_KEYS} ({litellm_model_fb}) → "
+                                                      f"{resp_fb.status} ({cycle_reason_fb}), cycling to next key on fallback")
+                            continue  # Try next key on fallback LiteLLM
+
+                        # Non-cycling error on fallback (400/401/etc) — report directly
+                        metrics["litellm_fallback"] = True
+                        metrics["litellm_fallback_url"] = fallback_chat_url
+                        _log("LITELLM-FB-ERR", f"Non-cycling error on fallback: {resp_fb.status} {err_str_fb[:200]}")
+                        result.success = False
+                        result.all_keys_exhausted = False
+                        result.final_error_json = error_json_fb
+                        result.final_resp_status = resp_fb.status
+                        result.elapsed_ms = int((time.time() - t_start) * 1000)
+                        result.key_cycle_attempts = key_cycle_attempts
+                        return result
+
+                    # ─── Fallback LiteLLM SUCCESS ───
+                    litellm_fallback_success = True
+                    metrics["litellm_fallback"] = True
+                    metrics["litellm_fallback_url"] = fallback_chat_url
+                    metrics["key_idx"] = fb_key_idx
+                    metrics["variant_idx"] = start_variant_idx
+                    metrics["litellm_model"] = litellm_model_fb
+                    if key_cycle_attempts:
+                        metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
+                        metrics["key_cycle_details"] = key_cycle_attempts
+
+                    _log("LITELLM-FB-SUCCESS", f"Success on fallback LiteLLM v{start_variant_idx+1} "
+                                                f"k{fb_key_idx+1} ({litellm_model_fb}) after "
+                                                f"{len(key_cycle_attempts)} connection errors on primary")
+
+                    result.success = True
+                    result.resp = resp_fb
+                    result.conn = conn_fb
+                    result.litellm_model = litellm_model_fb
+                    result.variant_idx = start_variant_idx
+                    result.key_idx = fb_key_idx
+                    result.key_cycle_attempts = key_cycle_attempts
+                    return result
+
+                except socket.timeout as e_fb:
+                    elapsed_fb = int((time.time() - t_start) * 1000)
+                    key_cycle_attempts.append({
+                        "variant_idx": start_variant_idx,
+                        "key_idx": fb_key_idx,
+                        "litellm_model": litellm_model_fb,
+                        "error_type": "SocketTimeout_fallback",
+                        "elapsed_ms": elapsed_fb,
+                        "litellm_fallback": True,
+                    })
+                    _log("LITELLM-FB-TIMEOUT", f"v{start_variant_idx+1} k{fb_key_idx+1} ({litellm_model_fb}) "
+                                               f"socket timeout on fallback after {elapsed_fb}ms")
+                    continue
+
+                except Exception as e_fb:
+                    err_str_fb = str(e_fb)
+                    error_class_fb = type(e_fb).__name__
+                    elapsed_fb = int((time.time() - t_start) * 1000)
+                    key_cycle_attempts.append({
+                        "variant_idx": start_variant_idx,
+                        "key_idx": fb_key_idx,
+                        "litellm_model": litellm_model_fb,
+                        "error_type": f"{error_class_fb}_fallback",
+                        "error": err_str_fb[:200],
+                        "litellm_fallback": True,
+                    })
+                    _log("LITELLM-FB-CONNERR", f"v{start_variant_idx+1} k{fb_key_idx+1} ({litellm_model_fb}) "
+                                               f"{error_class_fb} on fallback: {err_str_fb[:100]}")
+                    continue
+
+            # All fallback LiteLLM keys also failed
+            _log("LITELLM-FB-ALL-FAILED", f"All {NUM_KEYS} keys also failed on fallback LiteLLM ({fallback_chat_url}). "
+                                           f"Primary: {[a.get('error_type') for a in key_cycle_attempts[:NUM_KEYS]]}, "
+                                           f"Fallback: {[a.get('error_type') for a in key_cycle_attempts[NUM_KEYS:]]}")
+        else:
+            _log("LITELLM-FB-SKIP", f"All keys connection errors but no fallback LiteLLM URL configured for {mapped_model}")
     # Every key in this variant failed. Classify the failure type.
-    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit") for a in key_cycle_attempts)
-    has_500 = any(a.get("error_type") == "500_internal_server_error" for a in key_cycle_attempts)
-    has_502 = any(a.get("error_type") == "502_bad_gateway" for a in key_cycle_attempts)
-    has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
-    has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError") for a in key_cycle_attempts)
+    # Include both primary and fallback LiteLLM error types.
+    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_fallback") for a in key_cycle_attempts)
+    has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_internal_server_error_fallback") for a in key_cycle_attempts)
+    has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_bad_gateway_fallback") for a in key_cycle_attempts)
+    has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_fallback") for a in key_cycle_attempts)
+    has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_fallback", "ConnectionError_fallback") for a in key_cycle_attempts)
 
     # ─── Variant Fallback (R23) ───
     # When all 7 keys in the start variant are 429, try 2 fallback variants
@@ -588,11 +760,11 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
         # Merge fallback attempts into classification
         all_attempts = key_cycle_attempts + variant_fallback_attempts
-        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback") for a in all_attempts)
-        has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_variant_fallback_non429") for a in all_attempts)
-        has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_variant_fallback_non429") for a in all_attempts)
-        has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_variant_fallback") for a in all_attempts)
-        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_variant_fallback", "ConnectionError_variant_fallback") for a in all_attempts)
+        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback", "429_rate_limit_fallback") for a in all_attempts)
+        has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_variant_fallback_non429", "500_internal_server_error_fallback") for a in all_attempts)
+        has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_variant_fallback_non429", "502_bad_gateway_fallback") for a in all_attempts)
+        has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_variant_fallback", "SocketTimeout_fallback") for a in all_attempts)
+        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_variant_fallback", "ConnectionError_variant_fallback", "ConnectionRefusedError_fallback", "ConnectionError_fallback") for a in all_attempts)
     else:
         # Non-429 mixed errors: no variant fallback attempted
         all_attempts = key_cycle_attempts
