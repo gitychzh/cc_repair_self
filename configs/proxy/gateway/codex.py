@@ -161,33 +161,52 @@ def responses_to_chat_body(cx_body, target_model):
         oai_body["temperature"] = cx_body["temperature"]
 
     # 6. Tools — Responses API function tools → Chat Completions function tools
+    # Only convert tools that have a valid function.name — ModelScope requires name
+    # and rejects empty strings. Skip all non-function type tools (Codex built-ins
+    # like computer_call_preview, web_search_preview, etc. — not supported by ModelScope).
     cx_tools = cx_body.get("tools", [])
     if cx_tools:
         oai_tools = []
+        skipped_tools = []
         for tool in cx_tools:
             tool_type = tool.get("type", "")
             if tool_type == "function":
                 fn = tool.get("function", {})
+                fn_name = fn.get("name", "")
+                if not fn_name:
+                    # Skip function tools without name — would cause LiteLLM 400 error
+                    skipped_tools.append(f"function(no-name)")
+                    continue
                 oai_tools.append({
                     "type": "function",
                     "function": {
-                        "name": fn.get("name", ""),
+                        "name": fn_name,
                         "description": fn.get("description", ""),
                         "parameters": fn.get("parameters", {}),
                     },
                 })
-            # Skip built-in tools (web_search, file_search, code_interpreter)
-            # — ModelScope doesn't support them
+            else:
+                # Skip non-function tools (web_search, file_search, code_interpreter,
+                # computer_call_preview, etc.) — ModelScope doesn't support them
+                skipped_tools.append(f"{tool_type}({tool.get('name', tool.get('id', '?'))})")
         if oai_tools:
             oai_body["tools"] = oai_tools
+        if skipped_tools:
+            _log("CX-TOOLS-SKIP", f"skipped {len(skipped_tools)}/{len(cx_tools)} tools not supported by ModelScope: {skipped_tools[:5]}")
+            if not oai_tools:
+                # All tools were skipped — don't send empty tools array
+                _log("CX-TOOLS-ALL-SKIP", f"all {len(cx_tools)} tools skipped — no tools in Chat Completions request")
 
-    # 7. Tool choice
+    # 7. Tool choice — only include if we have valid tools (otherwise "required"/dict
+    # would fail because ModelScope expects matching tool names)
     tool_choice = cx_body.get("tool_choice")
-    if tool_choice:
+    if tool_choice and oai_tools:
         if isinstance(tool_choice, str):
             oai_body["tool_choice"] = tool_choice  # "auto", "required", "none"
         elif isinstance(tool_choice, dict):
             oai_body["tool_choice"] = tool_choice
+    elif tool_choice and not oai_tools:
+        _log("CX-TOOL-CHOICE-SKIP", f"tool_choice={tool_choice} skipped because no valid tools converted")
 
     # 8. Response format
     response_format = cx_body.get("response_format")
@@ -822,12 +841,15 @@ def _collect_stream_to_responses(handler, resp, conn, request_model, mapped_mode
                 delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                 fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
-                # Collect reasoning
+                # Collect reasoning + content — merge into output_text for Codex
+                # Same logic as streaming: GLM-5.1 puts reasoning and content in the same
+                # delta chunk. For Responses API, there's no separate reasoning output type.
+                # Codex needs the full model output (reasoning + content) as output_text.
                 reasoning = delta.get("reasoning_content", "")
                 if reasoning:
                     reasoning_text += reasoning
+                    content_text += reasoning  # Merge reasoning into output_text for Codex
 
-                # Collect text content
                 text = delta.get("content", "")
                 if text:
                     content_text += text
