@@ -2,16 +2,18 @@
 
 ## Architecture (R23)
 ```
-Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + variant×key 2D round-robin + metrics)
+Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + variant×key 2D round-robin + variant fallback + metrics)
     → 41001 ms_uni41001 LiteLLM (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 deploys) → ModelScope [UNIFIED]
 ```
 
-Proxy does **format conversion + variant×key 2D round-robin + error cycling (429/500/502) + metrics logging**. No retry, no truncation, no auto-compact. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
+Proxy does **format conversion + variant×key 2D round-robin + error cycling (429/500/502) + variant fallback (R23) + metrics logging**. No retry, no truncation, no auto-compact. Proxy precisely specifies variant+key combo — LiteLLM does NOT do routing, just forwards.
 
-**Variant×Key 2D Round-Robin (R21)**:
+**Variant×Key 2D Round-Robin + Variant Fallback (R21→R23)**:
 - request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
 - → model name: `{base}v{V}k{K}` (e.g. glm5.1v1k1, dsv4pv3k5)
-- Error cycling (429/500/502): same variant, next key (k→k+1). All 7 keys failed → classify and return to agent (all-429→rate_limit; has-500/502→api_error; has-timeout→502)
+- Error cycling (429/500/502): same variant, next key (k→k+1). All 7 keys failed → **R23: try 2 fallback variants (1 key each)** before returning to agent
+- Variant fallback (R23): All 7 keys 429 in start variant → try (start_variant+1) and (start_variant+2), each with 1 key attempt. Max extra quota waste = 2 keys per request
+- After variant fallback also fails → classify and return to agent (all-429→rate_limit **retry-after=180s**; has-500/502→api_error; has-timeout→502)
 - Each variant has independent 200/id/day quota on ModelScope
 
 **Tier-based routing**: opus/sonnet tier → glm5.1 (70 dep, thinking support), haiku/mini tier → dsv4p (70 dep, no thinking).
@@ -20,8 +22,8 @@ Proxy does **format conversion + variant×key 2D round-robin + error cycling (42
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | Unified LiteLLM | 14 groups × 10 variants = 140 dep, ulimits nofile=2048, memory 1GiB |
-| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R21 variant×key 2D round-robin → ms_uni41001 |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R21 variant×key 2D round-robin → ms_uni41001 (NOT YET DEPLOYED on opc2_uname) |
+| auth_to_api_40001 | :40001 | Proxy (opc_uname) | R23 variant×key 2D round-robin + variant fallback → ms_uni41001 |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R23 variant×key 2D round-robin + variant fallback → ms_uni41001 (NOT YET DEPLOYED on opc2_uname) |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine |
 
 **R23: Removed containers 41003 (glm5.1_test41003) and 42001 (dsv4p_uni42001)** — these were retained but NOT routed since R21. ms_uni41001 is the sole upstream for both models. No fallback containers needed.
@@ -152,6 +154,15 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ### /health endpoint — NEVER use on LiteLLM
 - LiteLLM /health → per-deployment checks → fd exhaustion. Use /health/liveliness.
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
+
+### 5. Variant fallback + retry-after=180s (opc2_uname push, R23)
+- **Issue**: 5 CC processes consuming quota simultaneously → ALL-KEYS-429 for both glm5.1 and dsv4p → CC stuck in 429 retry loop
+- **Root cause**: Token quota per-key shared across all variants. 7 key cycling wastes 7 quota per attempt. 5 CC processes × 429 retry loop = massive quota waste
+- **Immediate fix**: Kill 3 redundant CC processes. Quota recovered in ~8 minutes (17:40→17:48)
+- **Prevention fix**: Proxy now tries 2 additional variants (1 key each) when all 7 keys in start variant are 429. Max extra waste = 2 keys (vs 7×N from CC retry loop). retry-after changed from 30s to 180s
+- **New log labels**: VARIANT-FALLBACK-START, VARIANT-FALLBACK-TRY, VARIANT-FALLBACK-429, VARIANT-FALLBACK-SUCCESS, VARIANT-FALLBACK-ERR, VARIANT-FALLBACK-TIMEOUT, VARIANT-FALLBACK-CONNERR, VARIANT-FALLBACK-ALL-FAILED
+- **New metrics fields**: variant_fallback, fallback_variant_idx, fallback_key_idx, variant_fallback_attempts, variant_fallback_429s_before_success, variant_fallback_all_failed
+- **Deployed on opc_uname**: 2026-06-12 18:13 CST. Both proxy containers rebuilt and healthy. Curl test glm5.1+dsv4p return 200 ✅
 
 ## R23 Changes (2026-06-12)
 

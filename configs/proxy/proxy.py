@@ -815,12 +815,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"msgs={len(oai_body.get('messages',[]))} "
                     f"tools={len(oai_body.get('tools',[]))}")
 
-        # ─── Variant×Key 2D round-robin + 429 cycling (R21) ───
+        # ─── Variant×Key 2D round-robin + 429 cycling + variant fallback (R21→R23) ───
         # LiteLLM config has 140 deployments (7 glm5.1 key groups × 10 variants + 7 dsv4p × 10 variants).
         # Proxy precisely specifies variant+key combo: model="{base}v{V}k{K}" (e.g. glm5.1v1k1)
         # 2D round-robin: request N → variant_idx=(N//7)%10, key_idx=N%7
         # On 429 from a key, cycle to next key (same variant): k→k+1
-        # After all NUM_KEYS keys return 429 (same variant) → return 429 to agent (token quota exhausted)
+        # After all NUM_KEYS keys return 429 (same variant) → R23: try 2 fallback variants (1 key each)
+        # If fallback also 429 → return 429 to agent with retry-after=180s
         # Non-429 errors (auth/thinking_budget) use existing resilience retry logic.
 
         start_pair = _next_variant_key_pair(mapped_model)
@@ -1168,7 +1169,182 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 })
                 continue  # Try next key
 
-        # ─── All keys exhausted ───
+        # ─── Variant fallback (R23): try other variants when all keys in start_variant are 429 ───
+        # If all keys in the start variant returned 429 (all_429), try up to 2 additional variants.
+        # Each fallback variant only tries 1 key (to minimize quota waste).
+        # Rationale: ModelScope token quota is per-key (shared across variants), but different
+        # variants may have independent RPM quotas (200/id/day/variant). Even for token quota,
+        # some keys may recover faster for different variant model IDs.
+        # Fallback attempts: start_variant → (start_variant+1) → (start_variant+2)
+        # Max extra quota waste: 2 key attempts per request (vs 7×N waste from CC retry loops)
+
+        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit") for a in key_cycle_attempts)
+        variant_fallback_attempts = []
+
+        if all_429:
+            num_variants = NUM_VARIANTS.get(mapped_model, 10)
+            _log("VARIANT-FALLBACK-START", f"All {NUM_KEYS} keys 429 for v{start_variant_idx+1}, "
+                                          f"trying up to 2 fallback variants for {mapped_model}")
+            for fallback_v_offset in range(1, min(3, num_variants)):
+                fallback_v_idx = (start_variant_idx + fallback_v_offset) % num_variants
+                fallback_k_idx = start_key_idx  # Use same starting key position
+                litellm_model_fb = f"{litellm_model_base}v{fallback_v_idx+1}k{fallback_k_idx+1}"
+                oai_body["model"] = litellm_model_fb
+
+                _log("VARIANT-FALLBACK-TRY", f"Fallback variant #{fallback_v_offset}: "
+                                             f"v{fallback_v_idx+1} k{fallback_k_idx+1} → model={litellm_model_fb}")
+
+                auth_key_fb = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
+                headers_fb = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {auth_key_fb}",
+                    "Content-Length": str(len(json.dumps(oai_body).encode("utf-8"))),
+                }
+                oai_data_fb = json.dumps(oai_body).encode("utf-8")
+                parsed_upstream_fb = urllib.parse.urlparse(litellm_url)
+
+                try:
+                    conn_fb = self._make_upstream_conn(parsed_upstream_fb)
+                    conn_fb.request("POST", parsed_upstream_fb.path, body=oai_data_fb, headers=headers_fb)
+                    resp_fb = conn_fb.getresponse()
+
+                    # Extract LiteLLM routing/quota headers
+                    for hdr_key, metrics_key in [
+                        ("x-litellm-model-id", "litellm_model_id"),
+                        ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
+                    ]:
+                        val_fb = resp_fb.getheader(hdr_key)
+                        if val_fb:
+                            metrics[metrics_key] = val_fb
+
+                    # Extract ModelScope quota headers
+                    for hdr_key, metrics_key in [
+                        ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
+                        ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
+                    ]:
+                        val_fb = resp_fb.getheader(hdr_key)
+                        if val_fb:
+                            metrics[metrics_key] = int(val_fb)
+
+                    if resp_fb.status >= 400:
+                        error_body_fb = resp_fb.read()
+                        try:
+                            error_json_fb = json.loads(error_body_fb)
+                        except Exception:
+                            error_json_fb = {"error": error_body_fb.decode("utf-8", errors="replace")}
+                        conn_fb.close()
+                        err_str_fb = json.dumps(error_json_fb)
+
+                        # Only 429 errors should try next fallback variant; other errors stop fallback
+                        if resp_fb.status == 429:
+                            variant_fallback_attempts.append({
+                                "variant_idx": fallback_v_idx,
+                                "key_idx": fallback_k_idx,
+                                "litellm_model": litellm_model_fb,
+                                "error_body": err_str_fb[:500],
+                                "error_type": "429_rate_limit_variant_fallback",
+                            })
+                            _log_error_detail({
+                                "request_id": request_id,
+                                "timestamp": datetime.datetime.now().isoformat(),
+                                "error_subcategory": "429_variant_fallback_attempt",
+                                "upstream_status": resp_fb.status,
+                                "variant_idx": fallback_v_idx,
+                                "key_idx": fallback_k_idx,
+                                "litellm_model": litellm_model_fb,
+                                "fallback_offset": fallback_v_offset,
+                                "upstream_error_body_full": err_str_fb[:3000],
+                            })
+                            _log("VARIANT-FALLBACK-429", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) → "
+                                                        f"429, trying next fallback variant")
+                            continue  # Try next fallback variant
+                        else:
+                            # Non-429 error in fallback — stop and report this error directly
+                            # (500/502/timeout in fallback variant means upstream has a real issue)
+                            variant_fallback_attempts.append({
+                                "variant_idx": fallback_v_idx,
+                                "key_idx": fallback_k_idx,
+                                "litellm_model": litellm_model_fb,
+                                "error_body": err_str_fb[:500],
+                                "error_type": f"{resp_fb.status}_variant_fallback_non429",
+                            })
+                            _log("VARIANT-FALLBACK-ERR", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) → "
+                                                         f"{resp_fb.status} non-429 error, stopping fallback")
+                            # Fall through to ALL-KEYS-429 handling (which will classify mixed errors)
+                            break
+
+                    else:
+                        # ─── Variant fallback SUCCESS ───
+                        # The fallback variant responded successfully!
+                        metrics["variant_fallback"] = True
+                        metrics["fallback_variant_idx"] = fallback_v_idx
+                        metrics["fallback_key_idx"] = fallback_k_idx
+                        metrics["litellm_model"] = litellm_model_fb
+                        metrics["key_idx"] = fallback_k_idx
+                        metrics["variant_idx"] = fallback_v_idx
+                        metrics["variant_fallback_attempts"] = variant_fallback_attempts
+                        metrics["variant_fallback_429s_before_success"] = len(variant_fallback_attempts)
+
+                        _log("VARIANT-FALLBACK-SUCCESS", f"Success on fallback variant v{fallback_v_idx+1} "
+                                                           f"k{fallback_k_idx+1} ({litellm_model_fb}) after "
+                                                           f"{len(key_cycle_attempts)} key 429s + {len(variant_fallback_attempts)} variant 429s")
+
+                        if is_stream:
+                            self._stream_to_anth(resp_fb, request_model, mapped_model, conn_fb, metrics, t_start)
+                        elif force_stream_for_nonstream:
+                            self._collect_stream_to_anth(resp_fb, request_model, mapped_model, conn_fb, metrics, t_start)
+                        else:
+                            ttfb_start_fb = time.time()
+                            resp_body_fb = resp_fb.read()
+                            oai_response_fb = json.loads(resp_body_fb)
+                            anth_response_fb = openai_to_anth(oai_response_fb, request_model)
+                            metrics["status"] = 200
+                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                            metrics["ttfb_ms"] = int((ttfb_start_fb - t_start) * 1000)
+                            usage_fb = oai_response_fb.get("usage", {})
+                            metrics["input_tokens"] = usage_fb.get("prompt_tokens", 0)
+                            metrics["output_tokens"] = usage_fb.get("completion_tokens", 0)
+                            choices_fb = oai_response_fb.get("choices", [])
+                            if choices_fb:
+                                metrics["finish_reason"] = choices_fb[0].get("finish_reason")
+                            _log_metrics(metrics)
+                            self._send_json(200, anth_response_fb)
+                            conn_fb.close()
+                        return  # Variant fallback success — done with this request
+
+                except socket.timeout as e_fb:
+                    elapsed_ms_fb = int((time.time() - t_start) * 1000)
+                    variant_fallback_attempts.append({
+                        "variant_idx": fallback_v_idx,
+                        "key_idx": fallback_k_idx,
+                        "litellm_model": litellm_model_fb,
+                        "error_type": "SocketTimeout_variant_fallback",
+                        "elapsed_ms": elapsed_ms_fb,
+                    })
+                    _log("VARIANT-FALLBACK-TIMEOUT", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) "
+                                                     f"socket timeout after {elapsed_ms_fb}ms, trying next variant")
+                    continue  # Try next fallback variant
+
+                except Exception as e_fb:
+                    err_str_fb = str(e_fb)
+                    error_class_fb = type(e_fb).__name__
+                    variant_fallback_attempts.append({
+                        "variant_idx": fallback_v_idx,
+                        "key_idx": fallback_k_idx,
+                        "litellm_model": litellm_model_fb,
+                        "error_type": f"{error_class_fb}_variant_fallback",
+                        "error": err_str_fb[:200],
+                    })
+                    _log("VARIANT-FALLBACK-CONNERR", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) "
+                                                      f"{error_class_fb}: {err_str_fb[:100]}, trying next variant")
+                    continue  # Try next fallback variant
+
+            # All fallback variants also failed
+            _log("VARIANT-FALLBACK-ALL-FAILED", f"All {len(variant_fallback_attempts)} fallback variant attempts also 429 "
+                                                f"for {mapped_model}. Original: {len(key_cycle_attempts)} key 429s in v{start_variant_idx+1}, "
+                                                f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
+
+        # ─── All keys exhausted (including variant fallback attempts) ───
         # Every key in this variant failed. Classify the failure type for precise error reporting.
         # Error types: "429_rate_limit", "500_internal_server_error", "502_bad_gateway",
         # "SocketTimeout", "ConnectionRefusedError", "ConnectionError"
@@ -1206,6 +1382,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "total_keys": NUM_KEYS,
             "key_cycle_attempts": key_cycle_attempts,
             "key_cycle_attempt_types": [a.get("error_type", "429_rate_limit") for a in key_cycle_attempts],
+            "variant_fallback_attempts": variant_fallback_attempts,
+            "variant_fallback_all_failed": len(variant_fallback_attempts) > 0,
             "elapsed_since_request_start_ms": elapsed_ms,
             "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
             "all_429": all_429,
@@ -1219,6 +1397,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["error_type"] = error_subcategory
         metrics["key_cycle_attempts"] = key_cycle_attempts
         metrics["key_cycle_attempt_types"] = [a.get("error_type", "429") for a in key_cycle_attempts]
+        if variant_fallback_attempts:
+            metrics["variant_fallback_attempts"] = variant_fallback_attempts
+            metrics["variant_fallback_all_failed"] = True
         metrics["duration_ms"] = elapsed_ms
         metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
         _log_metrics(metrics)
@@ -1228,16 +1409,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # - Has timeout/connection error → 529 overloaded_error would cause CC auto-compact disaster.
         #   Instead: use api_error (CC retries with backoff, no auto-compact)
         if all_429:
+            fb_msg = ""
+            if variant_fallback_attempts:
+                fb_keys = [f"v{a['variant_idx']+1}k{a['key_idx']+1}" for a in variant_fallback_attempts]
+                fb_msg = f" Variant fallback also failed: {', '.join(fb_keys)}."
             self._send_json(429, {
                 "type": "error",
                 "error": {
                     "type": "rate_limit_error",
                     "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
                                f"Please wait for quota recovery (typically 15 minutes) before retrying. "
-                               f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
+                               f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}.{fb_msg}"
                 },
                 "model": request_model,
-            }, extra_headers={"retry-after": "30"})
+            }, extra_headers={"retry-after": "180"})
         else:
             # Mixed failures (429 + timeout + connection error) — use api_error, NOT overloaded_error
             # api_error → CC retries with backoff (no auto-compact = no context destruction)

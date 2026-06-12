@@ -14,13 +14,14 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
              → ModelScope API
 ```
 
-核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin + error cycling（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429/500/502时同variant换下一个key，7 key全失败才返回agent），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin + variant fallback (R23) + error cycling（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s），不做压缩、不做截断。LiteLLM 纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由 CC 内置 auto-compact 控制。**
 
-**Variant×Key 2D Round-Robin (R21) 机制：**
+**Variant×Key 2D Round-Robin + Variant Fallback (R21→R23) 机制：**
 - Proxy 维护 2D轮换 counter：request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS → model `glm5.1v{V}k{K}`
 - 轮询序列：v1k1→v1k2→...→v1k7→v2k1→v2k2→...→v10k7→回到v1k1
 - 429/500/502 时：同variant换下一个key（k→k+1），不变variant（ModelScope每种错误都扣quota，cycling避免浪费）
-- 7 key 全部失败（同variant） → 根据错误类型分类返回：全429→rate_limit_error；有500→api_error；有502→api_error；有timeout→502 api_error
+- 7 key 全部失败（同variant） → **R23: 尝试2个fallback variant（各试1个key），减少quota浪费的同时利用不同variant的独立RPM quota**
+- Fallback variant也失败 → 根据错误类型分类返回：全429→rate_limit_error（retry-after=180s）；有500→api_error；有502→api_error；有timeout→502 api_error
 - 每个key的 cycling 尝试都记录在 error_detail 日志中（含variant_idx、error_type）
 - 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 cycling 信息
 - 不cycling的错误：400 input overflow、400 inappropriate content、400 thinking_budget InvalidParameter、401/403 AuthenticationError
@@ -57,6 +58,7 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 - **/health endpoint会触发fd耗尽** — LiteLLM的/health触发per-deployment checks→OSError Too many open files。用/health/liveliness监控LiteLLM。Proxy的/health是简单状态检查（只返回{"status":"ok"}），SAFE用于Docker healthcheck。
 - **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
 - **ModelScope双 quota 系统** — RPM quota（200/id/day/variant，ms_requests_remaining追踪）和 Token quota（per-key hourly/daily token allocation，无header追踪）是独立的。Jun 11 429 burst：RPM quota有1705 remaining但7个key的token quota同时耗尽→20个429。同一组key跨所有deployment，fallback到41001无效（同key=同token quota）。burst是暂时性的（15分钟自动恢复），不可通过配置修复。ModelScope对每种错误（429/500/502）都扣quota，所以必须在proxy层做error cycling而非让LiteLLM重试同一deployment。
+- **多CC进程加速token quota耗尽** — Jun 12 429灾难：5个CC进程同时消耗quota→glm5.1+dsv4p 7key全429→proxy 7×429 cycling→返回rate_limit_error(retry-after=30s)→CC每30秒重试→每次重试浪费7个quota→23次ALL-KEYS-429×7=161个quota浪费→恶性循环。R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
 - **proxy超时日志详细记录** — socket.timeout现在单独捕获（不再笼统归为ConnectionError），记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms（超了PROXY_TIMEOUT多少）。key cycling时的timeout也单独记录到error_detail。stream和collect_stream的超时同样详细记录。全key失败时区分429（rate_limit_error）vs timeout/connection（502 api_error），避免529→CC auto-compact灾难。
 
 ## 可调整参数（有数据支撑才能改）
