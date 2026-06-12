@@ -24,7 +24,7 @@ import datetime
 import urllib.parse
 
 from .config import (
-    LITELLM_KEY, PROXY_TIMEOUT, NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
+    LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     _next_variant_key_pair,
 )
@@ -254,10 +254,12 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                 metrics["variant_idx"] = start_variant_idx
                                 metrics["litellm_model"] = litellm_model
                                 metrics["thinking_budget_fix_success"] = True
+                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                 if key_cycle_attempts:
                                     metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                                     metrics["key_cycle_details"] = key_cycle_attempts
                                     _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1}")
+                                _log_metrics(metrics)
                                 return result
                             # Fix retry also failed
                             error_body_fix = resp_fix.read()
@@ -298,10 +300,12 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                             metrics["variant_idx"] = start_variant_idx
                             metrics["litellm_model"] = litellm_model
                             metrics["resilience_retry_success"] = True
+                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                             if key_cycle_attempts:
                                 metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                                 metrics["key_cycle_details"] = key_cycle_attempts
                                 _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1}")
+                            _log_metrics(metrics)
                             return result
                         # Resilience retry also failed
                         error_body2 = resp2.read()
@@ -349,14 +353,18 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
             result.key_idx = current_key_idx
             result.key_cycle_attempts = key_cycle_attempts
 
-            # Update metrics
+            # R28: Log metrics for successful requests (was missing before — only error path logged metrics)
             metrics["key_idx"] = current_key_idx
             metrics["variant_idx"] = start_variant_idx
             metrics["litellm_model"] = litellm_model
+            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
             if key_cycle_attempts:
                 metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                 metrics["key_cycle_details"] = key_cycle_attempts
                 _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model})")
+                # Only write upstream-level metrics when there's key cycling detail
+                # (handler will write its own metrics for all success cases including this one)
+                _log_metrics(metrics)
             return result  # Success — done
 
         except socket.timeout as e:
@@ -370,14 +378,14 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                 "litellm_model": litellm_model,
                 "attempt_number": attempt_idx + 1,
                 "total_keys": NUM_KEYS,
-                "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+                "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
                 "elapsed_since_request_start_ms": elapsed_ms,
                 "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
                 "error_message": str(e)[:200],
             }
             _log_error_detail(timeout_detail)
             _log("TIMEOUT", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) socket timeout "
-                           f"after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s), cycling to next key")
+                           f"after {elapsed_ms}ms (UPSTREAM_TIMEOUT={UPSTREAM_TIMEOUT}s), cycling to next key")
             key_cycle_attempts.append({
                 "variant_idx": start_variant_idx,
                 "key_idx": current_key_idx,
@@ -385,8 +393,8 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                 "error": str(e)[:200],
                 "error_type": "SocketTimeout",
                 "elapsed_ms": elapsed_ms,
-                "proxy_timeout_ms": PROXY_TIMEOUT * 1000,
-                "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                "upstream_timeout_ms": UPSTREAM_TIMEOUT * 1000,
+                "timeout_exceeded_by_ms": elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0,
             })
             continue  # Try next key
 
@@ -543,6 +551,9 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                     _log("LITELLM-FB-SUCCESS", f"Success on fallback LiteLLM v{start_variant_idx+1} "
                                                 f"k{fb_key_idx+1} ({litellm_model_fb}) after "
                                                 f"{len(key_cycle_attempts)} connection errors on primary")
+
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
 
                     result.success = True
                     result.resp = resp_fb
@@ -714,6 +725,9 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                                       f"k{fallback_k_idx+1} ({litellm_model_fb}) after "
                                                       f"{len(key_cycle_attempts)} key 429s + {len(variant_fallback_attempts)} variant 429s")
 
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
+
                     result.success = True
                     result.resp = resp_fb
                     result.conn = conn_fb
@@ -818,7 +832,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     metrics["variant_fallback_attempts"] = variant_fallback_attempts
     metrics["key_cycle_attempt_types"] = [a.get("error_type", "429_rate_limit") for a in key_cycle_attempts]
     metrics["duration_ms"] = elapsed_ms
-    metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+    metrics["timeout_exceeded_by_ms"] = elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0
 
     # Return all-keys-exhausted result — handler formats per agent type
     result.success = False

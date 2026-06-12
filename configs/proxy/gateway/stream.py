@@ -14,7 +14,7 @@ import datetime
 import http.client
 import socket
 
-from .config import THINKING_SIGNATURE_DEFAULT, PROXY_TIMEOUT
+from .config import THINKING_SIGNATURE_DEFAULT, UPSTREAM_TIMEOUT
 from .logger import _log, _log_metrics, _log_error_detail
 
 
@@ -268,7 +268,7 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
             "request_id": metrics.get("request_id", "?"),
             "timestamp": datetime.datetime.now().isoformat(),
             "error_subcategory": "stream_socket_timeout",
-            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
             "elapsed_since_request_start_ms": elapsed_ms,
             "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
             "litellm_model": metrics.get("litellm_model", "?"),
@@ -276,9 +276,9 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
             "key_idx": metrics.get("key_idx", "?"),
             "error_message": str(e)[:200],
         })
-        _log("TIMEOUT", f"stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+        _log("TIMEOUT", f"stream socket timeout after {elapsed_ms}ms (UPSTREAM_TIMEOUT={UPSTREAM_TIMEOUT}s): {e}")
         metrics["error_type"] = "StreamSocketTimeout"
-        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0
         # Close gracefully so CC receives proper message_stop
         _emit_graceful_end()
         return
@@ -405,7 +405,7 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
             "request_id": metrics.get("request_id", "?"),
             "timestamp": datetime.datetime.now().isoformat(),
             "error_subcategory": "collect_stream_socket_timeout",
-            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
             "elapsed_since_request_start_ms": elapsed_ms,
             "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
             "litellm_model": metrics.get("litellm_model", "?"),
@@ -413,9 +413,9 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
             "key_idx": metrics.get("key_idx", "?"),
             "error_message": str(e)[:200],
         })
-        _log("TIMEOUT", f"collect_stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+        _log("TIMEOUT", f"collect_stream socket timeout after {elapsed_ms}ms (UPSTREAM_TIMEOUT={UPSTREAM_TIMEOUT}s): {e}")
         metrics["error_type"] = "CollectStreamSocketTimeout"
-        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0
         try:
             conn.close()
         except Exception:

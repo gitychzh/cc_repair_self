@@ -85,6 +85,8 @@
 - **多CC进程加速token quota耗尽** — Jun 12 429灾难：5个CC进程同时消耗quota→7key全429→proxy 7×429 cycling→返回rate_limit_error(retry-after=30s)→CC每30秒重试→每次重试浪费7个quota→23次ALL-KEYS-429×7=161个quota浪费→恶性循环。R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
 - **proxy超时日志详细记录** — socket.timeout现在单独捕获（不再笼统归为ConnectionError），记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms（超了PROXY_TIMEOUT多少）。key cycling时的timeout也单独记录到error_detail。stream和collect_stream的超时同样详细记录。全key失败时区分429（rate_limit_error）vs timeout/connection（502 api_error），避免529→CC auto-compact灾难。
 - **LiteLLM fallback只在连接错误时触发(R26)** — 所有key都是ConnectionRefused/ConnectionError/SocketTimeout→LiteLLM容器不可用→自动尝试41002。429/500/502不触发（ModelScope quota是per-key的，41001和41002用同一组key=同quota）。混合错误也不触发（429证明LiteLLM还活着）。
+- **PROXY_TIMEOUT≠UPSTREAM_TIMEOUT(R27)** — PROXY_TIMEOUT=300是概念性的"总超时"，不是per-key的HTTPConnection timeout。UPSTREAM_TIMEOUT=60才是每个key尝试的HTTP连接超时。数据支撑：P99 TTFB=52s, P99 litellm_dur=36s, max=91s → 60s覆盖99.7%+正常请求。之前用300做per-key timeout→单key5min→7key×300=35min灾难。
+- **成功路径metrics缺失已修复(R28)** — 之前所有成功请求在upstream.py没有_log_metrics()，handlers.py写的metrics缺少key_idx/variant_idx/litellm_model/key_cycle_details。R28修复：handlers.py/codex.py成功路径合并upstream result信息，upstream.py关键路径（key cycling/fallback）写额外metrics。
 
 ## 可调整参数（有数据支撑才能改）
 
@@ -96,7 +98,8 @@
 | MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的context_window |
 | MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
 | MAX_SCHEMA_DESC | 600 | 300-1200 | Schema描述截断上限chars |
-| PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒。3天数据：P99=85s，max=210s，从未触发timeout |
+| PROXY_TIMEOUT | 300 | 120-600 | 概念性"总超时"（文档参考）。R27起不再用作HTTPConnection timeout |
+| UPSTREAM_TIMEOUT | 60 | 30-120 | R27新增：per-key HTTPConnection timeout。数据支撑：P99 TTFB=52s, P99 litellm_dur=36s, max litellm=91s → 60s覆盖99.7%+。之前PROXY_TIMEOUT=300被误用作per-key timeout→7×300=35min灾难 |
 
 ### CC settings (claude/settings-*.json)
 
@@ -125,6 +128,7 @@
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
 | NUM_VARIANTS_GLM51 | 10 | 5-10 | glm5.1每个key group的variant数 |
+| UPSTREAM_TIMEOUT | 60 | 30-120 | R27新增：per-key HTTPConnection timeout（秒）。之前PROXY_TIMEOUT=300被误用→7key×300s=35min |
 
 ## 项目文件结构
 
@@ -140,12 +144,12 @@ configs/
     gateway/                      # R23.1+R24+R26 模块化gateway包
       __init__.py                 # 包导出
       app.py                      # 入口（ThreadedHTTPServer + main, 显示primary+fallback LiteLLM URL）
-      config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type() + fallback upstream URLs (R26)
-      handlers.py                 # 请求调度（CC→_handle_messages, OpenAI→_handle_openai_with_cycling, Codex→_handle_codex_responses）
-      upstream.py                 # 共享v×k cycling + variant fallback + LiteLLM fallback (R26) + error handling（UpstreamResult + execute_request）
+      config.py                   # 配置 + AGENT_SUFFIXES + detect_agent_type() + fallback upstream URLs (R26) + UPSTREAM_TIMEOUT (R27)
+      handlers.py                 # 请求调度 + R28: 成功路径合并upstream result信息到metrics
+      upstream.py                 # 共享v×k cycling + variant fallback + LiteLLM fallback (R26) + R27: UPSTREAM_TIMEOUT + R28: 成功路径metrics
       converters.py               # Anthropic↔OpenAI格式转换 + 文本估算
-      codex.py                    # R24: Responses↔Chat Completions双向转换 + streaming + error format
-      stream.py                   # SSE流转换（Anthropic格式）
+      codex.py                    # R24: Responses↔Chat Completions双向转换 + streaming + error format + R28: metrics merge
+      stream.py                   # SSE流转换（Anthropic格式, R27: UPSTREAM_TIMEOUT）
       error_mapping.py            # 错误格式转换（Anthropic + OpenAI + Responses format_*）
       logger.py                   # 日志（_log, _log_metrics, _log_error_detail）
   claude/
@@ -191,10 +195,14 @@ docker restart ms_uni41001
 # 只重启 fallback LiteLLM
 docker restart ms_uni41002
 
-# proxy.py 变更（需要重建镜像 — 同时重建40001和40002）
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
+# proxy.py 变更 — 两步重建策略（避免 CC ConnectionRefused 崩溃）
+# ⚠️ 不能同时重建两个proxy！重建期间proxy短暂不可用→CC /compact会ConnectionRefused崩溃
+# Step 1: 先重建 40002（CC不使用40002，安全）
+cd /opt/cc-infra && docker compose up -d --build auth_to_api_40002
+# Step 2: 等40002 healthy，再重建 40001
+sleep 15 && docker compose up -d --build auth_to_api_40001
 
-# 全量重建（5个容器）
+# 全量重建（5个容器 — 不推荐，有短暂不可用窗口）
 cd /opt/cc-infra && docker compose up -d --force-recreate
 
 # Claude Code 重启

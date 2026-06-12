@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R26, 2026-06-12)
+# Deploy Status — opc_uname + opc2_uname (R28, 2026-06-13)
 
-## Architecture (R26 — glm5.1 only, dual proxy + dual LiteLLM)
+## Architecture (R28 — glm5.1 only, dual proxy + dual LiteLLM)
 ```
                     :40001 proxy gateway (R24.4 multi-agent unified, PRIMARY)
                     ├── _cc (Claude Code)  → /v1/messages → Anthropic→OpenAI conversion → upstream.py v×k cycling + variant fallback + LiteLLM fallback
@@ -38,13 +38,13 @@ Proxy does **format conversion (CC only) + variant×key 2D round-robin + variant
 - Error cycling (429/500/502): same variant, next key (k→k+1). All 7 keys failed → **R23: try 2 fallback variants (1 key each)** before returning to agent
 - Variant fallback also fails → classify and return: all-429→rate_limit **retry-after=180s**; has-500/502→api_error; has-timeout→502
 
-## Containers (R26)
+## Containers (R28)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | LiteLLM (PRIMARY) | 7 groups × 10 variants = 70 dep (glm5.1 only), ulimits nofile=2048, memory 1GiB, DB=litellm_glm51 |
 | ms_uni41002 | :41002 | LiteLLM (FALLBACK) | R26: identical to 41001, same config.yaml, same 7 MS_KEYs, DB=litellm_glm51_fallback |
-| auth_to_api_40001 | :40001 | Proxy (all agents, PRIMARY) | R24.4+R26: multi-agent gateway + LiteLLM fallback (41001→41002) |
-| auth_to_api_40002 | :40002 | Proxy (all agents, FALLBACK) | R25+R26: identical to 40001, LiteLLM fallback (41001→41002) |
+| auth_to_api_40001 | :40001 | Proxy (all agents, PRIMARY) | R28: multi-agent gateway + LiteLLM fallback (41001→41002) + UPSTREAM_TIMEOUT=60s |
+| auth_to_api_40002 | :40002 | Proxy (all agents, FALLBACK) | R28: identical to 40001, LiteLLM fallback (41001→41002) + UPSTREAM_TIMEOUT=60s |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (litellm_glm51 + litellm_glm51_fallback DBs) |
 
 ## LiteLLM Fallback (R26)
@@ -105,7 +105,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 8. Rebuild proxy 40002: `cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40002`
 9. Verify: curl test glm5.1 via 40001, 40002, and direct 41001, 41002
 
-## Current Parameters (R26)
+## Current Parameters (R28)
 
 | Parameter | Value | File | Notes |
 |-----------|-------|------|-------|
@@ -116,7 +116,8 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | CHARS_PER_TOKEN_ESTIMATE | 3.0 | docker-compose.yml | Proxy overestimates 1.36x (chars_json/3.0 vs actual) |
 | NUM_KEYS | 7 | docker-compose.yml | Keys per model for round-robin |
 | NUM_VARIANTS_GLM51 | 10 | docker-compose.yml | R21: variants per key group |
-| PROXY_TIMEOUT | 300 | docker-compose.yml | Seconds; P99=85s, max=210s |
+| PROXY_TIMEOUT | 300 | docker-compose.yml | Overall request timeout concept (for docs), NOT used as HTTPConnection timeout |
+| UPSTREAM_TIMEOUT | 60 | docker-compose.yml | R27: Per-key HTTPConnection timeout. P99 TTFB=52s, P99 litellm_dur=36s, max litellm=91s → 60s covers 99.7%+ |
 | MAX_TOOL_DESC | 2000 | docker-compose.yml | Characters |
 | MAX_SCHEMA_DESC | 600 | docker-compose.yml | Characters |
 | timeout (ms_uni41001/41002) | 300 | litellm config.yaml | Seconds |
@@ -182,17 +183,35 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 Frontend model IDs: `glm5.1_cc`, `glm5.1_ol`, `glm5.1_oc`, `glm5.1_hm`, `glm5.1_cx`
 Backward compat: `glm5.1` = `glm5.1_cc`, `claude-opus-4-8` = `glm5.1_cc`
 
-## opc2_uname Verification ✅
-- gateway module: all files synced
-- docker-compose.yml: R26 version (5 containers including ms_uni41002 + LiteLLM fallback)
+## opc2_uname Verification ✅ (R28)
+- gateway module: all files synced (including error_mapping.py with Responses API format functions)
+- docker-compose.yml: R28 version (5 containers including ms_uni41002 + LiteLLM fallback + UPSTREAM_TIMEOUT=60)
 - litellm config: 70 dep glm5.1 only (shared by both 41001 and 41002)
 - 5 containers healthy
 - CC settings.json: model=glm5.1_cc, API_TIMEOUT_MS=600000 ✅
 - curl test glm5.1_cc via 40001 returns 200 ✅
 - curl test glm5.1_cc via 40002 returns 200 ✅ (R25)
+- curl test glm5.1_ol via 40001 returns 200 ✅ (R28)
+- curl test glm5.1_cx via 40001 returns 200 ✅ (R28)
 - LiteLLM fallback logic: upstream.py includes R26 connection error fallback ✅
+- UPSTREAM_TIMEOUT=60s verified in both proxy containers ✅ (R27)
+- Metrics now include key_idx, variant_idx, litellm_model on success ✅ (R28)
 - Codex CLI end-to-end verified ✅
 
-## opc_uname R24.4 DEPLOYED ✅
+## opc_uname R28 DEPLOYED ✅
 - Codex CLI end-to-end verified (exec mode: "echo hello world" → output "hello world")
 - All 5 agent types (CC/OpenClaw/OpenCode/Hermes/Codex) functional
+
+## R27→R28 Change Log
+
+### R27: UPSTREAM_TIMEOUT separation
+- **WHY**: PROXY_TIMEOUT=300 was being used as HTTPConnection timeout for each key attempt → 5min per key → 7×300=35min worst case if ModelScope unavailable. P99 data: TTFB=52s, litellm_dur=36s, max litellm=91s → 60s covers 99.7%+ of normal requests.
+- **WHAT**: Added UPSTREAM_TIMEOUT env var (default 60s) for per-key HTTPConnection timeout. PROXY_TIMEOUT=300 kept as overall timeout concept (docs reference only). All `timeout=PROXY_TIMEOUT` in `_make_upstream_conn`, `stream.py`, `upstream.py` changed to `timeout=UPSTREAM_TIMEOUT`.
+- **DATA**: P99 TTFB=52s, P99 litellm_dur=36s, max litellm=91s → UPSTREAM_TIMEOUT=60 covers 99.7%+ with safety margin.
+- **FILES**: config.py, handlers.py, upstream.py, stream.py, app.py, docker-compose.yml
+
+### R28: Success-path metrics logging
+- **WHY**: All success paths in upstream.py lacked `_log_metrics()` calls → handlers recorded basic success metrics but missing upstream detail (key_idx, variant_idx, litellm_model, key_cycle_details). Only error path had `_log_metrics`.
+- **WHAT**: Added `_log_metrics(metrics)` to key cycling and fallback success paths in upstream.py. Merged upstream result info (key_idx, variant_idx, litellm_model, key_cycle_attempts) into handler metrics in handlers.py and codex.py success paths.
+- **BUG FIX**: error_mapping.py was not synced to local /opt/cc-infra/ → missing format_responses_error_all_keys_exhausted → 40002 container crash loop. Fixed by syncing all gateway package files including error_mapping.py, __init__.py, codex.py.
+- **FILES**: upstream.py, handlers.py, codex.py, error_mapping.py (sync), __init__.py (sync)

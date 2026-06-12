@@ -176,11 +176,12 @@ services:
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
       # R26: LiteLLM fallback — when 41001 container unavailable (ConnectionRefused), proxy auto-switches to 41002
-      LITELLM_URL_GLM51_FALLBACK: http://ms_uni41002:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51_FALLBACK: http://ms_uni41002:4000/v1/models
+      LITELLM_FALLBACK_URL_GLM51: http://ms_uni41002:4000/v1/chat/completions
+      LITELLM_FALLBACK_MODELS_URL_GLM51: http://ms_uni41002:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
       MAX_TOOL_DESC: "2000"
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
@@ -230,11 +231,12 @@ services:
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
       # R26: LiteLLM fallback — when 41001 container unavailable, proxy auto-switches to 41002
-      LITELLM_URL_GLM51_FALLBACK: http://ms_uni41002:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51_FALLBACK: http://ms_uni41002:4000/v1/models
+      LITELLM_FALLBACK_URL_GLM51: http://ms_uni41002:4000/v1/chat/completions
+      LITELLM_FALLBACK_MODELS_URL_GLM51: http://ms_uni41002:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
       MAX_TOOL_DESC: "2000"
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"

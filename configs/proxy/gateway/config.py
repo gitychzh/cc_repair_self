@@ -16,14 +16,15 @@ import threading
 LITELLM_KEY = os.environ.get("LITELLM_KEY", "sk-litellm-local")
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "40001"))
-PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))
+PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))  # Overall request timeout concept (for docs)
+UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))  # R27: Per-key HTTPConnection timeout, separated from PROXY_TIMEOUT
 
 # ─── Truncation limits ───────────────────────────────────────────────────
 MAX_TOOL_DESC = int(os.environ.get("MAX_TOOL_DESC", "2000"))
 MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "600"))
 
 # ─── Token estimation ────────────────────────────────────────────────────
-CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "2.0"))
+CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.0"))  # R27: aligned with docker-compose.yml
 
 # ─── Logging ──────────────────────────────────────────────────────────────
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
@@ -47,8 +48,8 @@ MODEL_UPSTREAMS = {
     "glm5.1": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
         "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
-        "fallback_chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51_FALLBACK", "http://ms_uni41002:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "fallback_models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51_FALLBACK", "http://ms_uni41002:4000/v1/models"), "/v1/models"),
+        "fallback_chat_url": _ensure_url_path(os.environ.get("LITELLM_FALLBACK_URL_GLM51", "http://ms_uni41002:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "fallback_models_url": _ensure_url_path(os.environ.get("LITELLM_FALLBACK_MODELS_URL_GLM51", "http://ms_uni41002:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
@@ -186,7 +187,7 @@ DEFAULT_MODEL = "glm5.1"
 # Proxy no longer truncates/compacts messages — that's CC's job exclusively.
 MODEL_MAX_INPUT_TOKENS = {"glm5.1": 202745}
 MODEL_INPUT_TOKEN_SAFETY = {
-    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "128000")),
+    "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "170000")),
 }
 
 # ─── Thinking config ─────────────────────────────────────────────────────

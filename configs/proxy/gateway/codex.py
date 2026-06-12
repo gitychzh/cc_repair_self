@@ -762,6 +762,13 @@ def handle_codex_responses(handler, cx_body, mapped_model, request_model, reques
     # ─── Success: process response ───
     resp = result.resp
     conn = result.conn
+    # R28: Merge upstream result info into handler metrics (key cycling, variant, model details)
+    metrics["key_idx"] = result.key_idx
+    metrics["variant_idx"] = result.variant_idx
+    metrics["litellm_model"] = result.litellm_model
+    if result.key_cycle_attempts:
+        metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
+        metrics["key_cycle_details"] = result.key_cycle_attempts
 
     if is_stream:
         # Streaming: send headers then convert SSE events

@@ -26,7 +26,7 @@ import urllib.parse
 import socket
 
 from .config import (
-    LITELLM_KEY, PROXY_TIMEOUT, MODEL_MAP, DEFAULT_MODEL, DEFAULT_UPSTREAM_MODEL,
+    LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, MODEL_MAP, DEFAULT_MODEL, DEFAULT_UPSTREAM_MODEL,
     MODEL_UPSTREAMS, MODEL_MAX_INPUT_TOKENS, MODEL_INPUT_TOKEN_SAFETY,
     CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS,
     AGENT_SUFFIXES, DEFAULT_AGENT_SUFFIX, detect_agent_type, format_model_id,
@@ -284,6 +284,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ─── Success: process response ───
         resp = result.resp
         conn = result.conn
+        # R28: Merge upstream result info into handler metrics (key cycling, variant, model details)
+        metrics["key_idx"] = result.key_idx
+        metrics["variant_idx"] = result.variant_idx
+        metrics["litellm_model"] = result.litellm_model
+        if result.key_cycle_attempts:
+            metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
+            metrics["key_cycle_details"] = result.key_cycle_attempts
 
         if is_stream:
             stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
@@ -411,6 +418,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ─── Success: pass through OpenAI response ───
         resp = result.resp
         conn = result.conn
+        # R28: Merge upstream result info into handler metrics (key cycling, variant, model details)
+        metrics["key_idx"] = result.key_idx
+        metrics["variant_idx"] = result.variant_idx
+        metrics["litellm_model"] = result.litellm_model
+        if result.key_cycle_attempts:
+            metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
+            metrics["key_cycle_details"] = result.key_cycle_attempts
 
         if is_stream:
             # Streaming: pass SSE stream directly to client (no Anthropic conversion)
@@ -740,7 +754,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _make_upstream_conn(self, parsed_url):
         host = parsed_url.hostname
         port = parsed_url.port or 80
-        return http.client.HTTPConnection(host, port, timeout=PROXY_TIMEOUT)
+        return http.client.HTTPConnection(host, port, timeout=UPSTREAM_TIMEOUT)
 
     def _send_json(self, code, data, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
