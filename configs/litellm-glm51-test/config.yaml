@@ -1,4 +1,6 @@
 # 41003 LiteLLM Config — GLM-5.1 (7 key groups × 10 variants × 1 key = 70 deployments, rpm=1)
+# RETAINED BUT NOT ROUTED since R21 — proxy routes all traffic to ms_uni41001
+# Can be re-routed by changing proxy env var LITELLM_URL_GLM51 if ms_uni41001 fails
 # R20: Reduced from 1000 to 10 variants per key group.
 # WHY: ModelScope quota is 2000/key/day total. 10 variants × 200/id/key/day = 2000/key/day = per-key cap.
 # More variants don't increase effective capacity. Key round-robin (R19) handles token quota distribution.

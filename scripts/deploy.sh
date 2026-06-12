@@ -2,7 +2,7 @@
 # deploy.sh — One-click deploy + restart + test for cc-infra
 # Usage: bash deploy.sh [service]
 #   No args: full redeploy (all services)
-#   service: only restart specified container (e.g. glm5.1_uni41001, dsv4p_uni42001)
+#   service: only restart specified container (e.g. ms_uni41001, dsv4p_uni42001)
 # Must be run on opc_uname (or opc2_uname) with /opt/cc-infra/ deployed
 
 set -euo pipefail
@@ -24,9 +24,9 @@ elif [[ "${SERVICE}" == "proxy" ]] || [[ "${SERVICE}" == "auth_to_api_40001" ]];
 elif [[ "${SERVICE}" == "auth_to_api_40002" ]]; then
     echo "[1] Rebuilding 40002 proxy container..."
     DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40002
-elif [[ "${SERVICE}" == "glm5.1_uni41001" ]]; then
-    echo "[1] Restarting glm5.1_uni41001 (LiteLLM config changed)..."
-    docker restart glm5.1_uni41001
+elif [[ "${SERVICE}" == "ms_uni41001" ]] || [[ "${SERVICE}" == "glm5.1_uni41001" ]]; then
+    echo "[1] Restarting ms_uni41001 (LiteLLM config changed)..."
+    docker restart ms_uni41001
 elif [[ "${SERVICE}" == "dsv4p_uni42001" ]]; then
     echo "[1] Restarting dsv4p_uni42001 (LiteLLM config changed)..."
     docker restart dsv4p_uni42001

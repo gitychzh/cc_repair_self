@@ -85,6 +85,63 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | InternalServerErrorAllowedFails | 0 | litellm config.yaml | R22: 500/choice:null cycling by proxy |
 | API_TIMEOUT_MS | 600000 | settings.json | R22: CC→proxy HTTP total timeout (5min→10min) |
 
+## opc2_uname Link Verification (R22, 2026-06-12)
+
+**opc2_uname 所有配置与仓库完全一致** ✅：
+- proxy.py: md5=40426e02d9f6fd4913395e5e501c04a4 (local=repo)
+- docker-compose.yml: diff=0 (local=repo)
+- litellm-glm51/config.yaml: diff=0 (local=repo)
+- 6个容器全部 healthy (ms_uni41001, glm5.1_test41003, dsv4p_uni42001, cc_postgres, auth_to_api_40001, auth_to_api_40002)
+- Proxy env vars confirmed: NUM_KEYS=7, NUM_VARIANTS_GLM51=10, NUM_VARIANTS_DSV4P=10, PROXY_TIMEOUT=300
+- LiteLLM env vars confirmed: 7 MS_KEYs, MS_BASEURL, DATABASE_URL all present
+- curl test glm5.1 via 40001 returns 200 ✅
+
+**⚠️ opc2_uname 本机settings.json API_TIMEOUT_MISMATCH**：
+- 本机 `~/.claude/settings.json`: API_TIMEOUT_MS=300000 (旧值，5min)
+- 仓库 `configs/claude/settings-opc2_uname.json`: API_TIMEOUT_MS=600000 (R22新值，10min)
+- **需要同步**: opc2_uname下次deploy时必须更新此值，否则极端7-key cycling场景可能超时
+
+**⚠️ opc_uname 不可达**：192.168.1.104 ping不通，SSH连接失败。opc2_uname无法远程分析opc_uname日志。
+
+## Log System Analysis (R22, 2026-06-12)
+
+### Proxy日志（3层日志系统）
+
+| 日志层 | 文件格式 | 内容 | 大小趋势 |
+|--------|----------|------|----------|
+| proxy.{date}.log | 纯文本 | 每请求一行简要日志（REQ/ERR/TIMEOUT等） | 0.2-0.6MB/天 |
+| metrics.{date}.jsonl | JSON行 | 结构化metrics：request_id, model, ttfb_ms, tokens, variant_idx, key_idx | 0.2-2.5MB/天 |
+| error_detail.{date}.jsonl | JSON行 | 详细错误：error_subcategory, upstream_error_body, key_cycle_attempts | 0-0.35MB/天 |
+
+**proxy 40001 logs**: 12MB总计（10天有数据，06-06/07/08空缺=proxy重建期间）
+**proxy 40002 logs**: 672KB总计（9天连续数据）
+
+### Docker容器日志
+
+- json-file driver: max-size=50m, max-file=5, tag=container/{{.Name}}
+- 自动rotation ✅，每个容器最多250MB
+
+### LiteLLM日志
+
+- `/opt/cc-infra/logs/litellm-glm51/`: 空目录（LiteLLM日志写入容器内/app/logs/，volume挂载但无日志文件）
+- `/opt/cc-infra/logs/litellm-dsv4p/`: 空目录
+- `/opt/cc-infra/logs/litellm-glm51-test/`: 空目录
+- **问题**: LiteLLM litellm_settings.json_logs=true，但日志文件未出现在挂载目录中。可能是LiteLLM写入PostgreSQL而非文件。
+
+### ⚠️ 缺失：Proxy日志无自动清理机制
+
+- proxy.py按日期写文件（proxy.{date}.log, metrics.{date}.jsonl, error_detail.{date}.jsonl）
+- **无rotation/purge/cleanup**: 日志文件永不删除
+- Docker容器日志有50m×5 rotation ✅，但proxy自己的应用日志无任何清理
+- **建议**: 添加crontab任务，保留最近7天proxy日志，删除7天前的日志文件
+- 当前影响: 12MB/10天 ≈ 1.2MB/天，6个月约216MB。不紧急但需关注。
+
+### ⚠️ 缺失：脚本使用旧容器名
+
+- `scripts/deploy.sh`: 使用 `glm5.1_uni41001`（R21改名前）→ `docker restart glm5.1_uni41001` 失败 "No such container"
+- `scripts/rollback.sh`: 同样使用旧名 → rollback时LiteLLM重启失败
+- **已修复**: deploy.sh和rollback.sh已更新为 `ms_uni41001`（同时保留旧名作为fallback alias）
+
 ## Key Issues & Notes
 
 ### CC auto-compact behavior (CRITICAL for IQ preservation)

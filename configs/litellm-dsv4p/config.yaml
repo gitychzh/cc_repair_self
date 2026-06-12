@@ -1,6 +1,7 @@
 # 42001 LiteLLM Config — DSv4P (7 key groups × 11 variants × 1 key = 77 deployments, rpm=1)
-# R19: Key round-robin routing. Proxy cycles keys: dsv4pk1→k2→...→k7→k1.
-# On 429, proxy cycles to next key group. All 7 keys 429 → return 429 to agent.
+# RETAINED BUT NOT ROUTED since R21 — proxy routes all traffic to ms_uni41001
+# Can be re-routed by changing proxy env var LITELLM_URL_DSV4P if ms_uni41001 fails
+# R19 format: Key round-robin routing dsv4pk1→k2→...→k7
 # Each key group has 11 case-permutation variants with independent 200/id/day quota.
 # NEVER remove variants — removing = removing quota capacity.
 #

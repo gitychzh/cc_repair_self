@@ -74,8 +74,8 @@ if [ -f "$BACKUP_DIR/proxy/proxy.py" ]; then
 fi
 
 if [ -f "$BACKUP_DIR/litellm-glm51/config.yaml" ]; then
-  echo "  Restarting glm5.1 LiteLLM..."
-  docker restart glm5.1_uni41001
+  echo "  Restarting unified LiteLLM (ms_uni41001)..."
+  docker restart ms_uni41001
   sleep 10
 fi
 

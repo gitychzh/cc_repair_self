@@ -111,17 +111,17 @@ configs/
   .env.template             # 环境变量模板
   litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 + 10v×7k dsv4p = 140 dep）
   litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（10v×7k=70 dep，RETAINED NOT ROUTED）
-  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（11v×7k=77 dep，RETAINED NOT ROUTED）
+  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（10v×7k=77 dep，RETAINED NOT ROUTED）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
     Dockerfile / proxy.py         # 格式转换代理（variant×key 2D round-robin+metrics）
   claude/
-    settings-opc_uname.json        # → ~/.claude/settings.json
-    settings-opc2_uname.json       # → ~/.claude/settings.json
+    settings-opc_uname.json        # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22)
+    settings-opc2_uname.json       # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22, 但opc2_uname本机仍=300000需同步)
     statusline-command-opc_uname.sh / statusline-command.sh
   DEPLOY_STATUS.md                 # 当前部署状态
 scripts/
-  backup_config.sh / health_check.sh / restart_claude.sh / rollback.sh
+  backup_config.sh / deploy.sh / health_check.sh / restart_claude.sh / rollback.sh / sync_config.sh / ts_keepalive.sh
 ```
 
 ## 关键文件路径（opc_uname 本机）
