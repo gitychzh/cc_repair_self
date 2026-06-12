@@ -1,9 +1,9 @@
-# Deploy Status — opc_uname + opc2_uname (R19, 2026-06-12)
+# Deploy Status — opc_uname + opc2_uname (R20, 2026-06-12)
 
-## Architecture (same on both machines)
+## Architecture
 ```
 Agent(CC/OpenCode/Codex) → 40001/40002(proxy, format conversion + key round-robin + metrics)
-    → 41003(LiteLLM glm5.1k1~k7, 7 key groups × 1000 variants = 7000 deploys) → ModelScope [PRIMARY]
+    → 41003(LiteLLM glm5.1k1~k7, 7 key groups × 10 variants = 70 deploys) → ModelScope [PRIMARY]
     → 42001(LiteLLM dsv4pk1~k7, 7 key groups × 11 variants = 77 deploys) → ModelScope [HAiku/Mini tier]
     → 41001(LiteLLM glm5.1k1~k7, 7 key groups × 1000 variants = 7000 deploys) [BACKUP]
 ```
@@ -12,16 +12,18 @@ Proxy does **format conversion + key round-robin (429 cycling) + metrics logging
 
 **Key Round-Robin (R19)**: Proxy cycles keys on 429 (k1→k2→...→k7), all 7 exhausted → 429 to agent. Each key's 429 attempt logged. LiteLLM config split into 7 key groups per model.
 
-**Tier-based routing**: opus/sonnet tier → glm5.1 (7000 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking).
+**R20 Variant Reduction**: 41003 PRIMARY reduced from 1000→10 variants per key group (7000→70 deployments). 10 variants × 200/id/key/day = 2000/key/day = per-key RPM cap. More variants don't increase effective capacity.
 
-## Containers (all healthy on both machines)
+**Tier-based routing**: opus/sonnet tier → glm5.1 (70 dep, thinking support), haiku/mini tier → dsv4p (77 dep, no thinking).
+
+## Containers
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
-| glm5.1_test41003 | :41003 | Primary glm5.1 | 7 key groups × 1000 deploys = 7000, ulimits nofile=8192, memory 2GiB |
+| glm5.1_test41003 | :41003 | Primary glm5.1 | 7 key groups × 10 deploys = 70, ulimits nofile=2048, memory 1GiB (R20) |
 | glm5.1_uni41001 | :41001 | Backup glm5.1 | 7 key groups × 1000 deploys = 7000, ulimits nofile=8192, memory 2GiB |
 | dsv4p_uni42001 | :42001 | dsv4p | 7 key groups × 11 deploys = 77, ulimits nofile=4096, memory 2GiB |
 | auth_to_api_40001 | :40001 | Proxy (opc_uname) | R19 gateway package + key round-robin ✅ |
-| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R19 gateway package + key round-robin ✅ |
+| auth_to_api_40002 | :40002 | Proxy (opc2_uname) | R20 rebuild in progress (base image downloading) |
 | cc_postgres | :5432 | LiteLLM DB | — |
 
 ## Deploy Method
@@ -42,10 +44,10 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 **Deploy order for key group changes**: 1) LiteLLM configs → 2) `docker restart` LiteLLM containers → 3) verify key groups in LiteLLM `/v1/models` → 4) proxy rebuild → 5) verify proxy `/v1/models` shows only canonical names.
 
-## Current Parameters (R19)
+## Current Parameters (R20)
 
 | Parameter | Value | File | Notes |
-|-----------|-------|------|-------|
+|-----------|-------|------|------|
 | contextWindow | 170000 | settings.json | CC max context tracking |
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger threshold |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | settings.json env + .bashrc + .profile | Env var backup for CC |
@@ -59,25 +61,26 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | num_retries (41003) | 2 | litellm config.yaml | R19: reduced from 8, proxy handles key cycling |
 | num_retries (42001) | 2 | litellm config.yaml | R19: reduced from 5, proxy handles key cycling |
 | cooldown_time (41003/42001) | 10 | litellm config.yaml | — |
-| routing_strategy (41003/42001) | simple-shuffle | litellm config.yaml | R19: 42001 changed from latency-based |
+| routing_strategy (41003) | simple-shuffle | litellm config.yaml | per key group 10 dep pool |
+| routing_strategy (42001) | simple-shuffle | litellm config.yaml | per key group 11 dep pool |
 | RateLimitErrorAllowedFails (41003/42001) | 1 | litellm config.yaml | R19: 429→proxy cycles to next key |
 
-## Metrics Summary (06-12 opc_uname/opc2_uname, R19 deployed)
+## Metrics Summary (06-12 opc_uname/opc2_uname, R19→R20 transition)
 
-### opc_uname 40001 (from DEPLOY_STATUS R18.3)
+### opc_uname 40001 (R19 deployed)
 | Metric | 06-10 | 06-11 | 06-12 (R19) | Change |
 |--------|-------|-------|-------------|--------|
-| Total requests | 1887 | 1555 | TBD | R19 just deployed |
+| Total requests | 1887 | 1555 | TBD | — |
 | Success rate | 99.8% | 96.8% (100% excl 429) | TBD | — |
 | 429 errors | 1 | 49 (token quota burst) | TBD | R19 key cycling should reduce |
 | P99 TTFB | 65.0s | 49.8s | TBD | — |
 
-### opc2_uname 40001 (R19 deployed)
-| Metric | 06-09 | 06-10 | 06-11 | 06-12 (R19) | Trend |
+### opc2_uname 40001 (R20 deploying)
+| Metric | 06-09 | 06-10 | 06-11 | 06-12 (R20) | Trend |
 |--------|-------|-------|-------|-------------|-------|
 | Total requests | 638 | 771 | 248 | TBD | — |
 | Stable success rate | 100% | 99.9% | 99.6% | TBD | — |
-| 429 errors | 0 | 0 | 1 | TBD | R19 key cycling active |
+| 429 errors | 0 | 0 | 1 | TBD | — |
 | TTFB p99 | 42.5s | 56.8s | 39.8s | TBD | — |
 
 ## Key Issues & Notes
@@ -95,11 +98,38 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ### ModelScope dual quota system
 - **RPM quota**: 200/id/day per variant (tracked by ms_requests_remaining). Resets daily.
 - **Token quota**: Per-key hourly/daily token allocation (NOT tracked). Independent from RPM.
-- **R19 key round-robin addresses token quota**: Each key has independent token quota. 429 on key N → cycle to key N+1 (fresh quota). Only ALL-KEYS-429 returns 429 to agent.
+- **R20 insight**: 10 variants × 200/id/key/day = 2000/key/day = per-key RPM cap. More variants don't increase effective RPM capacity.
 
 ### /health endpoint — NEVER use on LiteLLM
 - LiteLLM /health → per-deployment checks → fd exhaustion. Use /health/liveliness.
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
+
+## R20 Changes (2026-06-12)
+
+### 1. Variant reduction: 1000→10 per key group (PRIMARY change)
+- **Problem**: Original theory was that more variant IDs = more independent quota = fewer 429s. This is WRONG.
+  - ModelScope quota is 2000/key/day total. Each variant's 200/id/key quota shares the same per-key cap.
+  - 10 variants × 200/id/key = 2000/key/day = per-key RPM cap. 1000 variants doesn't increase effective capacity.
+  - Real bottleneck is per-key token quota (untracked), which is entirely key-dependent — variant count irrelevant.
+- **Solution**: Reduce 41003 PRIMARY from 1000→10 variants per key group (7000→70 deployments)
+  - First 10 variant model IDs: ZHIPUAI/GLM-5.1 through ZHIPUAi/GLm-5.1
+  - Massive resource savings: config file 77059→797 lines, nofile 8192→2048, memory 2GiB→1GiB, CPU 2→1
+  - LiteLLM startup time reduced from ~3min to ~30s (70 vs 7000 DB records + routing state)
+  - 41001 BACKUP stays at 1000 variants until 41003 proven stable for ≥2 hours
+
+### 2. Resource reduction for 41003 container
+- nofile soft: 8192→2048 (70 deployments need far fewer FDs)
+- memory limits: 2048M→1024M
+- memory reservations: 768M→256M
+- cpus limits: 2.0→1.0
+- cpus reservations: 0.5→0.25
+- start_period: 180s→60s (LiteLLM starts much faster with 70 deploys)
+- Removed "TEMPORARY TEST" comment
+
+### 3. Proxy rebuild on opc2_uname (R20)
+- opc2_uname proxy was running old code without key round-robin
+- Deploying R19+ proxy with key round-robin to opc2_uname
+- LiteLLM 41003 already restarted with new 10-variant config ✅
 
 ## R19 Changes (2026-06-12)
 
@@ -107,7 +137,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - **Problem**: 429 errors caused by token quota exhaustion per key, NOT per variant. Simple-shuffle randomly distributes across keys → single key can exhaust early. Same 7 keys across all deployments → fallback ineffective.
 - **Solution**: Proxy-level key round-robin (429 cycling through all 7 keys)
   - LiteLLM configs split into 7 key groups: `glm5.1k1`~`glm5.1k7`, `dsv4pk1`~`dsv4pk7`
-  - Each key group has all variants with ONE specific API key (1000 dep for glm5.1, 11 for dsv4p)
+  - Each key group has variants with ONE specific API key (R20: 10 dep for glm5.1, 11 for dsv4p)
   - Proxy cycles: request N → key_idx = counter % 7 → model `{base}k{idx+1}`
   - 429 → next key (k1→k2→...→k7→k1), all 7 → return 429 to agent with retry-after=30s
   - Each 429 attempt logged via KEY-429 tag in error_detail
@@ -140,11 +170,16 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R18.2 | dsv4p memory limit 1GiB→2GiB (OOM risk: 90.39%), reservations 512M→768M | dsv4p OOM prevented ✅ |
 | R18.3 | glm5.1_uni41001 memory limit 1GiB→2GiB (OOM risk: 93.73%), ulimit nofile 4096→8192, CPU 1.0→2.0, reservations 512M→768M | 41001 OOM prevented ✅ |
 | R19 | Key round-robin (7 key groups per model, proxy 429 cycling); LiteLLM num_retries 8→2/5→2; RateLimitErrorAllowedFails 5→1/3→1; /v1/models filters key groups; Deploy crash on opc_uname (wrong order) → lesson learned | Key cycling active ✅, /v1/models canonical only ✅ |
+| R20 | 41003 variant reduction 1000→10 per key group (7000→70 deploys); Resource savings: nofile 8192→2048, memory 2GiB→1GiB, CPU 2→1; 41001 BACKUP unchanged | Deploying on opc2_uname first, verify ≥2 hours |
 
-## 11 Immutable Variant Model IDs
+## 10 Active Variant Model IDs (41003 PRIMARY, R20)
 
-**GLM-5.1 (41003/41001):** 1000 case-permutation variants of `zhipuai/glm-5.1` × 7 keys = 7000 deployments
+**GLM-5.1 (41003, R20):** First 10 case-permutation variants × 7 keys = 70 deployments
+`ZHIPUAI/GLM-5.1`, `ZHIPUAI/GLm-5.1`, `ZHIPUAI/GlM-5.1`, `ZHIPUAI/Glm-5.1`, `ZHIPUAI/gLM-5.1`, `ZHIPUAI/gLm-5.1`, `ZHIPUAI/glM-5.1`, `ZHIPUAI/glm-5.1`, `ZHIPUAi/GLM-5.1`, `ZHIPUAi/GLm-5.1`
 
-**DSv4P (42001):** `deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
+**GLM-5.1 (41001 BACKUP):** Still 1000 variants × 7 keys = 7000 deployments (will be reduced after 41003 proven stable)
+
+**DSv4P (42001):** 11 variants × 7 keys = 77 deployments
+`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
 
 **NEVER modify/delete these — each variant has independent 200/id/day quota. rpm=1 per deployment is also immutable.**
