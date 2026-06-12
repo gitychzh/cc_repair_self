@@ -1,89 +1,89 @@
-# Plan: 修复 ModelScope "inappropriate content" 400 错误导致 CC 卡死
+# R23: PROXY_TIMEOUT 2秒超时测试 + 三层超时冲突分析
 
-## 根本原因
+## 背景
 
-ModelScope 内容审核返回 400 `BadRequestError: "Input data may contain inappropriate content"`。
-当前 proxy 的 `_convert_error()` 将此错误映射为 `api_error` → CC 无限 retry 相同内容 → 永远被审核拦截 → **卡死**。
+1. 远程 opc_uname 上运行的是 **R19 版本**的 gateway 代码（key-only round-robin，`glm5.1k1~k7`），不是仓库中的 R21 版本（v×k 2D round-robin，`glm5.1v{V}k{K}`）
+2. R19 版本的 handlers.py **没有 socket.timeout 专门捕获**——所有错误（包括 timeout）走 `except Exception` → 标记为 `ConnectionError` → continue cycling
+3. R19 版本所有 key 失败后统一返回 429 rate_limit_error，不区分 timeout vs 429 vs 500/502
+4. 仓库中的 R21 版本已经有完整的 socket.timeout 捕获 + 分类错误返回逻辑
 
-### 链路追踪
+## 三层超时架构分析
 
 ```
-ModelScope 内容审核 → 400 BadRequestError "inappropriate content"
-→ LiteLLM: BadRequestErrorAllowedFails=0, deployment 立即 cooldown 10s, 但 num_retries=5 换 deployment retry
-→ Proxy: _convert_error() → 不匹配 is_input_overflow, 不匹配 thinking_budget → 默认 api_error
-→ CC: api_error → retry 相同内容 → 再次被审核拦截 → 无限循环 → 卡死
+CC (Claude Code)
+  → API_TIMEOUT_MS = 600000 (10 min, CC→gateway HTTP总超时)
+    → 40001 gateway
+      → PROXY_TIMEOUT = 300s (gateway→LiteLLM HTTPConnection socket timeout)
+        → LiteLLM ms_uni41001
+          → request_timeout = 300s (litellm_settings)
+          → per-deployment timeout = 300s
+            → ModelScope API (实际TTFB 5-30s, 最长210s)
 ```
 
-### 核心矛盾
+### 超时冲突点
 
-"inappropriate content" 不像其他 400 错误：
-- 不是参数错误（retry 同内容永远失败）
-- 不是 token 超限（不能靠 compact 解决）
-- 不是限速（不会自动恢复）
-- CC 对 api_error 会无限 retry → **永远卡死**
+| 层级 | 当前超时 | 测试超时 | 冲突风险 |
+|------|----------|----------|----------|
+| CC → gateway | 600s | 600s (不改) | ✅ 无冲突 |
+| gateway → LiteLLM | 300s | **2s** | gateway 2s就断开，LiteLLM还在等ModelScope |
+| LiteLLM → ModelScope | 300s | 300s (不改) | gateway已经timeout+cycling，LiteLLM继续等无所谓 |
 
-## 解决方案：将 "inappropriate content" 映射为 `invalid_request_error`
+**关键：gateway PROXY_TIMEOUT=2s 不与 CC/LiteLLM 超时冲突**。因为：
+- CC 的 600s 远大于 gateway 的 2s×7keys=14s（全部超时场景）
+- LiteLLM 自己的 300s 到 ModelScope 是独立的，gateway 2s timeout 后只是断开了与 LiteLLM 的连接
+- LiteLLM 可能还在处理，但 gateway 已经 cycling 到下一个 key 了
 
-- **CC 行为**：`invalid_request_error` → CC 立即停止，不 retry，不卡死
-- **理由**：内容审核是 ModelScope 的不可恢复错误，retry 同内容永远不会通过审核。
-  映射为 `invalid_request_error` 让 CC 立即知道这个请求无法完成，停止重试。
-- **优点**：CC 不卡死，不浪费 quota（不 retry 5 次 × 无效请求）
-- **缺点**：CC 会停止当前任务，但这比卡死好得多
+## 测试方案
 
-对比其他方案：
-- 映射为 overloaded_error → CC auto-compact → compact 后内容可能仍触发审核 → 反复循环 → 危险
-- 映射为 rate_limit_error → CC backoff retry → retry 同内容永远失败 → 卡死
+### 步骤1：先部署 R21 版本到远程
 
-## 实施步骤
+当前远程跑的是 R19，但仓库已经是 R21。R21 有完整的 socket.timeout 分类逻辑，这正是我们要验证的核心。先拉取+重建：
 
-### Step 1: 修改 proxy.py `_convert_error()`
-
-在 `_convert_error()` 中添加 "inappropriate content" → `invalid_request_error` 映射：
-
-```python
-# "inappropriate content" (ModelScope content safety filter) → invalid_request_error
-# ModelScope content audit rejects input as inappropriate. This is NOT recoverable:
-# retrying the same content will always fail (content audit is deterministic).
-# Mapping to invalid_request_error lets CC stop immediately instead of infinite retry → freeze.
-elif "inappropriate content" in msg_lower:
-    err_type = "invalid_request_error"
-```
-
-位置：在 `is_quota_exhausted` 和 `rate` 检查之后，`range of input length` 检查之前。
-
-### Step 2: 确保 is_input_overflow 不会误匹配 "inappropriate"
-
-当前 `is_input_overflow` 检查不含 "inappropriate"关键词，无需修改。
-
-### Step 3: 修复 proxy 容器路由指向（R1遗留）
-
-当前 proxy 容器内环境变量仍指向 `glm5.1_test41003:4000`，
-但 docker-compose.yml 已改为 `glm5.1_uni41001:4000`。
-需要重建 proxy 容器使配置生效：
 ```bash
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+cd /opt/cc-infra
+git pull
+docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
 ```
 
-### Step 4: 部署并测试
+### 步骤2：修改 PROXY_TIMEOUT 为 2秒
 
-1. 备份配置
-2. 同步 proxy.py 到 opc_uname /opt/cc-infra/proxy/
-3. 重建 proxy 容器（应用新 error mapping + 正确路由）
-4. 测试正常请求 200 OK
-5. 测试错误场景（发送含审核触发词的请求验证返回 invalid_request_error）
+修改 docker-compose.yml 两个 gateway 容器的 PROXY_TIMEOUT:
+```yaml
+PROXY_TIMEOUT: "2"  # 从 "300" 改为 "2"
+```
 
-## 修复后 CC 的行为变化
+同步到远程并重建容器。
 
-| 场景 | 修复前 | 修复后 |
-|------|--------|--------|
-| "inappropriate content" 400 | CC api_error → 无限retry → 卡死 | CC invalid_request_error → 立即停止 → 用户可继续 |
-| "Range of input length" 400 | CC overloaded → auto-compact ✅ | 不变 ✅ |
-| thinking_budget 400 | proxy resilience retry → ✅ | 不变 ✅ |
-| 429 quota exhausted | CC rate_limit → backoff ✅ | 不变 ✅ |
+### 步骤3：用户手动给 CC 布置任务
 
-## 风险评估
+用户给 CC 一个正常任务，CC 发请求到 gateway → gateway 发到 LiteLLM → ModelScope 处理需要 >2s → gateway 2s 后 socket.timeout → cycling 到下一个 key → 又 2s timeout → ...
 
-- 修改 `_convert_error()` 添加一个 `elif` 分支，风险低
-- 映射为 `invalid_request_error`：CC 会停止，但比卡死好得多
-- proxy 路由指向修正：R1 遗留问题，必须修复
-- dsv4p 也使用 ModelScope API，同样受益于此修改
+### 步骤4：观察日志约10分钟
+
+我通过 SSH 监控 gateway 日志，观察：
+1. 是否每个 key 都被逐一 timeout+cycling（R21 日志格式：`TIMEOUT v{V} k{K}/{NUM_KEYS}`)
+2. cycling 后的错误类型（R21 应标记为 `SocketTimeout`）
+3. 全 key 失败后返回给 CC 的错误（R21 应返回 502 api_error，因为有 timeout）
+4. CC 收到 502 后的行为（retry → 又触发 7 keys timeout → 循环）
+5. 最终 CC 是否会因为持续 502 而放弃或 600s 超时
+
+### 步骤5：分析三层超时冲突
+
+根据日志观察结果，分析：
+- R21 的 socket.timeout 专门捕获是否正确触发（而非笼统 Exception）
+- timeout 后 cycling 逻辑是否正确（同 variant 换下一个 key）
+- 全 key timeout 后返回 502 api_error（而非 429 rate_limit_error）是否正确
+- CC 的 600s 超时是否足够应对 gateway 的 cycling 延迟
+- LiteLLM 连接被 gateway 2s 断开后是否正确处理（不影响下一个 key 的连接）
+
+### 步骤6：恢复 PROXY_TIMEOUT 为 300秒
+
+测试完成后恢复，避免影响正常使用。
+
+## 发现的关键问题
+
+1. **远程运行 R19，仓库是 R21**：Docker build 用仓库代码，但远程容器可能很久没重建了。必须先部署 R21。
+
+2. **R19 timeout 标记不准确**：R19 把 socket.timeout 标记为 `ConnectionError`，不区分 timeout vs 真正的连接错误。全 key 失败后统一返回 429 rate_limit_error。在 PROXY_TIMEOUT=2s 测试中，所有 key 都会 timeout，但 R19 会把它们都当作 rate_limit 返回给 CC → CC backoff retry → 又 timeout → 循环。
+
+3. **R21 timeout 分类正确**：仓库中的 R21 版本有 `socket.timeout` 专门捕获，区分 timeout vs 429 vs 500/502，全 key 失败后根据实际错误类型返回不同状态码。2s 超时测试中 R21 应返回 502 api_error（CC retry），而不是 429 rate_limit_error（CC backoff）。

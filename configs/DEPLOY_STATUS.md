@@ -101,7 +101,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - 仓库 `configs/claude/settings-opc2_uname.json`: API_TIMEOUT_MS=600000 (R22新值，10min)
 - **需要同步**: opc2_uname下次deploy时必须更新此值，否则极端7-key cycling场景可能超时
 
-**⚠️ opc_uname 不可达**：192.168.1.104 ping不通，SSH连接失败。opc2_uname无法远程分析opc_uname日志。
+**opc_uname 可达 via tailscale**: SSH `opc2_uname@100.109.57.26:222` ✅。LAN 192.168.1.104/105 也可用但不太稳定。
 
 ## Log System Analysis (R22, 2026-06-12)
 
@@ -165,6 +165,40 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 ### /health endpoint — NEVER use on LiteLLM
 - LiteLLM /health → per-deployment checks → fd exhaustion. Use /health/liveliness.
 - Proxy /health → simple status check → SAFE for Docker healthcheck.
+
+## R23 Changes (2026-06-12 16:40-16:48 CST)
+
+### 1. R21 gateway code deployed to opc_uname container
+- **Issue**: Remote opc_uname container was running R19 gateway code (key-only round-robin, `glm5.1k1~k7` format)
+- **Root cause**: Docker container image was stale — R21 code was on disk but container wasn't rebuilt
+- **Fix**: `docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002`
+- **Verified**: Logs show `v{V}k{K}` format, NUM_VARIANTS={glm5.1:10, dsv4p:10}
+
+### 2. PROXY_TIMEOUT=2s timeout cycling test
+- **Purpose**: Verify that socket.timeout correctly triggers key cycling (R21 feature)
+- **Test**: Changed PROXY_TIMEOUT from 300s to 2s, observed gateway logs for ~10 minutes
+- **Results**:
+  - ✅ `socket.timeout` correctly captured (not generic Exception)
+  - ✅ Timeout triggers key cycling: same variant, next key (k→k+1)
+  - ✅ Each key timeout ≈ 2s (matching PROXY_TIMEOUT setting)
+  - ✅ Mixed errors correctly classified: `SocketTimeout` vs `429_rate_limit`
+  - ✅ All-keys-exhausted: `all_keys_timeout_or_429` (not `429_all_keys_exhausted`)
+  - ✅ Returns 502 `api_error` to CC (not 429 `rate_limit_error`) — because `has_timeout=true`
+  - ✅ CC retries on 502 api_error (correct behavior, no auto-compact)
+  - ✅ Per-request cycling duration: 7-12s (7 keys × mixed timeout/429), far less than CC 600s timeout
+- **3-layer timeout conflict analysis**: PROXY_TIMEOUT=2s → no conflict with CC 600s or LiteLLM 300s
+  - CC 600s >> 7×2s=14s (all timeout scenario)
+  - LiteLLM continues waiting for ModelScope, but gateway already cycled to next key (no conflict)
+
+### 3. PROXY_TIMEOUT restored to 300s
+- **Test completed**: PROXY_TIMEOUT restored from 2s back to 300s
+- **Gateway containers recreated**: `docker compose up -d --force-recreate`
+- **Verified**: Curl test glm5.1 returns 200, PROXY_TIMEOUT=300 confirmed in container env
+
+### 4. SSH connection updated
+- **opc_uname SSH**: Changed from `192.168.1.104:222` to `100.109.57.26:222` (tailscale IP)
+- **opc_uname hostname**: `opc2sname`, user: `opc2_uname`
+- **LAN IP**: 192.168.1.105 (ethernet), 192.168.1.104 (WiFi)
 
 ## R22 Changes (2026-06-12)
 
@@ -242,6 +276,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R19.1 | socket.timeout单独捕获 + timeout_exceeded_by_ms + 全key失败分类 | No timeout events yet |
 | R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants; single upstream | **DEPLOYED on opc_uname 2026-06-12; gateway package updated to R21; NOT YET on opc2_uname** |
 | R22 | Proxy 429+500+502 error cycling; LiteLLM num_retries=0 all allowed_fails=0; CC API_TIMEOUT_MS 600000 | **DEPLOYED on opc_uname 2026-06-12 15:20 CST** |
+| R23 | R21 gateway deployed to opc_uname container; PROXY_TIMEOUT=2s timeout cycling test verified ✅; restored to 300s; SSH updated to tailscale IP | **DEPLOYED 2026-06-12 16:48 CST; PROXY_TIMEOUT restored ✅** |
 
 ## 10 Variant Model IDs (ms_uni41001, R21)
 
