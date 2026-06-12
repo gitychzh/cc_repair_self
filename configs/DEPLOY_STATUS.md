@@ -85,7 +85,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | InternalServerErrorAllowedFails | 0 | litellm config.yaml | R22: 500/choice:null cycling by proxy |
 | API_TIMEOUT_MS | 600000 | settings.json | R22: CC→proxy HTTP total timeout (5min→10min) |
 
-## opc2_uname Link Verification (R24, 2026-06-12)
+## opc2_uname Link Verification (R24.2, 2026-06-12)
 
 **opc2_uname 所有配置与仓库完全一致** ✅：
 - gateway module: all 9 files synced (app.py, config.py, converters.py, error_mapping.py, handlers.py, __init__.py, logger.py, stream.py, upstream.py)
@@ -96,6 +96,23 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - CC settings.json: model=glm5.1_cc, API_TIMEOUT_MS=600000 ✅
 - curl test glm5.1_cc via 40001 returns 200 ✅
 - dsv4p model returns proper error (no longer supported) ✅
+
+**R24.2: OpenAI agent 配置修复（opc2_uname 2026-06-12）**
+
+⚠️ 根因: OpenClaw/Hermes/OpenCode 直连 LiteLLM 41001，发送 `model=glm5.1` → LiteLLM 没有 `glm5.1` 别名（只有 v×k 路由名），返回 400 "Invalid model name"
+
+修复: 所有 OpenAI agent 改为通过 proxy gateway (40001) 路由：
+- OpenClaw: baseUrl 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_ol`
+- Hermes: base_url 从 `41001` → `40001`, default 从 `glm5.1` → `glm5.1_hm`, fallback → 40002
+- OpenCode: baseURL 从 `41001` → `40001`, model 从 `glm5.1` → `glm5.1_oc`
+
+验证结果 ✅：
+- curl test glm5.1_ol via 40001 returns 200 ✅
+- curl test glm5.1_hm via 40001 returns 200 ✅
+- curl test glm5.1_hm via 40002 (fallback) returns 200 ✅
+- curl test glm5.1_oc via 40001 returns 200 ✅
+- Streaming passthrough 40001 _ol returns SSE chunks ✅
+- contextWindow 从 131072 → 170000（与 proxy /v1/models 一致）
 
 **opc_uname 可达 via tailscale**: SSH `opc2sname-tailscale:222` ✅
 

@@ -1,0 +1,42 @@
+{
+  "_comment": "OpenClaw (opc2_uname) 配置模板 — 通�� proxy gateway (40001) 路由",
+  "_key_changes": "1) baseUrl 从 41001→40001 (proxy gateway); 2) model 从 glm5.1→glm5.1_ol (suffix routing); 3) contextWindow 从 131072→170000",
+  "gateway": {
+    "mode": "local",
+    "auth": {
+      "token": "opclaw123"
+    },
+    "bind": "lan",
+    "port": 18789
+  },
+  "models": {
+    "providers": {
+      "litellm": {
+        "baseUrl": "http://127.0.0.1:40001/v1",
+        "apiKey": "sk-litellm-local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "glm5.1_ol",
+            "name": "GLM 5.1 (OpenClaw)",
+            "contextWindow": 170000
+          }
+        ]
+      }
+    },
+    "mode": "replace"
+  },
+  "agents": {
+    "defaults": {
+      "verboseDefault": "on",
+      "model": {
+        "primary": "litellm/glm5.1_ol"
+      },
+      "models": {
+        "litellm/glm5.1_ol": {
+          "alias": "GLM 5.1 (OpenClaw)"
+        }
+      }
+    }
+  }
+}

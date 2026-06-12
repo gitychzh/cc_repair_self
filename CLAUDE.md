@@ -136,6 +136,10 @@ configs/
     settings-opc_uname.json        # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22)
     settings-opc2_uname.json       # → ~/.claude/settings.json (API_TIMEOUT_MS=600000 ✅ R22, 但opc2_uname本机仍=300000需同步)
     statusline-command-opc_uname.sh / statusline-command.sh
+  agents/                          # R24: Agent 配置模板（必须通过 proxy gateway，不能直连 LiteLLM）
+    openclaw-opc2_uname.json       # OpenClaw → proxy:40001, model=glm5.1_ol
+    hermes-opc2_uname.yaml         # Hermes → proxy:40001/40002, model=glm5.1_hm
+    opencode-opc2_uname.jsonc      # OpenCode → proxy:40001, model=glm5.1_oc
   DEPLOY_STATUS.md                 # 当前部署状态
 scripts/
   backup_config.sh / deploy.sh / health_check.sh / restart_claude.sh / rollback.sh / sync_config.sh / ts_keepalive.sh
@@ -151,6 +155,11 @@ scripts/
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
 | Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
 | Shell env vars | `.bashrc` + `.profile` + `/etc/environment` | 新终端生效 |
+| OpenClaw配置 | `~/.openclaw/openclaw.json` | 重启openclaw进程 |
+| Hermes配置 | `~/.hermes/config.yaml` | 重启hermes进程 |
+| OpenCode配置 | `~/.config/opencode/opencode.jsonc` | 重启opencode进程 |
+
+**⚠️ 所有 OpenAI agent（_ol/_oc/_hm）必须通过 proxy gateway (40001/40002) 而不能直连 LiteLLM (41001)！** LiteLLM 的 model_list 只有 v×k 路由名（glm5.1v1k1~v10k7），没有 `glm5.1` 别名。直连 41001 发送 `model=glm5.1` 会返回 400 Invalid model name。Proxy gateway 负责 model name 映射（glm5.1_ol→glm5.1→v×k routing）+ error cycling + variant fallback。
 
 ## 重启命令
 
