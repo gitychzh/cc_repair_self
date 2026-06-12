@@ -694,6 +694,8 @@ def handle_codex_responses(handler, cx_body, mapped_model, request_model, reques
     force_stream_for_nonstream = not is_stream
     if force_stream_for_nonstream:
         oai_body["stream"] = True
+        if "stream_options" not in oai_body:
+            oai_body["stream_options"] = {"include_usage": True}  # Needed for usage data in collect mode
         _log("FORCE-STREAM", f"codex non-stream → forcing stream=True (collect+convert)")
 
     # Log request
@@ -844,6 +846,7 @@ def _collect_stream_to_responses(handler, resp, conn, request_model, mapped_mode
                         total_input_tokens = pt
                     if ct > 0:
                         total_output_tokens = ct
+                    _log("CX-USAGE", f"usage chunk: pt={pt} ct={ct} → total_in={total_input_tokens} total_out={total_output_tokens}")
 
                 if fr:
                     finish_reason = fr
