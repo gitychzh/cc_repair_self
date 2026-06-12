@@ -838,8 +838,12 @@ def _collect_stream_to_responses(handler, resp, conn, request_model, mapped_mode
                 # Collect usage
                 chunk_usage = chunk_data.get("usage", {})
                 if chunk_usage:
-                    total_input_tokens = chunk_usage.get("prompt_tokens", total_input_tokens)
-                    total_output_tokens = chunk_data.get("completion_tokens", total_output_tokens)
+                    pt = chunk_usage.get("prompt_tokens", 0)
+                    ct = chunk_usage.get("completion_tokens", 0)
+                    if pt > 0:
+                        total_input_tokens = pt
+                    if ct > 0:
+                        total_output_tokens = ct
 
                 if fr:
                     finish_reason = fr
