@@ -18,8 +18,6 @@ fi
 SYNC_MAP=(
     "configs/docker-compose.yml:docker-compose.yml"
     "configs/litellm-glm51/config.yaml:litellm-glm51/config.yaml"
-    "configs/litellm-dsv4p/config.yaml:litellm-dsv4p/config.yaml"
-    "configs/litellm-glm51-test/config.yaml:litellm-glm51-test/config.yaml"
     "configs/proxy/proxy.py:proxy/proxy.py"
     "configs/proxy/Dockerfile:proxy/Dockerfile"
     "configs/postgres/init-db.sh:postgres/init-db.sh"

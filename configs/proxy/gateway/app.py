@@ -2,9 +2,8 @@
 """Gateway proxy entry point.
 
 Architecture:
-  CC(40001) → this proxy (format conversion + metrics + input safety)
-      → 41001 LiteLLM (glm5.1, with retry/fallback/routing)
-      → 42001 LiteLLM (dsv4p, with retry/fallback/routing)
+  CC(40001/40002) → this proxy (format conversion + metrics + variant×key 2D round-robin)
+      → 41001 ms_uni41001 LiteLLM (glm5.1 + dsv4p, unified container with 140 dep)
 
 Env vars: see config.py for full list.
 """

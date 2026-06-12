@@ -11,8 +11,6 @@
 ```
 Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D round-robin)
              → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 dep) [UNIFIED]
-             → :41003 LiteLLM (glm5.1k1~k7, 70 dep) [RETAINED, NOT ROUTED]
-             → :42001 LiteLLM (dsv4pk1~k7, 77 dep) [RETAINED, NOT ROUTED]
              → ModelScope API
 ```
 
@@ -35,8 +33,8 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
 | frontend model_name (agent-facing) | `glm5.1`, `dsv4p` — CC/agent请求使用这两个名字 |
 | LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7`, `dsv4pv1k1`~`dsv4pv10k7` — proxy精确指定variant+key |
-| Docker container names | `ms_uni41001`, `glm5.1_test41003`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
-| port assignments | 41001=unified(ms_uni41001), 41003=glm5.1-fallback, 42001=dsv4p-fallback |
+| Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001/40002` |
+| port assignments | 41001=unified(ms_uni41001) |
 
 ### 10 Variant Model IDs（R21, ms_uni41001）
 
@@ -107,11 +105,9 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D rou
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（6个容器，41001=ms_uni41001）
+  docker-compose.yml       # Docker编排（4个容器：cc_postgres, ms_uni41001, auth_to_api_40001/40002）
   .env.template             # 环境变量模板
   litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 + 10v×7k dsv4p = 140 dep）
-  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（10v×7k=70 dep，RETAINED NOT ROUTED）
-  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（10v×7k=77 dep，RETAINED NOT ROUTED）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
     Dockerfile / proxy.py         # 格式转换代理（variant×key 2D round-robin+metrics）

@@ -17,7 +17,6 @@ CONFIG_FILES=(
   "${HOME_DIR}/.claude/settings.json"
   "/opt/cc-infra/proxy/proxy.py"
   "/opt/cc-infra/litellm-glm51/config.yaml"
-  "/opt/cc-infra/litellm-dsv4p/config.yaml"
   "/opt/cc-infra/docker-compose.yml"
   "/opt/cc-infra/.env"
 )

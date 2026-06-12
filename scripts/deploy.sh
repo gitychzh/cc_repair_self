@@ -2,7 +2,7 @@
 # deploy.sh — One-click deploy + restart + test for cc-infra
 # Usage: bash deploy.sh [service]
 #   No args: full redeploy (all services)
-#   service: only restart specified container (e.g. ms_uni41001, dsv4p_uni42001)
+#   service: only restart specified container (e.g. ms_uni41001)
 # Must be run on opc_uname (or opc2_uname) with /opt/cc-infra/ deployed
 
 set -euo pipefail
@@ -27,12 +27,6 @@ elif [[ "${SERVICE}" == "auth_to_api_40002" ]]; then
 elif [[ "${SERVICE}" == "ms_uni41001" ]] || [[ "${SERVICE}" == "glm5.1_uni41001" ]]; then
     echo "[1] Restarting ms_uni41001 (LiteLLM config changed)..."
     docker restart ms_uni41001
-elif [[ "${SERVICE}" == "dsv4p_uni42001" ]]; then
-    echo "[1] Restarting dsv4p_uni42001 (LiteLLM config changed)..."
-    docker restart dsv4p_uni42001
-elif [[ "${SERVICE}" == "glm5.1_test41003" ]]; then
-    echo "[1] Restarting glm5.1_test41003 (LiteLLM config changed)..."
-    docker restart glm5.1_test41003
 else
     echo "[1] Restarting ${SERVICE}..."
     docker restart "${SERVICE}"
@@ -66,14 +60,6 @@ DSV_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http:/
     -H "anthropic-version: 2023-06-01" \
     -d '{"model":"dsv4p","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
 echo "  dsv4p HTTP status: ${DSV_RESULT} (429=quota exhausted, expected)"
-
-# Test glm5.1 via LiteLLM directly (OpenAI format)
-echo "  Testing glm5.1 via 41003..."
-GLM_DIRECT=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:41003/v1/chat/completions \
-    -H "Authorization: Bearer sk-litellm-local" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"glm5.1","max_tokens":50,"messages":[{"role":"user","content":"test"}]}')
-echo "  glm5.1 direct (41003) HTTP status: ${GLM_DIRECT}"
 
 echo ""
 if [[ "${GLM_RESULT}" == "200" ]]; then

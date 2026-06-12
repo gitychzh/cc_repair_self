@@ -46,12 +46,6 @@ if [ -f "$BACKUP_DIR/litellm-glm51/config.yaml" ]; then
   echo "  Restored: litellm-glm51/config.yaml"
 fi
 
-# Restore litellm-dsv4p config
-if [ -f "$BACKUP_DIR/litellm-dsv4p/config.yaml" ]; then
-  cp "$BACKUP_DIR/litellm-dsv4p/config.yaml" /opt/cc-infra/litellm-dsv4p/config.yaml
-  echo "  Restored: litellm-dsv4p/config.yaml"
-fi
-
 # Restore docker-compose.yml
 if [ -f "$BACKUP_DIR/docker-compose.yml" ]; then
   cp "$BACKUP_DIR/docker-compose.yml" /opt/cc-infra/docker-compose.yml
@@ -76,12 +70,6 @@ fi
 if [ -f "$BACKUP_DIR/litellm-glm51/config.yaml" ]; then
   echo "  Restarting unified LiteLLM (ms_uni41001)..."
   docker restart ms_uni41001
-  sleep 10
-fi
-
-if [ -f "$BACKUP_DIR/litellm-dsv4p/config.yaml" ]; then
-  echo "  Restarting dsv4p LiteLLM..."
-  docker restart dsv4p_uni42001
   sleep 10
 fi
 

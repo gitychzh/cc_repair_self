@@ -4,8 +4,7 @@ set -e
 
 CLAUDE_ALIVE="no"
 PROXY_HEALTHY="no"
-LITELLM_GLM51_HEALTHY="no"
-LITELLM_DSV4P_HEALTHY="no"
+LITELLM_UNIFIED_HEALTHY="no"
 CONTAINERS_HEALTHY=0
 
 # Check Claude Code process
@@ -21,31 +20,23 @@ if curl -sf http://127.0.0.1:40001/health > /dev/null 2>&1; then
   PROXY_HEALTHY="yes"
 fi
 
-# Check LiteLLM GLM-5.1 health — MUST use /health/liveliness, NOT /health!
+# Check LiteLLM unified health — MUST use /health/liveliness, NOT /health!
 # /health triggers on-demand health check → choices=null → ALL deployments marked unhealthy → freeze
 if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/health/liveliness > /dev/null 2>&1; then
-  LITELLM_GLM51_HEALTHY="yes"
+  LITELLM_UNIFIED_HEALTHY="yes"
 fi
 
-# Check LiteLLM DSv4P health — MUST use /health/liveliness, NOT /health!
-# Same reason as above — /health triggers deployment freeze
-if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:42001/health/liveliness > /dev/null 2>&1; then
-  LITELLM_DSV4P_HEALTHY="yes"
-fi
-
-# Check Docker containers
-CONTAINERS_HEALTHY=$(docker ps --filter 'health=healthy' --format '{{.Names}}' | wc -l)
-TOTAL_CONTAINERS=$(docker ps --format '{{.Names}}' | grep -c 'cc_\|glm5\|dsv4p\|auth_to' 2>/dev/null || echo "0")
+# Check Docker containers (4 containers: cc_postgres, ms_uni41001, auth_to_api_40001, auth_to_api_40002)
+CONTAINERS_HEALTHY=$(docker ps --filter 'health=healthy' --format '{{.Names}}' | grep -c 'cc_\|ms_\|auth_to' 2>/dev/null || echo "0")
 
 echo "CLAUDE_ALIVE=$CLAUDE_ALIVE"
 echo "PROXY_HEALTHY=$PROXY_HEALTHY"
-echo "LITELLM_GLM51_HEALTHY=$LITELLM_GLM51_HEALTHY"
-echo "LITELLM_DSV4P_HEALTHY=$LITELLM_DSV4P_HEALTHY"
+echo "LITELLM_UNIFIED_HEALTHY=$LITELLM_UNIFIED_HEALTHY"
 echo "CONTAINERS_HEALTHY=$CONTAINERS_HEALTHY/4"
 
 ALL_OK="yes"
 if [ "$CLAUDE_ALIVE" = "no" ]; then ALL_OK="no"; fi
 if [ "$PROXY_HEALTHY" = "no" ]; then ALL_OK="no"; fi
-if [ "$LITELLM_GLM51_HEALTHY" = "no" ]; then ALL_OK="no"; fi
+if [ "$LITELLM_UNIFIED_HEALTHY" = "no" ]; then ALL_OK="no"; fi
 
 echo "ALL_OK=$ALL_OK"

@@ -7,25 +7,23 @@
 ## 架构
 
 ```
-CC → :40001 proxy(格式转换+metrics+input safety) → :41001 LiteLLM(glm5.1) → ModelScope
-                                                 → :42001 LiteLLM(dsv4p)  → ModelScope
+CC → :40001/40002 proxy(格式转换+metrics+variant×key 2D round-robin) → :41001 LiteLLM ms_uni41001 (glm5.1+dsv4p) → ModelScope
 ```
 
-proxy.py只做格式转换和metrics logging，retry/fallback/routing由LiteLLM处理。**proxy不做retry**。
+proxy.py只做格式转换、metrics logging和variant×key 2D round-robin，error cycling由proxy处理。LiteLLM纯转发。
 
-## 5容器
+## 4容器
 
 | 端口 | 容器 | 作用 |
 |------|------|------|
-| 40001 | auth_to_api_40001 | 格式转换代理 (NO retry) |
-| 40002 | auth_to_api_40002 | Codex格式转换代理 |
-| 41001 | glm5.1_uni41001 | glm5.1 LiteLLM网关(77 deployments) |
-| 42001 | dsv4p_uni42001 | dsv4p LiteLLM网关(77 deployments) |
+| 40001 | auth_to_api_40001 | 格式转换代理 (variant×key 2D round-robin) |
+| 40002 | auth_to_api_40002 | 格式转换代理 (opc2_uname端) |
+| 41001 | ms_uni41001 | 统一 LiteLLM网关 (glm5.1 + dsv4p = 140 dep) |
 | 5432 | cc_postgres | PostgreSQL |
 
 ## 不可变更约束
 
-- **11 variant model IDs 禁止增删改**（每个变体200/id/day独立额度）
+- **10 variant model IDs 禁止增删改**（每个变体200/id/day独立额度）
 - **rpm=1 禁止修改**
 - 详细变体ID列表见 [CLAUDE.md](CLAUDE.md)
 

@@ -1,11 +1,10 @@
-# R21 Unified architecture: ms_uni41001 (14 groups × 10 variants = 140 dep, glm5.1+dsv4p) + 41003/42001 (retained but not routed)
+# R23: Unified architecture — ms_uni41001 (14 groups × 10 variants = 140 dep, glm5.1+dsv4p) as sole upstream
 # proxy.py (40001/40002) — format conversion + metrics + variant×key 2D round-robin
 # LiteLLM does NOT do routing — proxy precisely specifies variant+key combo
 #
-# Port assignments: 41001=unified(ms_uni41001), 41003=glm5.1-test(retained), 42001=dsv4p(retained)
-# R21: ms_uni41001 replaces 41003+42001 as sole upstream. 41003/42001 retained for fallback.
-# R20: 41003 reduced from 7000 to 70 deployments (1000→10 variants per key group)
-# ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep vs old 7000); 42001 uses 4096 soft
+# Port assignments: 41001=unified(ms_uni41001)
+# R23: Removed 41003 (glm5.1_test41003) and 42001 (dsv4p_uni42001) — no longer needed, ms_uni41001 handles all
+# ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep)
 
 services:
   cc_postgres:
@@ -16,7 +15,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51,litellm_dsv4p,litellm_glm51_test
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51
       TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
@@ -97,120 +96,6 @@ services:
         - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
       interval: 60s
       timeout: 30s
-      retries: 3
-      start_period: 60s
-    logging: *id001
-    command:
-      - --config
-      - /app/config.yaml
-      - --port
-      - "4000"
-
-  # ─── 41003 glm5.1-test (retained but NOT routed by proxy since R21) ───
-  # Was PRIMARY before R21. Now retained for potential fallback.
-  # Config unchanged: 7 key groups × 10 variants = 70 deployments
-  glm5.1_test41003:
-    image: litellm/litellm:v1.87.0
-    container_name: glm5.1_test41003
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 2048
-        hard: 65536
-    environment:
-      LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51_test
-      MS_BASEURL: https://api-inference.modelscope.cn/v1
-      MS_KEY1: ms-bb4e5bee-ca0e-49be-8de3-2347a57752f5
-      MS_KEY2: ms-b836c297-9cb3-45f7-86b3-a33e1b76f48f
-      MS_KEY3: ms-202e8dc3-b2f0-4aa3-9b56-0fa6798ac5b9
-      MS_KEY4: ms-ed773f9d-9ca1-4fd9-87e4-b6acd0e545ae
-      MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
-      MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
-      MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
-      TZ: Asia/Shanghai
-    volumes:
-      - ./litellm-glm51-test/config.yaml:/app/config.yaml:ro
-      - /etc/localtime:/etc/localtime:ro
-      - ./logs/litellm-glm51-test:/app/logs
-    ports:
-      - 41003:4000
-    networks:
-      - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 1024M
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-          cpus: "0.25"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 60s
-    logging: *id001
-    command:
-      - --config
-      - /app/config.yaml
-      - --port
-      - "4000"
-
-  # ─── 42001 dsv4p (retained but NOT routed by proxy since R21) ───
-  # Was dsv4p upstream before R21. Now retained for potential fallback.
-  # Config unchanged: 7 key groups × 11 variants = 77 deployments
-  dsv4p_uni42001:
-    image: litellm/litellm:v1.87.0
-    container_name: dsv4p_uni42001
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 4096
-        hard: 65536
-    environment:
-      LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_dsv4p
-      MS_BASEURL: https://api-inference.modelscope.cn/v1
-      MS_KEY1: ms-bb4e5bee-ca0e-49be-8de3-2347a57752f5
-      MS_KEY2: ms-b836c297-9cb3-45f7-86b3-a33e1b76f48f
-      MS_KEY3: ms-202e8dc3-b2f0-4aa3-9b56-0fa6798ac5b9
-      MS_KEY4: ms-ed773f9d-9ca1-4fd9-87e4-b6acd0e545ae
-      MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
-      MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
-      MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
-      TZ: Asia/Shanghai
-    volumes:
-      - ./litellm-dsv4p/config.yaml:/app/config.yaml:ro
-      - /etc/localtime:/etc/localtime:ro
-      - ./logs/litellm-dsv4p:/app/logs
-    ports:
-      - 42001:4000
-    networks:
-      - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 2048M
-          cpus: "1.0"
-        reservations:
-          memory: 768M
-          cpus: "0.5"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
-      interval: 30s
-      timeout: 10s
       retries: 3
       start_period: 60s
     logging: *id001
