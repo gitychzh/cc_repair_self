@@ -17,11 +17,14 @@ import uuid
 import http.client
 import urllib.parse
 
+import socket
+
 from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, MODEL_MAP, DEFAULT_MODEL, DEFAULT_UPSTREAM_MODEL,
     MODEL_UPSTREAMS, MODEL_MAX_INPUT_TOKENS, MODEL_INPUT_TOKEN_SAFETY,
     CHARS_PER_TOKEN_ESTIMATE, OUTPUT_TOKEN_MARGIN,
-    NUM_KEYS, _next_key_idx, _is_key_group_name,
+    NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
+    _next_variant_key_pair, _is_routing_name,
 )
 from .logger import _log, _log_metrics, _log_error_detail
 from .converters import anth_to_openai, openai_to_anth, _estimate_text_chars
@@ -182,20 +185,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"msgs={len(oai_body.get('messages',[]))} "
                     f"tools={len(oai_body.get('tools',[]))}")
 
-        # ─── Key round-robin + 429 cycling (R19) ───
-        # LiteLLM config has 7 key groups per model (glm5.1k1~k7, dsv4pk1~k7).
-        # Proxy round-robins: request N → key_idx = counter % NUM_KEYS → model "glm5.1k{idx+1}"
-        # On 429 from a key group, cycle to next key group.
-        # After all key groups return 429 → return 429 to agent (all keys exhausted).
-        start_key_idx = _next_key_idx(mapped_model)
+        # ─── Variant×Key 2D round-robin + 429 cycling (R21) ───
+        # LiteLLM config has 140 deployments (7 glm5.1 key groups × 10 variants + 7 dsv4p × 10 variants).
+        # Proxy precisely specifies variant+key combo: model="{base}v{V}k{K}" (e.g. glm5.1v1k1)
+        # 2D round-robin: request N → variant_idx=(N//7)%10, key_idx=N%7
+        # On 429 from a key, cycle to next key (same variant): k→k+1
+        # After all NUM_KEYS keys return 429 (same variant) → return 429 to agent (token quota exhausted)
+        # Non-429 errors (auth/thinking_budget) use existing resilience retry logic.
+        start_pair = _next_variant_key_pair(mapped_model)
+        start_variant_idx = start_pair[0]
+        start_key_idx = start_pair[1]
         litellm_model_base = mapped_model
         key_cycle_attempts = []
 
         for attempt_idx in range(NUM_KEYS):
+            # 429 cycling: same variant, shift key (k→k+1)
             current_key_idx = (start_key_idx + attempt_idx) % NUM_KEYS
-            litellm_model = f"{litellm_model_base}k{current_key_idx + 1}"
+            litellm_model = f"{litellm_model_base}v{start_variant_idx+1}k{current_key_idx+1}"
             oai_body["model"] = litellm_model
-            _log("KEY-RR", f"attempt {attempt_idx+1}/{NUM_KEYS}: key_idx={current_key_idx} → model={litellm_model}")
+            _log("KEY-RR", f"attempt {attempt_idx+1}/{NUM_KEYS}: v{start_variant_idx+1} k{current_key_idx+1} → model={litellm_model}")
 
             auth_key = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
             headers_out = {
@@ -241,6 +249,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     # ─── 429 → cycle to next key (R19 key round-robin) ───
                     if resp.status == 429:
                         key_cycle_attempts.append({
+                            "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
                             "error_body": err_str[:500],
@@ -250,13 +259,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             "timestamp": datetime.datetime.now().isoformat(),
                             "error_subcategory": "429_key_cycle_attempt",
                             "upstream_status": 429,
+                            "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
                             "attempt_number": attempt_idx + 1,
                             "total_keys": NUM_KEYS,
                             "upstream_error_body_full": err_str[:3000],
                         })
-                        _log("KEY-429", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
+                        _log("KEY-429", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
                         continue
 
                     # ─── Non-429 errors: resilience retry ───
@@ -441,11 +451,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 # ─── Success: resp.status < 400 ───
                 metrics["key_idx"] = current_key_idx
+                metrics["variant_idx"] = start_variant_idx
                 metrics["litellm_model"] = litellm_model
                 if key_cycle_attempts:
                     metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                     metrics["key_cycle_details"] = key_cycle_attempts
-                    _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on key {current_key_idx+1} ({litellm_model})")
+                    _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model})")
 
                 if is_stream:
                     stream_to_anth(self, resp, request_model, mapped_model, conn, metrics, t_start)
@@ -470,48 +481,146 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     conn.close()
                 return  # Success — done with this request
 
-            except Exception as e:
-                _log("ERR", f"key {current_key_idx+1} ({litellm_model}) connection error: {e}")
+            except socket.timeout as e:
+                # Timeout on this key attempt — record detailed info
+                elapsed_ms = int((time.time() - t_start) * 1000)
+                timeout_detail = {
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": "upstream_socket_timeout",
+                    "variant_idx": start_variant_idx,
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "attempt_number": attempt_idx + 1,
+                    "total_keys": NUM_KEYS,
+                    "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+                    "elapsed_since_request_start_ms": elapsed_ms,
+                    "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                    "error_message": str(e)[:200],
+                }
+                _log_error_detail(timeout_detail)
+                _log("TIMEOUT", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) socket timeout "
+                               f"after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s), cycling to next key")
                 key_cycle_attempts.append({
+                    "variant_idx": start_variant_idx,
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "error": str(e)[:200],
-                    "error_type": "ConnectionError",
+                    "error_type": "SocketTimeout",
+                    "elapsed_ms": elapsed_ms,
+                    "proxy_timeout_ms": PROXY_TIMEOUT * 1000,
+                    "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
                 })
                 continue  # Try next key
 
-        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors ───
-        _log("ALL-KEYS-429", f"All {NUM_KEYS} key groups exhausted for {mapped_model}. "
-                             f"Cycled: {[a.get('litellm_model') for a in key_cycle_attempts]}")
+            except Exception as e:
+                # Connection error on this key attempt → try next key
+                err_str = str(e)
+                error_class = type(e).__name__
+                elapsed_ms = int((time.time() - t_start) * 1000)
+                _log("ERR", f"v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model}) {error_class}: {e} (elapsed={elapsed_ms}ms)")
+                key_cycle_attempts.append({
+                    "variant_idx": start_variant_idx,
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "error": err_str[:200],
+                    "error_type": error_class,
+                    "elapsed_ms": elapsed_ms,
+                })
+                # Log connection errors to error_detail for analysis
+                _log_error_detail({
+                    "request_id": request_id,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "error_subcategory": f"upstream_{error_class}",
+                    "variant_idx": start_variant_idx,
+                    "key_idx": current_key_idx,
+                    "litellm_model": litellm_model,
+                    "attempt_number": attempt_idx + 1,
+                    "total_keys": NUM_KEYS,
+                    "elapsed_since_request_start_ms": elapsed_ms,
+                    "error_message": err_str[:500],
+                })
+                continue  # Try next key
+
+        # ─── All keys exhausted (429 on all NUM_KEYS) or all had connection errors/timeout ───
+        # This means every key group failed. Could be 429 (quota exhausted), timeout, or connection error.
+        # Classify the failure type for more precise error reporting.
+        all_429 = all(a.get("error_type") in (None, "429") for a in key_cycle_attempts)
+        has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
+        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError") for a in key_cycle_attempts)
+        elapsed_ms = int((time.time() - t_start) * 1000)
+
+        if all_429:
+            error_subcategory = "429_all_keys_exhausted"
+            _log("ALL-KEYS-429", f"All {NUM_KEYS} keys 429 for {mapped_model} v{start_variant_idx+1}. "
+                                 f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+        elif has_timeout:
+            error_subcategory = "all_keys_timeout_or_429"
+            _log("ALL-KEYS-TIMEOUT", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes timeouts). "
+                                     f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]} "
+                                     f"elapsed={elapsed_ms}ms")
+        else:
+            error_subcategory = "all_keys_connection_or_429"
+            _log("ALL-KEYS-CONNERR", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes connection errors). "
+                                     f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
+
         _log_error_detail({
             "request_id": request_id,
             "timestamp": datetime.datetime.now().isoformat(),
-            "error_subcategory": "429_all_keys_exhausted",
-            "upstream_status": 429,
+            "error_subcategory": error_subcategory,
             "model": mapped_model,
             "total_keys": NUM_KEYS,
             "key_cycle_attempts": key_cycle_attempts,
+            "key_cycle_attempt_types": [a.get("error_type", "429") for a in key_cycle_attempts],
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "all_429": all_429,
+            "has_timeout": has_timeout,
+            "has_connection_error": has_conn_err,
             "upstream_error_body_full": json.dumps(key_cycle_attempts)[:3000],
         })
-        metrics["status"] = 429
-        metrics["error_type"] = "AllKeysExhausted"
-        metrics["error_message"] = f"All {NUM_KEYS} ModelScope keys exhausted for model {mapped_model}."
+        metrics["status"] = 502 if has_timeout or has_conn_err else 429
+        metrics["error_type"] = error_subcategory
         metrics["key_cycle_attempts"] = key_cycle_attempts
-        metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+        metrics["key_cycle_attempt_types"] = [a.get("error_type", "429") for a in key_cycle_attempts]
+        metrics["duration_ms"] = elapsed_ms
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
         _log_metrics(metrics)
 
-        self._send_json(429, {
-            "type": "error",
-            "error": {
-                "type": "rate_limit_error",
-                "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
-                           f"Please wait for quota recovery (typically 15 minutes) before retrying. "
-                           f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
-            },
-            "model": request_model,
-        }, extra_headers={"retry-after": "30"})
+        # Return appropriate error based on failure type:
+        # - All 429 → 429 rate_limit_error (CC backoff, waits for quota recovery)
+        # - Has timeout/connection error → 502 api_error (CC retries, no auto-compact disaster)
+        if all_429:
+            self._send_json(429, {
+                "type": "error",
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
+                               f"Please wait for quota recovery (typically 15 minutes) before retrying. "
+                               f"Keys cycled: {', '.join(['k' + str(a['key_idx']+1) for a in key_cycle_attempts])}"
+                },
+                "model": request_model,
+            }, extra_headers={"retry-after": "30"})
+        else:
+            # Mixed failures (429 + timeout + connection error) — use api_error, NOT overloaded_error
+            # api_error → CC retries with backoff (no auto-compact = no context destruction)
+            failure_types = [a.get("error_type", "429") for a in key_cycle_attempts]
+            timeout_keys = [f"k{a['key_idx']+1}" for a in key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+            connerr_keys = [f"k{a['key_idx']+1}" for a in key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+            self._send_json(502, {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": f"All {NUM_KEYS} key groups failed for model {mapped_model} after {elapsed_ms/1000:.1f}s. "
+                               f"Failure types: {failure_types}. "
+                               f"Timeout keys: {timeout_keys} (PROXY_TIMEOUT={PROXY_TIMEOUT}s). "
+                               f"Connection error keys: {connerr_keys}. "
+                               f"Please retry — upstream may recover.",
+                },
+                "model": request_model,
+            })
 
-    # ─── Passthrough for OpenAI format requests (with key round-robin) ───
+    # ─── Passthrough for OpenAI format requests (with v×k round-robin) ───
     def _passthrough_openai(self):
         body_len = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(body_len) if body_len > 0 else b""
@@ -521,64 +630,32 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream = MODEL_UPSTREAMS[upstream_key]
         litellm_url = upstream["chat_url"]
 
-        start_key_idx = _next_key_idx(mapped_model)
-        key_cycle_attempts = []
+        # Replace model name in body with variant×key round-robin LiteLLM model_name
+        pair = _next_variant_key_pair(mapped_model)
+        body["model"] = f"{mapped_model}v{pair[0]+1}k{pair[1]+1}"  # e.g. "glm5.1v1k1"
+        forwarded_body = json.dumps(body).encode("utf-8")
 
-        for attempt_idx in range(NUM_KEYS):
-            current_key_idx = (start_key_idx + attempt_idx) % NUM_KEYS
-            litellm_model = f"{mapped_model}k{current_key_idx + 1}"
-            body["model"] = litellm_model
-            _log("KEY-RR-PASSTHRU", f"attempt {attempt_idx+1}/{NUM_KEYS}: key_idx={current_key_idx} → model={litellm_model}")
-
-            forwarded_body = json.dumps(body).encode("utf-8")
-            headers_out = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {LITELLM_KEY}",
-                "Content-Length": str(len(forwarded_body)),
-            }
-            parsed = urllib.parse.urlparse(litellm_url)
-            try:
-                conn = self._make_upstream_conn(parsed)
-                conn.request("POST", parsed.path, body=forwarded_body, headers=headers_out)
-                resp = conn.getresponse()
-                resp_body = resp.read()
-
-                if resp.status == 429:
-                    key_cycle_attempts.append({
-                        "key_idx": current_key_idx,
-                        "litellm_model": litellm_model,
-                        "error_body": resp_body.decode("utf-8", errors="replace")[:500],
-                    })
-                    conn.close()
-                    _log("KEY-429-PASSTHRU", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling")
-                    continue
-
-                self.send_response(resp.status)
-                for h in ["Content-Type"]:
-                    v = resp.getheader(h)
-                    if v:
-                        self.send_header(h, v)
-                self.end_headers()
-                self.wfile.write(resp_body)
-                conn.close()
-                return
-
-            except Exception as e:
-                _log("ERR", f"passthru key {current_key_idx+1} ({litellm_model}) connection error: {e}")
-                key_cycle_attempts.append({
-                    "key_idx": current_key_idx,
-                    "litellm_model": litellm_model,
-                    "error": str(e)[:200],
-                })
-                continue
-
-        _log("ALL-KEYS-429-PASSTHRU", f"All {NUM_KEYS} key groups exhausted in passthru for {mapped_model}")
-        self._send_json(429, {
-            "error": {
-                "type": "rate_limit_error",
-                "message": f"All {NUM_KEYS} ModelScope API keys exhausted for model {mapped_model}. Please wait for quota recovery."
-            }
-        }, extra_headers={"retry-after": "30"})
+        headers_out = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LITELLM_KEY}",
+            "Content-Length": str(len(forwarded_body)),
+        }
+        parsed = urllib.parse.urlparse(litellm_url)
+        try:
+            conn = self._make_upstream_conn(parsed)
+            conn.request("POST", parsed.path, body=forwarded_body, headers=headers_out)
+            resp = conn.getresponse()
+            resp_body = resp.read()
+            self.send_response(resp.status)
+            for h in ["Content-Type"]:
+                v = resp.getheader(h)
+                if v:
+                    self.send_header(h, v)
+            self.end_headers()
+            self.wfile.write(resp_body)
+            conn.close()
+        except Exception as e:
+            self._send_json(502, {"error": f"Upstream failed: {e}"})
 
     # ─── /v1/models proxy ───
     def _proxy_models(self):
@@ -597,9 +674,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
-                    # R19: Filter out key group internal names (e.g. "glm5.1k1", "dsv4pk3")
+                    # R21: Filter out variant×key routing names (e.g. "glm5.1v1k1", "dsv4pv3k5")
+                    # Also filters old R19 format (e.g. "glm5.1k1", "dsv4pk3")
                     # These are proxy→LiteLLM routing names, not meant for CC/agents
-                    if _is_key_group_name(model_id):
+                    if _is_routing_name(model_id):
                         continue
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
@@ -615,7 +693,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 conn.close()
             except Exception as e:
                 _log("ERROR", f"models proxy error for {model_key}: {e}")
-        # R19: Always include canonical names (glm5.1, dsv4p) even if LiteLLM only lists key groups
+        # R21: Always include canonical names (glm5.1, dsv4p) even if LiteLLM only lists v+k routing names
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
                 seen_ids.add(model_key)

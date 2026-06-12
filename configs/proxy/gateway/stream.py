@@ -14,8 +14,8 @@ import datetime
 import http.client
 import socket
 
-from .config import THINKING_SIGNATURE_DEFAULT
-from .logger import _log, _log_metrics
+from .config import THINKING_SIGNATURE_DEFAULT, PROXY_TIMEOUT
+from .logger import _log, _log_metrics, _log_error_detail
 
 
 def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_start):
@@ -262,9 +262,41 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
                     pending_stop_reason = stop_reason
                     metrics["finish_reason"] = finish_reason
 
-    except (http.client.RemoteDisconnected, socket.timeout, ConnectionResetError,
+    except socket.timeout as e:
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        _log_error_detail({
+            "request_id": metrics.get("request_id", "?"),
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error_subcategory": "stream_socket_timeout",
+            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+            "litellm_model": metrics.get("litellm_model", "?"),
+            "variant_idx": metrics.get("variant_idx", "?"),
+            "key_idx": metrics.get("key_idx", "?"),
+            "error_message": str(e)[:200],
+        })
+        _log("TIMEOUT", f"stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+        metrics["error_type"] = "StreamSocketTimeout"
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+        # Close gracefully so CC receives proper message_stop
+        _emit_graceful_end()
+        return
+    except (http.client.RemoteDisconnected, ConnectionResetError,
             OSError, http.client.IncompleteRead) as e:
-        _log("ERR", f"stream connection error: {e}")
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        error_class = type(e).__name__
+        _log("ERR", f"stream {error_class} after {elapsed_ms}ms: {e}")
+        _log_error_detail({
+            "request_id": metrics.get("request_id", "?"),
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error_subcategory": f"stream_{error_class}",
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "litellm_model": metrics.get("litellm_model", "?"),
+            "variant_idx": metrics.get("variant_idx", "?"),
+            "key_idx": metrics.get("key_idx", "?"),
+            "error_message": str(e)[:300],
+        })
         # Close gracefully so CC receives proper message_stop
         _emit_graceful_end()
         return
@@ -367,8 +399,38 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
                     finish_reason = fr
 
         conn.close()
+    except socket.timeout as e:
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        _log_error_detail({
+            "request_id": metrics.get("request_id", "?"),
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error_subcategory": "collect_stream_socket_timeout",
+            "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+            "litellm_model": metrics.get("litellm_model", "?"),
+            "variant_idx": metrics.get("variant_idx", "?"),
+            "key_idx": metrics.get("key_idx", "?"),
+            "error_message": str(e)[:200],
+        })
+        _log("TIMEOUT", f"collect_stream socket timeout after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s): {e}")
+        metrics["error_type"] = "CollectStreamSocketTimeout"
+        metrics["timeout_exceeded_by_ms"] = elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0
+        try:
+            conn.close()
+        except Exception:
+            pass
     except Exception as e:
-        _log("ERR", f"collect_stream connection error: {e}")
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        error_class = type(e).__name__
+        _log("ERR", f"collect_stream {error_class} after {elapsed_ms}ms: {e}")
+        _log_error_detail({
+            "request_id": metrics.get("request_id", "?"),
+            "timestamp": datetime.datetime.now().isoformat(),
+            "error_subcategory": f"collect_stream_{error_class}",
+            "elapsed_since_request_start_ms": elapsed_ms,
+            "error_message": str(e)[:300],
+        })
         try:
             conn.close()
         except Exception:

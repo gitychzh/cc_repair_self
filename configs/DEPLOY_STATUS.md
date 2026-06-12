@@ -59,6 +59,8 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 
 **⚠️ opc2_uname NOT YET DEPLOYED** — will only deploy after opc_uname proven stable for ≥2 hours.
 
+**opc_uname R21 DEPLOYED 2026-06-12 13:40 CST**: All containers healthy. Curl test glm5.1+dsv4p return 200. /v1/models shows canonical names only. Metrics confirm variant_idx+key_idx in v×k 2D round-robin logs.
+
 ## Current Parameters (R21)
 
 | Parameter | Value | File | Notes |
@@ -157,7 +159,7 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 | R19 | Key round-robin (7 groups per model, 429 cycling); num_retries 8→2/5→2 | Key cycling ✅ |
 | R20 | 41003 variant reduction 1000→10; resource savings | Deploying, verified ✅ |
 | R19.1 | socket.timeout单独捕获 + timeout_exceeded_by_ms + 全key失败分类 | No timeout events yet |
-| R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants; single upstream | **NOT YET DEPLOYED on either machine** |
+| R21 | Unified ms_uni41001 (140 dep glm5.1+dsv4p); variant×key 2D round-robin; dsv4p 11→10 variants; single upstream | **DEPLOYED on opc_uname 2026-06-12; gateway package updated to R21; NOT YET on opc2_uname** |
 
 ## 10 Variant Model IDs (ms_uni41001, R21)
 

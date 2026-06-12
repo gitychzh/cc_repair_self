@@ -4,6 +4,9 @@
 All configurable parameters are read from env vars with defaults.
 Immutable constraints (variant model IDs, rpm=1, frontend model names,
 container names, port assignments) are documented in CLAUDE.md.
+
+R21: Added NUM_VARIANTS, VARIANT_IDS, v×k 2D round-robin support.
+Proxy precisely specifies variant+key combo → LiteLLM just forwards.
 """
 import os
 import threading
@@ -35,14 +38,15 @@ def _ensure_url_path(url: str, path: str) -> str:
     return stripped + path
 
 # ─── Per-model upstream routing ──────────────────────────────────────────
+# R21: Both models route to ms_uni41001 (unified container with 140 dep)
 MODEL_UPSTREAMS = {
     "glm5.1": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_test41003:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_test41003:4000/v1/models"), "/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
     "dsv4p": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/models"), "/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
@@ -50,9 +54,8 @@ DEFAULT_UPSTREAM_MODEL = "glm5.1"
 # ─── Model name → LiteLLM model_name mapping ────────────────────────────
 # NEVER change the variant model IDs — each has independent 200/id/day quota.
 # Tier-based routing (inspired by cc-switch): Claude model tiers → backend models.
-# "opus" tier → glm5.1 (high-capability, 7000 dep pool, with thinking)
-# "sonnet" tier → glm5.1 (same backend, without thinking for simpler tasks)
-# "haiku" tier → dsv4p (lighter model, 77 dep pool, fast responses)
+# "opus" tier → glm5.1 (high-capability, with thinking)
+# "haiku" tier → dsv4p (lighter model, fast responses)
 # This allows other agents (OpenCode, Codex, etc.) to specify claude-tier names
 # or OpenAI-style names and get routed to appropriate backends automatically.
 MODEL_MAP = {
@@ -76,16 +79,15 @@ MODEL_MAP = {
     "claude-3-5-haiku-20241022": "dsv4p",  # haiku tier → dsv4p
     "claude-3-opus-20240229": "glm5.1",
     # OpenAI-style names for other agents (OpenCode, Codex, etc.)
-    # opus-tier equivalent → glm5.1
     "gpt-4o": "glm5.1",
-    "gpt-4o-mini": "dsv4p",      # mini tier → dsv4p (lighter)
+    "gpt-4o-mini": "dsv4p",
     "o3": "glm5.1",
     "o3-mini": "dsv4p",
     "o4-mini": "dsv4p",
     "gpt-4.1": "glm5.1",
     "gpt-4.1-mini": "dsv4p",
     "gpt-4.1-nano": "dsv4p",
-    "codex-mini-latest": "glm5.1",  # Codex CLI default → glm5.1 (strong coding)
+    "codex-mini-latest": "glm5.1",
 }
 
 # Thinking support per backend model
@@ -111,19 +113,73 @@ MODEL_INPUT_TOKEN_SAFETY = {
 OUTPUT_TOKEN_MARGIN = 8192  # Room for output after thinking_budget
 THINKING_SIGNATURE_DEFAULT = "ErUB3WY0k2GCM2h+4O0S3Y3W3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f"
 
-# ─── Key round-robin ──────────────────────────────────────────────────────
+# ─── Variant×Key 2D round-robin (R21) ─────────────────────────────────────
+# 2D round-robin: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+# → model name: "{base}v{V}k{K}" (e.g. glm5.1v1k1, dsv4pv3k5)
+# On 429: same variant, cycle to next key (k→k+1). All 7 keys 429 → return 429 to agent.
+# R19 was key-only round-robin (glm5.1k1~k7). R21 adds variant dimension for precise control.
 NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
-_key_rr_counter = {}
-_key_rr_lock = threading.Lock()
+NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
+NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
+NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
 
-def _next_key_idx(model: str) -> int:
-    with _key_rr_lock:
-        idx = _key_rr_counter.get(model, 0)
-        _key_rr_counter[model] = (idx + 1) % NUM_KEYS
-        return idx
+# Variant model IDs for each backend — proxy uses these to construct precise model names.
+# Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
+# R21: dsv4p reduced from 11→10 variants per user decision (v11 'DeEpSeek-V4-Pro' removed).
+GLM51_VARIANT_IDS = [
+    "ZHIPUAI/GLM-5.1",      # v1
+    "ZHIPUAI/GLm-5.1",      # v2
+    "ZHIPUAI/GlM-5.1",      # v3
+    "ZHIPUAI/Glm-5.1",      # v4
+    "ZHIPUAI/gLM-5.1",      # v5
+    "ZHIPUAI/gLm-5.1",      # v6
+    "ZHIPUAI/glM-5.1",      # v7
+    "ZHIPUAI/glm-5.1",      # v8
+    "ZHIPUAi/GLM-5.1",      # v9
+    "ZHIPUAi/GLm-5.1",      # v10
+]
+DSV4P_VARIANT_IDS = [
+    "deepseek-ai/deepseek-v4-pro",      # v1
+    "deepseek-ai/Deepseek-V4-Pro",      # v2
+    "deepseek-ai/DeepSeek-v4-pro",      # v3
+    "deepseek-ai/DeepSeek-v4-Pro",      # v4
+    "deepseek-ai/DeepSeek-V4-PrO",      # v5
+    "deepseek-ai/DeepSeek-V4-PRo",      # v6
+    "deepseek-ai/DeepSeeK-V4-Pro",      # v7
+    "deepseek-ai/DeepSeEk-V4-Pro",      # v8
+    "deepseek-ai/DeepSEek-V4-Pro",      # v9
+    "deepseek-ai/DeePSeek-V4-Pro",      # v10
+]
+VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
 
-def _is_key_group_name(name: str) -> bool:
+_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0, "dsv4p": 0}
+_vk_rr_lock = threading.Lock()
+
+def _next_variant_key_pair(model: str) -> tuple:
+    """Get next (variant_idx, key_idx) for 2D round-robin.
+    Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
+    Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+    """
+    num_variants = NUM_VARIANTS.get(model, 10)
+    with _vk_rr_lock:
+        counter = _vk_rr_counter.get(model, 0)
+        variant_idx = (counter // NUM_KEYS) % num_variants
+        key_idx = counter % NUM_KEYS
+        _vk_rr_counter[model] = counter + 1
+        return (variant_idx, key_idx)
+
+def _is_routing_name(name: str) -> bool:
+    """Check if a model name is an internal variant×key routing name (e.g. 'glm5.1v1k1', 'dsv4pv3k5').
+    R21: Routing names use v+k format. These are proxy→LiteLLM routing, NOT meant for CC/agents.
+    Also checks old R19 format (glm5.1k1, dsv4pk3) for backward compatibility."""
     for base in MODEL_UPSTREAMS:
+        num_variants = NUM_VARIANTS.get(base, 10)
+        # R21 format: base + v{N} + k{K}
+        for vi in range(num_variants):
+            for ki in range(NUM_KEYS):
+                if name == f"{base}v{vi+1}k{ki+1}":
+                    return True
+        # R19 backward compat: base + k{K}
         for ki in range(NUM_KEYS):
             if name == f"{base}k{ki+1}":
                 return True
