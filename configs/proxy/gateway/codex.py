@@ -846,7 +846,6 @@ def _collect_stream_to_responses(handler, resp, conn, request_model, mapped_mode
                         total_input_tokens = pt
                     if ct > 0:
                         total_output_tokens = ct
-                    _log("CX-USAGE", f"usage chunk: pt={pt} ct={ct} → total_in={total_input_tokens} total_out={total_output_tokens}")
 
                 if fr:
                     finish_reason = fr
