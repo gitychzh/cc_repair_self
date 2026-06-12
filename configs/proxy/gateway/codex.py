@@ -465,15 +465,23 @@ def stream_responses_passthrough(handler, resp, conn, metrics, t_start, request_
                 delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                 fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
-                # ── Text content delta → response.output_text.delta ──
-                text_delta = delta.get("content")
-                if text_delta:
-                    text_buffer += text_delta
+                # ── Content delta → response.output_text.delta ──
+                # GLM-5.1 sends reasoning_content and content in the SAME delta chunk.
+                # For Codex CLI (Responses API), there's no separate "reasoning" output type —
+                # we merge both reasoning_content AND content into output_text so Codex gets
+                # the full model output. This is different from CC's Anthropic path which
+                # splits reasoning into thinking blocks.
+                text_delta = delta.get("content") or ""
+                reasoning_delta = delta.get("reasoning_content") or ""
+                # Merge both into one delta for Codex output_text
+                merged_delta = reasoning_delta + text_delta
+                if merged_delta:
+                    text_buffer += merged_delta
                     handler._send_sse("response.output_text.delta", {
                         "type": "response.output_text.delta",
                         "output_index": output_index,
                         "content_index": content_index,
-                        "delta": text_delta,
+                        "delta": merged_delta,
                     })
 
                 # ── Tool calls → function_call output items ──
