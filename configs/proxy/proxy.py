@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Anthropic ↔ OpenAI format converter proxy with metrics logging and key round-robin.
+"""Anthropic ↔ OpenAI format converter proxy with metrics logging and variant×key round-robin.
 
-Format conversion + key-level round-robin for even token distribution across ModelScope keys.
-On 429, cycles to next key (k1→k2→k3→k4→k5→k6→k7→k1). All 7 keys 429 → return 429 to agent.
+Format conversion + variant×key level round-robin for even distribution across ModelScope keys.
+2D round-robin: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS.
+→ model name: "{base}v{V}k{K}" (e.g. glm5.1v1k1, dsv4pv3k5)
+On 429, cycles to next key (same variant): k→k+1. All 7 keys 429 → return 429 to agent.
 Non-429 errors (500/timeout/auth) handled by LiteLLM's own num_retries.
 
-Architecture:
-  CC(40001) → this proxy (format conversion + metrics + key round-robin)
-      → 41003 LiteLLM (glm5.1k1~k7, each 10 variants with 1 key, simple-shuffle)
-      → 42001 LiteLLM (dsv4pk1~k7, each 11 variants with 1 key, simple-shuffle)
+Architecture (R21):
+  CC(40001) → this proxy (format conversion + metrics + variant×key 2D round-robin)
+      → 41001 ms_uni41001 LiteLLM (glm5.1v1k1~v10k7 = 70 dep + dsv4pv1k1~v10k7 = 70 dep = 140 total)
+  Proxy precisely specifies variant+key combo. LiteLLM does NOT do routing — just forwards.
 
 Env vars:
-  LITELLM_URL_GLM51  — glm5.1 chat URL (default: http://glm5.1_test41003:4000/v1/chat/completions)
-  LITELLM_URL_DSV4P  — dsv4p chat URL (default: http://dsv4p_uni42001:4000/v1/chat/completions)
+  LITELLM_URL_GLM51  — glm5.1 chat URL (default: http://ms_uni41001:4000/v1/chat/completions)
+  LITELLM_URL_DSV4P  — dsv4p chat URL (default: http://ms_uni41001:4000/v1/chat/completions)
   LITELLM_MODELS_URL_GLM51 — glm5.1 models URL
   LITELLM_MODELS_URL_DSV4P — dsv4p models URL
   LITELLM_KEY        — upstream API key (default: sk-litellm-local)
@@ -21,9 +23,11 @@ Env vars:
   MAX_TOOL_DESC       — max chars for tool descriptions (default: 2000)
   MAX_SCHEMA_DESC     — max chars for schema param descriptions (default: 600)
   CHARS_PER_TOKEN_ESTIMATE — chars per token for input safety (default: 2.0, mixed Chinese/English)
-  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 128000, model capacity 131072)
+  MODEL_INPUT_TOKEN_SAFETY_GLM51 — glm5.1 input token safety limit (default: 128000)
   MODEL_INPUT_TOKEN_SAFETY_DSV4P  — dsv4p input token safety limit (default: 128000)
   NUM_KEYS            — number of API keys per model for round-robin (default: 7)
+  NUM_VARIANTS_GLM51  — number of variants per key group for glm5.1 (default: 10)
+  NUM_VARIANTS_DSV4P  — number of variants per key group for dsv4p (default: 10)
   LOG_DIR             — log directory (default: /app/logs)
 """
 import http.server
@@ -50,6 +54,38 @@ MAX_SCHEMA_DESC = int(os.environ.get("MAX_SCHEMA_DESC", "600"))
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "2.0"))
 NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
+NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
+NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
+NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
+
+# Variant model IDs for each backend — proxy uses these to construct precise model names.
+# Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
+# R21: dsv4p reduced from 11→10 variants per user decision (v11 'DeEpSeek-V4-Pro' removed).
+GLM51_VARIANT_IDS = [
+    "ZHIPUAI/GLM-5.1",      # v1
+    "ZHIPUAI/GLm-5.1",      # v2
+    "ZHIPUAI/GlM-5.1",      # v3
+    "ZHIPUAI/Glm-5.1",      # v4
+    "ZHIPUAI/gLM-5.1",      # v5
+    "ZHIPUAI/gLm-5.1",      # v6
+    "ZHIPUAI/glM-5.1",      # v7
+    "ZHIPUAI/glm-5.1",      # v8
+    "ZHIPUAi/GLM-5.1",      # v9
+    "ZHIPUAi/GLm-5.1",      # v10
+]
+DSV4P_VARIANT_IDS = [
+    "deepseek-ai/deepseek-v4-pro",      # v1
+    "deepseek-ai/Deepseek-V4-Pro",      # v2
+    "deepseek-ai/DeepSeek-v4-pro",      # v3
+    "deepseek-ai/DeepSeek-v4-Pro",      # v4
+    "deepseek-ai/DeepSeek-V4-PrO",      # v5
+    "deepseek-ai/DeepSeek-V4-PRo",      # v6
+    "deepseek-ai/DeepSeeK-V4-Pro",      # v7
+    "deepseek-ai/DeepSeEk-V4-Pro",      # v8
+    "deepseek-ai/DeepSEek-V4-Pro",      # v9
+    "deepseek-ai/DeePSeek-V4-Pro",      # v10
+]
+VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
 
 def _ensure_url_path(url: str, path: str) -> str:
     """If env var provides only host or host/v1, append the required full path."""
@@ -61,14 +97,15 @@ def _ensure_url_path(url: str, path: str) -> str:
     return stripped + path
 
 # Per-model upstream routing — chat_url and models_url
+# R21: Both models route to ms_uni41001 (unified container with 140 dep)
 MODEL_UPSTREAMS = {
     "glm5.1": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://glm5.1_test41003:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://glm5.1_test41003:4000/v1/models"), "/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
     "dsv4p": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://dsv4p_uni42001:4000/v1/models"), "/v1/models"),
+        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
+        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = "glm5.1"
@@ -140,26 +177,39 @@ _log_lock = threading.Lock()
 _metrics_lock = threading.Lock()
 _error_detail_lock = threading.Lock()
 
-# ─── Key round-robin counters ──────────────────────────────────────────────
-# R19: Even token distribution across ModelScope keys via round-robin.
-# Each model group (glm5.1k1~k7) has 10 variants with ONE key.
-# Proxy cycles keys: request N → key_idx = counter % NUM_KEYS → model "glm5.1k{idx+1}"
-# On 429 from a key group, proxy cycles to next key group.
-# After all NUM_KEYS key groups return 429 → return 429 to agent with descriptive error.
-_key_rr_counter = {}  # model → int counter, e.g. {"glm5.1": 0, "dsv4p": 0}
-_key_rr_lock = threading.Lock()
+# ─── Variant×Key 2D round-robin counters (R21) ─────────────────────────────
+# 2D round-robin: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+# → model name: "{base}v{V}k{K}" (e.g. glm5.1v1k1, dsv4pv3k5)
+# On 429: same variant, cycle to next key (k→k+1). All 7 keys 429 → return 429 to agent.
+# R19 was key-only round-robin (glm5.1k1~k7). R21 adds variant dimension for precise control.
+_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0, "dsv4p": 0}
+_vk_rr_lock = threading.Lock()
 
-def _next_key_idx(model: str) -> int:
-    """Get next key index for round-robin. Returns 0-based index (0=KEY1, 6=KEY7)."""
-    with _key_rr_lock:
-        idx = _key_rr_counter.get(model, 0)
-        _key_rr_counter[model] = (idx + 1) % NUM_KEYS
-        return idx
+def _next_variant_key_pair(model: str) -> tuple:
+    """Get next (variant_idx, key_idx) for 2D round-robin.
+    Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
+    Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+    """
+    num_variants = NUM_VARIANTS.get(model, 10)
+    with _vk_rr_lock:
+        counter = _vk_rr_counter.get(model, 0)
+        variant_idx = (counter // NUM_KEYS) % num_variants
+        key_idx = counter % NUM_KEYS
+        _vk_rr_counter[model] = counter + 1
+        return (variant_idx, key_idx)
 
-def _is_key_group_name(name: str) -> bool:
-    """Check if a model name is an internal key group routing name (e.g. 'glm5.1k1', 'dsv4pk3').
-    R19: Key group names are proxy→LiteLLM routing, NOT meant for CC/agents."""
+def _is_routing_name(name: str) -> bool:
+    """Check if a model name is an internal variant×key routing name (e.g. 'glm5.1v1k1', 'dsv4pv3k5').
+    R21: Routing names use v+k format. These are proxy→LiteLLM routing, NOT meant for CC/agents.
+    Also checks old R19 format (glm5.1k1, dsv4pk3) for backward compatibility."""
     for base in MODEL_UPSTREAMS:
+        num_variants = NUM_VARIANTS.get(base, 10)
+        # R21 format: base + v{N} + k{K}
+        for vi in range(num_variants):
+            for ki in range(NUM_KEYS):
+                if name == f"{base}v{vi+1}k{ki+1}":
+                    return True
+        # R19 backward compat: base + k{K}
         for ki in range(NUM_KEYS):
             if name == f"{base}k{ki+1}":
                 return True
@@ -765,24 +815,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"msgs={len(oai_body.get('messages',[]))} "
                     f"tools={len(oai_body.get('tools',[]))}")
 
-        # ─── Key round-robin + 429 cycling (R19) ───
-        # LiteLLM config has 7 key groups per model (glm5.1k1~k7, dsv4pk1~k7).
-        # Each group has its own variants with ONE key.
-        # Proxy round-robins: request N → key_idx = counter % NUM_KEYS → model "{mapped_model}k{idx+1}"
-        # On 429 from a key group, cycle to next key group (k1→k2→k3→...→k7→k1).
-        # After all 7 key groups return 429 → return 429 to agent (all keys exhausted).
+        # ─── Variant×Key 2D round-robin + 429 cycling (R21) ───
+        # LiteLLM config has 140 deployments (7 glm5.1 key groups × 10 variants + 7 dsv4p × 10 variants).
+        # Proxy precisely specifies variant+key combo: model="{base}v{V}k{K}" (e.g. glm5.1v1k1)
+        # 2D round-robin: request N → variant_idx=(N//7)%10, key_idx=N%7
+        # On 429 from a key, cycle to next key (same variant): k→k+1
+        # After all NUM_KEYS keys return 429 (same variant) → return 429 to agent (token quota exhausted)
         # Non-429 errors (auth/thinking_budget) use existing resilience retry logic.
 
-        start_key_idx = _next_key_idx(mapped_model)
+        start_pair = _next_variant_key_pair(mapped_model)
+        start_variant_idx = start_pair[0]
+        start_key_idx = start_pair[1]
         litellm_model_base = mapped_model  # "glm5.1" or "dsv4p"
         key_cycle_attempts = []  # Track all 429 attempts for logging
 
         for attempt_idx in range(NUM_KEYS):
-            # Cycle to next key: start from round-robin position, then shift on each 429
+            # 429 cycling: same variant, shift key (k→k+1)
             current_key_idx = (start_key_idx + attempt_idx) % NUM_KEYS
-            litellm_model = f"{litellm_model_base}k{current_key_idx + 1}"  # e.g. "glm5.1k1"
+            litellm_model = f"{litellm_model_base}v{start_variant_idx+1}k{current_key_idx+1}"  # e.g. "glm5.1v1k1"
             oai_body["model"] = litellm_model
-            _log("KEY-RR", f"attempt {attempt_idx+1}/{NUM_KEYS}: key_idx={current_key_idx} → model={litellm_model}")
+            _log("KEY-RR", f"attempt {attempt_idx+1}/{NUM_KEYS}: v{start_variant_idx+1} k{current_key_idx+1} → model={litellm_model}")
 
             # Forward to LiteLLM with the key-specific model group
             auth_key = self.headers.get("x-api-key") or self.headers.get("X-Api-Key") or LITELLM_KEY
@@ -831,6 +883,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     # After all NUM_KEYS groups return 429 → all keys exhausted → return 429 to agent.
                     if resp.status == 429:
                         key_cycle_attempts.append({
+                            "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
                             "error_body": err_str[:500],
@@ -841,13 +894,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             "timestamp": datetime.datetime.now().isoformat(),
                             "error_subcategory": "429_key_cycle_attempt",
                             "upstream_status": 429,
+                            "variant_idx": start_variant_idx,
                             "key_idx": current_key_idx,
                             "litellm_model": litellm_model,
                             "attempt_number": attempt_idx + 1,
                             "total_keys": NUM_KEYS,
                             "upstream_error_body_full": err_str[:3000],
                         })
-                        _log("KEY-429", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
+                        _log("KEY-429", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) → 429, cycling to next key")
                         continue  # Try next key in round-robin
 
                     # ─── Non-429 errors: resilience retry (unchanged logic) ───
@@ -1010,14 +1064,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
 
                 # ─── Success: resp.status < 400 ───
-                # Record which key group was used for this successful request
+                # Record which variant+key was used for this successful request
                 metrics["key_idx"] = current_key_idx
+                metrics["variant_idx"] = start_variant_idx
                 metrics["litellm_model"] = litellm_model
                 # If we cycled through keys before success, record that info
                 if key_cycle_attempts:
                     metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                     metrics["key_cycle_details"] = key_cycle_attempts
-                    _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on key {current_key_idx+1} ({litellm_model})")
+                    _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model})")
 
                 if is_stream:
                     self._stream_to_anth(resp, request_model, mapped_model, conn, metrics, t_start)
@@ -1049,6 +1104,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "request_id": request_id,
                     "timestamp": datetime.datetime.now().isoformat(),
                     "error_subcategory": "upstream_socket_timeout",
+                    "variant_idx": start_variant_idx,
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "attempt_number": attempt_idx + 1,
@@ -1059,9 +1115,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "error_message": str(e)[:200],
                 }
                 _log_error_detail(timeout_detail)
-                _log("TIMEOUT", f"key {current_key_idx+1}/{NUM_KEYS} ({litellm_model}) socket timeout "
+                _log("TIMEOUT", f"v{start_variant_idx+1} k{current_key_idx+1}/{NUM_KEYS} ({litellm_model}) socket timeout "
                                f"after {elapsed_ms}ms (PROXY_TIMEOUT={PROXY_TIMEOUT}s), cycling to next key")
                 key_cycle_attempts.append({
+                    "variant_idx": start_variant_idx,
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "error": str(e)[:200],
@@ -1078,8 +1135,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # Classify error type for more precise logging
                 error_class = type(e).__name__
                 elapsed_ms = int((time.time() - t_start) * 1000)
-                _log("ERR", f"key {current_key_idx+1} ({litellm_model}) {error_class}: {e} (elapsed={elapsed_ms}ms)")
+                _log("ERR", f"v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model}) {error_class}: {e} (elapsed={elapsed_ms}ms)")
                 key_cycle_attempts.append({
+                    "variant_idx": start_variant_idx,
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "error": err_str[:200],
@@ -1091,6 +1149,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "request_id": request_id,
                     "timestamp": datetime.datetime.now().isoformat(),
                     "error_subcategory": f"upstream_{error_class}",
+                    "variant_idx": start_variant_idx,
                     "key_idx": current_key_idx,
                     "litellm_model": litellm_model,
                     "attempt_number": attempt_idx + 1,
@@ -1110,16 +1169,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if all_429:
             error_subcategory = "429_all_keys_exhausted"
-            _log("ALL-KEYS-429", f"All {NUM_KEYS} key groups 429 for {mapped_model}. "
+            _log("ALL-KEYS-429", f"All {NUM_KEYS} keys 429 for {mapped_model} v{start_variant_idx+1}. "
                                  f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
         elif has_timeout:
             error_subcategory = "all_keys_timeout_or_429"
-            _log("ALL-KEYS-TIMEOUT", f"All {NUM_KEYS} key groups failed for {mapped_model} (includes timeouts). "
+            _log("ALL-KEYS-TIMEOUT", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes timeouts). "
                                      f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]} "
                                      f"elapsed={elapsed_ms}ms")
         else:
             error_subcategory = "all_keys_connection_or_429"
-            _log("ALL-KEYS-CONNERR", f"All {NUM_KEYS} key groups failed for {mapped_model} (includes connection errors). "
+            _log("ALL-KEYS-CONNERR", f"All {NUM_KEYS} keys failed for {mapped_model} v{start_variant_idx+1} (includes connection errors). "
                                      f"Cycled: {[a['litellm_model'] for a in key_cycle_attempts]}")
 
         _log_error_detail({
@@ -1657,9 +1716,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream = MODEL_UPSTREAMS[upstream_key]
         litellm_url = upstream["chat_url"]
 
-        # Replace model name in body with key-round-robin LiteLLM model_name
-        key_idx = _next_key_idx(mapped_model)
-        body["model"] = f"{mapped_model}k{key_idx + 1}"  # e.g. "glm5.1k1"
+        # Replace model name in body with variant×key round-robin LiteLLM model_name
+        pair = _next_variant_key_pair(mapped_model)
+        body["model"] = f"{mapped_model}v{pair[0]+1}k{pair[1]+1}"  # e.g. "glm5.1v1k1"
         forwarded_body = json.dumps(body).encode("utf-8")
 
         headers_out = {
@@ -1688,7 +1747,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _proxy_models(self):
         all_models = []
         seen_ids = set()
-        # R19: Key group names (glm5.1k1~k7, dsv4pk1~k7) are internal routing.
+        # R21: Routing names (glm5.1v1k1~v10k7, dsv4pv1k1~v10k7) are internal routing.
+        # Also filter old R19 format (glm5.1k1~k7, dsv4pk1~k7) for backward compat.
         # Only expose canonical names (glm5.1, dsv4p) to CC/agents.
         for model_key, upstream in MODEL_UPSTREAMS.items():
             models_url = upstream["models_url"]
@@ -1703,9 +1763,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
-                    # R19: Filter out key group internal names (e.g. "glm5.1k1", "dsv4pk3")
+                    # R21: Filter out variant×key routing names (e.g. "glm5.1v1k1", "dsv4pv3k5")
+                    # Also filters old R19 format (e.g. "glm5.1k1", "dsv4pk3")
                     # These are proxy→LiteLLM routing names, not meant for CC/agents
-                    if _is_key_group_name(model_id):
+                    if _is_routing_name(model_id):
                         continue
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
@@ -1941,7 +2002,7 @@ def main():
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
     _log("START", f"GLM-5.1 gateway: {MODEL_UPSTREAMS['glm5.1']['chat_url']}")
     _log("START", f"DSv4P gateway: {MODEL_UPSTREAMS['dsv4p']['chat_url']}")
-    _log("START", f"Key round-robin: NUM_KEYS={NUM_KEYS} (429 cycles through all keys before returning to agent)")
+    _log("START", f"Variant×Key 2D round-robin: NUM_KEYS={NUM_KEYS}, NUM_VARIANTS={NUM_VARIANTS} (429 cycles keys, same variant)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

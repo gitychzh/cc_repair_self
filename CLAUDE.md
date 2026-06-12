@@ -9,39 +9,43 @@
 ## 架构
 
 ```
-Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
-             → :41003 LiteLLM (glm5.1k1~k7, 7 key groups × 10 variants = 70 dep) [PRIMARY]
-             → :42001 LiteLLM (dsv4pk1~k7, 7 key groups × 11 variants = 77 dep)
-             → :41001 LiteLLM (glm5.1k1~k7, 7 key groups × 1000 variants = 7000 dep) [BACKUP]
+Claude Code → :40001/40002 proxy (格式转换 + metrics + variant×key 2D round-robin)
+             → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 + dsv4pv1k1~v10k7 = 140 dep) [UNIFIED]
+             → :41003 LiteLLM (glm5.1k1~k7, 70 dep) [RETAINED, NOT ROUTED]
+             → :42001 LiteLLM (dsv4pk1~k7, 77 dep) [RETAINED, NOT ROUTED]
              → ModelScope API
 ```
 
-核心原则：**proxy.py 做格式转换 + metrics logging + key round-robin（429时按顺序换下一个key，7 key全429才返回agent），不做压缩、不做截断。LiteLLM 负责 variant-level routing（每个key group内simple-shuffle）和500/timeout的retry。压缩完全由 CC 内置 auto-compact 控制。**
+核心原则：**proxy.py 做格式转换 + metrics logging + variant×key 2D round-robin（request N → variant_idx=(N//7)%10, key_idx=N%7 → model `{base}v{V}k{K}`，429时同variant换下一个key，7 key全429才返回agent），不做压缩、不做截断。LiteLLM 只做转发（proxy精确指定variant+key组合），500/timeout由LiteLLM num_retries处理。压缩完全由 CC 内置 auto-compact 控制。**
 
-**Key Round-Robin (R19) 机制：**
-- Proxy 维护 key 轮换 counter：request N → key_idx = counter % 7 → model `glm5.1k{idx+1}`
-- 429 时：按顺序换下一个key（k1→k2→k3→k4→k5→k6→k7→k1→...）
-- 7 key 全部 429 → 返回 429 给 agent（所有key的token quota耗尽）
-- 每个key的 429 尝试都记录在 error_detail 日志中
-- 成功时：记录 key_idx 和 litellm_model，以及之前的 429 cycling 信息
+**Variant×Key 2D Round-Robin (R21) 机制：**
+- Proxy 维护 2D轮换 counter：request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS → model `glm5.1v{V}k{K}`
+- 轮询序列：v1k1→v1k2→...→v1k7→v2k1→v2k2→...→v10k7→回到v1k1
+- 429 时：同variant换下一个key（k→k+1），不变variant
+- 7 key 全部 429（同variant） → 返回 429 给 agent（所有key的token quota耗尽）
+- 每个key的 429 尝试都记录在 error_detail 日志中（含variant_idx）
+- 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 429 cycling 信息
 
 ## 不可变更约束（NEVER CHANGE）
 
 | 约束 | 原因 |
 |------|------|
-| **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改** |
+| **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改**（R21用户主动删除dsv4p v11） |
 | **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
 | frontend model_name (agent-facing) | `glm5.1`, `dsv4p` — CC/agent请求使用这两个名字 |
-| LiteLLM model_name (internal) | `glm5.1k1`~`glm5.1k7`, `dsv4pk1`~`dsv4pk7` — proxy映射后发给LiteLLM |
-| Docker container names | `glm5.1_uni41001`, `glm5.1_test41003`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
-| port assignments | 41001=glm5.1-backup, 41003=glm5.1-primary, 42001=dsv4p |
+| LiteLLM model_name (internal, R21) | `glm5.1v1k1`~`glm5.1v10k7`, `dsv4pv1k1`~`dsv4pv10k7` — proxy精确指定variant+key |
+| Docker container names | `ms_uni41001`, `glm5.1_test41003`, `dsv4p_uni42001`, `cc_postgres`, `auth_to_api_40001/40002` |
+| port assignments | 41001=unified(ms_uni41001), 41003=glm5.1-fallback, 42001=dsv4p-fallback |
 
-### 11 Variant Model IDs（DSv4P，禁止增删改）
+### 10 Variant Model IDs（R21, ms_uni41001）
 
-**DSv4P (11 variants, 在 42001):**
-`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`, `deepseek-ai/DeEpSeek-V4-Pro`
+**GLM-5.1 (10 variants):**
+`ZHIPUAI/GLM-5.1`, `ZHIPUAI/GLm-5.1`, `ZHIPUAI/GlM-5.1`, `ZHIPUAI/Glm-5.1`, `ZHIPUAI/gLM-5.1`, `ZHIPUAI/gLm-5.1`, `ZHIPUAI/glM-5.1`, `ZHIPUAI/glm-5.1`, `ZHIPUAi/GLM-5.1`, `ZHIPUAi/GLm-5.1`
 
-**GLM-5.1: 10 variants on 41003（详见 configs/litellm-glm51-test/config.yaml，R20 reduced from 1000 to 10）。41001 BACKUP仍用1000 variants。**
+**DSv4P (10 variants, R21 reduced from 11):**
+`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`
+
+**已删除**: `deepseek-ai/DeEpSeek-V4-Pro` (dsv4p v11) — R21用户主动决定，每key减少200/id/day额度
 
 ## 关键原则（长期知识）
 
@@ -77,42 +81,38 @@ Claude Code → :40001/40002 proxy (格式转换 + metrics + key round-robin)
 | autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
 
-### LiteLLM router_settings (41003 glm5.1-primary, 7 key groups × 10 dep each)
+### LiteLLM router_settings (41001 ms_uni41001, 14 groups × 10 dep each = 140 dep)
 
 | 参数 | 当前值 | 说明 |
 |------|--------|------|
 | num_retries | 2 | proxy key cycling替代了LiteLLM的429 retry |
 | cooldown_time | 10 | RPM 1-min窗口，10s proportional |
-| routing_strategy | simple-shuffle | per key group 10 dep pool |
-| RateLimitErrorAllowedFails | 1 | 429 → proxy cycles to next key group |
+| routing_strategy | simple-shuffle | proxy精确指定model，LiteLLM只转发 |
+| RateLimitErrorAllowedFails | 1 | 429 → proxy cycles to next key |
 | TimeoutErrorAllowedFails | 2 | |
 | InternalServerErrorAllowedFails | 3 | ModelScope null choices |
 | AuthenticationErrorAllowedFails | 0 | |
 | BadRequestErrorAllowedFails | 0 | |
 
-### LiteLLM router_settings (42001 dsv4p, 7 key groups × 11 dep each)
+### Proxy / Docker-compose.yml env (R21新增)
 
-| 参数 | 当前值 | 说明 |
-|------|--------|------|
-| num_retries | 2 | proxy key cycling替代429 retry |
-| cooldown_time | 10 | |
-| routing_strategy | simple-shuffle | per key group 11 dep pool |
-| RateLimitErrorAllowedFails | 1 | |
-| TimeoutErrorAllowedFails | 2 | |
-| InternalServerErrorAllowedFails | 3 | |
+| 参数 | 当前值 | 范围 | 说明 |
+|------|--------|------|------|
+| NUM_VARIANTS_GLM51 | 10 | 5-10 | glm5.1每个key group的variant数 |
+| NUM_VARIANTS_DSV4P | 10 | 5-11 | dsv4p每个key group的variant数（R21从11减为10） |
 
 ## 项目文件结构
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（6个容器）
+  docker-compose.yml       # Docker编排（6个容器，41001=ms_uni41001）
   .env.template             # 环境变量模板
-  litellm-glm51/config.yaml       # 41001 LiteLLM配置（1000变体×7keys，BACKUP）
-  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（10变体×7keys=70 dep，PRIMARY）
-  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（11变体×7keys）
+  litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.1 + 10v×7k dsv4p = 140 dep）
+  litellm-glm51-test/config.yaml  # 41003 LiteLLM配置（10v×7k=70 dep，RETAINED NOT ROUTED）
+  litellm-dsv4p/config.yaml       # 42001 LiteLLM配置（11v×7k=77 dep，RETAINED NOT ROUTED）
   postgres/init-db.sh             # PostgreSQL初始化脚本
   proxy/
-    Dockerfile / proxy.py         # 格式转换代理（仅格式转换+metrics）
+    Dockerfile / proxy.py         # 格式转换代理（variant×key 2D round-robin+metrics）
   claude/
     settings-opc_uname.json        # → ~/.claude/settings.json
     settings-opc2_uname.json       # → ~/.claude/settings.json
@@ -126,8 +126,7 @@ scripts/
 
 | 文件 | 路径 | 修改后需 |
 |------|------|----------|
-| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51-test/config.yaml` | `docker restart glm5.1_test41003` |
-| LiteLLM 配置 | `/opt/cc-infra/litellm-dsv4p/config.yaml` | `docker restart dsv4p_uni42001` |
+| LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001` |
 | 转换代理 | `/opt/cc-infra/proxy/proxy.py` | rebuild + recreate proxy容器 |
 | Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
 | 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
@@ -137,14 +136,13 @@ scripts/
 ## 重启命令
 
 ```bash
-# LiteLLM 配置变更
-docker restart glm5.1_test41003
-docker restart dsv4p_uni42001
+# LiteLLM 配置变更（ms_uni41001）
+docker restart ms_uni41001
 
 # proxy.py 变更（需要重建镜像）
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
 
-# 全量重建
+# 全量重建（包括容器名变更 glm5.1_uni41001 → ms_uni41001）
 cd /opt/cc-infra && docker compose up -d --force-recreate
 
 # Claude Code 重启
