@@ -10,9 +10,10 @@ R23 refactoring: handlers.py is now a slim dispatcher that delegates:
 Two main request paths:
 1. /v1/messages → _handle_messages() → Anthropic format (CC/_cc)
 2. /v1/chat/completions → _handle_openai_with_cycling() → OpenAI format (_ol/_oc/_hm)
+3. /v1/responses → _handle_codex_responses() → Responses API format (Codex/_cx) [R24 NEW]
 
-Both paths use the same upstream.execute_request() for v×k cycling + error handling.
-The only difference is response formatting: Anthropic vs OpenAI.
+All paths use the same upstream.execute_request() for v×k cycling + error handling.
+The only difference is response formatting: Anthropic vs OpenAI vs Responses.
 """
 import http.server
 import json
@@ -41,6 +42,7 @@ from .error_mapping import (
     format_openai_error_upstream,
 )
 from .upstream import execute_request, UpstreamResult
+from .codex import handle_codex_responses
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -70,7 +72,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in ("/health", "/", "/v1/models", "/models") or parsed.path.startswith("/v1/models/") or parsed.path.startswith("/models/"):
+        if parsed.path in ("/health", "/", "/v1/models", "/models", "/v1/responses", "/responses") or parsed.path.startswith("/v1/models/") or parsed.path.startswith("/models/"):
             self.send_response(200)
             self.end_headers()
         else:
@@ -83,6 +85,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_messages()
         elif parsed.path in ("/v1/chat/completions", "/chat/completions"):
             self._handle_openai_with_cycling()
+        elif parsed.path in ("/v1/responses", "/responses"):  # R24: Responses API for Codex CLI
+            self._handle_codex_responses()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -533,6 +537,63 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
         except Exception:
             pass
+
+    # ─── /v1/responses — Responses API format request (Codex / _cx) ───
+    def _handle_codex_responses(self):
+        """Handle Responses API requests from Codex CLI.
+
+        Flow:
+          1. Parse Responses API request body
+          2. Detect agent type from model name (suffix _cx or codex-mini-latest)
+          3. Map model name to backend (strip suffix → get base model)
+          4. Delegate to codex.handle_codex_responses() which:
+             - Converts Responses API → Chat Completions format
+             - Calls upstream.execute_request() with v×k cycling
+             - Converts Chat Completions response → Responses API format
+          5. Returns Responses API format response to Codex client
+        """
+        t_start = time.time()
+        request_id = str(uuid.uuid4())[:8]
+        metrics = {
+            "request_id": request_id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "path": "/v1/responses",
+            "request_model": "?",
+            "mapped_model": "?",
+            "agent_type": "_cx",
+            "stream": False,
+            "total_input_chars": 0,
+            "ttfb_ms": None,
+            "duration_ms": 0,
+            "status": 0,
+            "error_type": None,
+            "error_message": None,
+            "upstream": "?",
+        }
+
+        try:
+            body_len = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(body_len) if body_len > 0 else b""
+            cx_body = json.loads(raw) if raw else {}
+        except Exception as e:
+            self._send_json(400, {"error": {"type": "invalid_request_error", "code": "400",
+                                           "message": f"bad request: {e}"}})
+            metrics["status"] = 400; metrics["error_type"] = "BadRequest"
+            _log_metrics(metrics)
+            return
+
+        request_model = cx_body.get("model", DEFAULT_MODEL)
+        metrics["request_model"] = request_model
+
+        # Detect agent type and map model
+        base_model, agent_suffix, response_format = detect_agent_type(request_model)
+        mapped_model = MODEL_MAP.get(request_model, DEFAULT_MODEL)
+        metrics["mapped_model"] = mapped_model
+
+        _log("AGENT", f"model={request_model} → base={base_model} suffix={agent_suffix} format={response_format}")
+
+        # Delegate to codex module for full handling
+        handle_codex_responses(self, cx_body, mapped_model, request_model, request_id, metrics, t_start)
 
     # ─── /v1/models proxy ───
     def _proxy_models(self):

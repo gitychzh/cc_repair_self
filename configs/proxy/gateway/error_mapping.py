@@ -252,3 +252,100 @@ def format_openai_error_upstream(error_json, request_model, resp_status):
     # Everything else → server_error
     else:
         return {"error": {"message": msg, "type": "server_error", "code": str(resp_status)}}, resp_status
+
+
+# ─── Responses API error format (for Codex CLI / _cx) ──────────────────────
+
+def format_responses_error_all_keys_exhausted(result, mapped_model, request_model):
+    """Format all-keys-exhausted error as Responses API error format.
+
+    Responses API errors use a flat structure:
+      {"error": {"type": "...", "code": "...", "message": "..."}}
+
+    Mapping (same classification logic as OpenAI format, different structure):
+      - All 429 → rate_limit_error + code "429"
+      - Has 500/502/timeout → server_error + code "502"
+      - Has connection error → server_error + code "502"
+    """
+    if result.all_429:
+        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        return {
+            "error": {
+                "type": "rate_limit_error",
+                "code": "429",
+                "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys have exhausted their "
+                           f"token quota for model {mapped_model}. Please wait for quota recovery "
+                           f"(typically 15 minutes). Keys cycled: {cycled_keys}",
+            }
+        }, 429
+    else:
+        failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
+        timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+        connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+        return {
+            "error": {
+                "type": "server_error",
+                "code": "502",
+                "message": f"All {len(result.key_cycle_attempts)} key groups failed for model {mapped_model} "
+                           f"after {result.elapsed_ms/1000:.1f}s. Failure types: {failure_types}. "
+                           f"Timeout keys: {timeout_keys}. Connection error keys: {connerr_keys}. "
+                           f"Please retry — upstream may recover.",
+            }
+        }, 502
+
+
+def format_responses_error_upstream(error_json, request_model, resp_status):
+    """Format a non-cycling upstream error as Responses API error format.
+
+    Used for errors that don't cycle (400 input overflow, 400 inappropriate content,
+    401/403 auth, etc). Same classification logic as format_openai_error_upstream(),
+    but Responses API flat error structure.
+
+    Mapping:
+      - 429 quota/rate → rate_limit_error + code "429"
+      - 400 input overflow → invalid_request_error + code "400"
+      - 400 inappropriate content → invalid_request_error + code "400"
+      - 400 InvalidParameter (thinking_budget) → server_error + code "400" (recoverable)
+      - 401/403 auth → authentication_error + code "401"
+      - Everything else → server_error
+    """
+    err = error_json.get("error", error_json)
+    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+    msg_lower = msg.lower()
+
+    # Quota exhaustion → rate_limit_error
+    err_code = ""
+    if isinstance(err, dict):
+        err_code = (err.get("code") or "").lower()
+    is_quota = (
+        "insufficient_quota" in err_code
+        or ("quota" in msg_lower and "exceeded" in msg_lower)
+        or ("exceeded your current quota" in msg_lower)
+    )
+
+    if is_quota:
+        return {"error": {"type": "rate_limit_error", "code": "429", "message": msg}}, 429
+    elif "rate" in msg_lower or "429" in msg_lower:
+        return {"error": {"type": "rate_limit_error", "code": "429", "message": msg}}, 429
+
+    # Input overflow → invalid_request_error (agent should stop, not retry)
+    elif ("range of input length" in msg_lower
+          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))
+          and "thinking_budget" not in msg_lower):
+        return {"error": {"type": "invalid_request_error", "code": "400", "message": msg}}, 400
+
+    # Inappropriate content → invalid_request_error (same content always rejected)
+    elif "inappropriate content" in msg_lower:
+        return {"error": {"type": "invalid_request_error", "code": "400", "message": msg}}, 400
+
+    # 401/403 auth → authentication_error
+    elif resp_status in (401, 403):
+        return {"error": {"type": "authentication_error", "code": str(resp_status), "message": msg}}, resp_status
+
+    # 400 InvalidParameter (thinking_budget etc) → server_error (recoverable)
+    elif resp_status == 400 and "invalidparameter" in msg_lower:
+        return {"error": {"type": "server_error", "code": "400", "message": msg}}, 400
+
+    # Everything else → server_error
+    else:
+        return {"error": {"type": "server_error", "code": str(resp_status), "message": msg}}, resp_status

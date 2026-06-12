@@ -59,6 +59,7 @@ AGENT_SUFFIXES = {
     "_ol": {"name": "OpenClaw",    "format": "openai"},
     "_oc": {"name": "OpenCode",    "format": "openai"},
     "_hm": {"name": "Hermes",      "format": "openai"},
+    "_cx": {"name": "Codex",       "format": "responses"},  # R24: Responses API format for Codex CLI
 }
 DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
 
@@ -129,6 +130,8 @@ MODEL_MAP = {
     "glm5.1_oc": "glm5.1",
     # Hermes (_hm) — OpenAI format
     "glm5.1_hm": "glm5.1",
+    # Codex (_cx) — Responses API format (R24 NEW)
+    "glm5.1_cx": "glm5.1",
 
     # Backward compat: no suffix = CC (Anthropic format)
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",

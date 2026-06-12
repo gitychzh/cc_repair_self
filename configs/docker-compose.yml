@@ -1,9 +1,10 @@
 # R24: Unified architecture — ms_uni41001 (7 groups × 10 variants = 70 dep, glm5.1 only)
-# proxy gateway (40001/40002) — format conversion + metrics + variant×key 2D round-robin + variant fallback
-# LiteLLM does NOT do routing — proxy precisely specifies variant+key combo
+# proxy gateway (40001 only) — format conversion + metrics + variant×key 2D round-robin + variant fallback
+# gateway/ modular package handles ALL agent types: _cc (Anthropic), _ol/_oc/_hm (OpenAI), _cx (Responses)
+# R24: Removed 40002 container — Responses API now handled in gateway/codex.py on 40001
+# R24: Removed dsv4p from config. Only glm5.1 backend.
 #
 # Port assignments: 41001=unified(ms_uni41001)
-# R24: Removed 41003/42001 containers entirely. Removed dsv4p from 41001. Only glm5.1 backend.
 # ulimit nofile: 41001 uses 2048 soft / 65536 hard (70 dep)
 
 services:
@@ -147,54 +148,6 @@ services:
       test:
         - CMD-SHELL
         - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40001/health')" || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    logging: *id001
-
-  auth_to_api_40002:
-    build:
-      context: ./proxy
-      dockerfile: Dockerfile
-    container_name: auth_to_api_40002
-    restart: unless-stopped
-    environment:
-      # R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed)
-      LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_KEY: sk-litellm-local
-      LISTEN_PORT: "40002"
-      PROXY_TIMEOUT: "300"
-      MAX_TOOL_DESC: "2000"
-      MAX_SCHEMA_DESC: "600"
-      CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      NUM_KEYS: "7"
-      NUM_VARIANTS_GLM51: "10"
-      LOG_DIR: /app/logs
-      TZ: Asia/Shanghai
-    volumes:
-      - ./logs/proxy-40002:/app/logs
-      - /etc/localtime:/etc/localtime:ro
-    ports:
-      - 40002:40002
-    networks:
-      - cc-net
-    depends_on:
-      - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 256M
-          cpus: "0.1"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40002/health')" || exit 1
       interval: 30s
       timeout: 5s
       retries: 3
