@@ -1,11 +1,7 @@
-# Round 112 — 2026-06-13 20:52
+# Round 113 — 2026-06-13 21:02
 
 ## 本轮数据
-- R112(20:41→20:51): ~6req/~6ok | 429 cycling: v1×10 | variant fallback成功×1(v1全7key→v2k3) | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
-
-## 429分析
-- v1轮转开始(v10→v1)，token quota burst：全7key 429→fallback v2k3成功
-- cycling机制+variant fallback有效
+- R113(20:51→21:01): ~6req/~6ok | 429=0 | 0×502/500/timeout | v1→v2轮转直通成功
 
 ## 本轮改动
 - 无改动
