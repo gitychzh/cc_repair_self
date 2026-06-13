@@ -1,11 +1,10 @@
-# Round 147 — 2026-06-14 02:52
+# Round 148 — 2026-06-14 03:02
 
 ## 本轮数据
-- R147(02:41→02:51): ~3req/~2ok | 429 cycling: v2×7 | variant fallback: v3k2/v4k2→429→ALL-KEYS-429×1(第3次) | 0×502/500/timeout | _ol×1触发burst
+- R148(02:51→03:01): ~4req/~4ok | 429 cycling: v2×5+v3×3=8 | ALL-KEYS-429×0 | 0×502/500/timeout
 
-## 第3次ALL-KEYS-429
-- R108=1st(v7+v8/v9), R119=2nd(v7+v8/v9), R147=3rd(v2+v3/v4)
-- 跨variant token quota同时耗尽，~8min后恢复(v2k3/k4直通)
+## R147 burst恢复中
+- v2/v3部分key恢复可用，cycling成功
 
 ## 本轮改动
 - 无改动
