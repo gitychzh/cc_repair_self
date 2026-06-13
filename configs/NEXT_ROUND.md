@@ -1,7 +1,7 @@
-# Round 75 — 2026-06-13 14:42
+# Round 76 — 2026-06-13 14:52
 
 ## 本轮数据
-- R75(14:32+): 7req/5ok(1×429 cycling) | v4 4keys+v5 3keys 429→cycling成功 | P50=11046ms | ms_rem=1803
+- R76(14:42+): 6req/5ok(1×429 cycling) | v6 3keys 429→cycling成功 | P50=9258ms | ms_rem=1802
 
 ## 本轮改动
 - 无改动
