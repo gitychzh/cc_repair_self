@@ -1,10 +1,10 @@
-# Round 51 — 2026-06-13 10:42
+# Round 52 — 2026-06-13 10:52
 
 ## 本轮数据
-- R51(10:32+): 14req/14ok | v2 3keys+v3 8keys 429→cycling成功 | P50=7610ms | ms_rem=1838
+- R52(10:42+): 8req/6ok | v4全7key+v3k6+v5k1 429→cycling成功 | P50=9009ms | ms_rem=1836
 
 ## 本轮改动
-- 无改动（429 burst正常cycling处理，0 all_keys exhausted）
+- 无改动（429 burst正常cycling，0 all_keys exhausted）
 
 ## 下轮待办
 - 系统稳定，继续监控
