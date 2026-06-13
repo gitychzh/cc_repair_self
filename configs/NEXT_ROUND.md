@@ -1,10 +1,9 @@
-# Round 148 — 2026-06-14 03:02
+# Round 149 — 2026-06-14 03:12
 
 ## 本轮数据
-- R148(02:51→03:01): ~4req/~4ok | 429 cycling: v2×5+v3×3=8 | ALL-KEYS-429×0 | 0×502/500/timeout
+- R149(03:01→03:11): ~6req/~6ok | 429 cycling: v3×2 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×1ok | v3→v4
 
-## R147 burst恢复中
-- v2/v3部分key恢复可用，cycling成功
+## R147 burst完全恢复
 
 ## 本轮改动
 - 无改动
