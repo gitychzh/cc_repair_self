@@ -1,9 +1,11 @@
-# Round 115 — 2026-06-13 21:22
+# Round 116 — 2026-06-13 21:32
 
 ## 本轮数据
-- R115(21:11→21:21): ~7req/~7ok | 429=0 | 0×502/500/timeout | v3→v4直通 | _ol×2ok
+- R116(21:21→21:31): ~5req/~5ok | 429 cycling: v4×7 | variant fallback: v5k4→429→v6k4成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout
 
-## 连续3轮零429（R113→R115），系统非常稳定
+## 429分析
+- v4全7key 429 → fallback v5k4也429 → fallback v6k4成功（两级fallback有效）
+- burst后v4/v5恢复正常直通
 
 ## 本轮改动
 - 无改动
