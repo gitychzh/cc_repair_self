@@ -1,7 +1,9 @@
-# Round 156 — 2026-06-14 04:22
+# Round 157 — 2026-06-14 04:32
 
 ## 本轮数据
-- R156(04:11→04:21): ~4req/~4ok | 429 cycling: v10×11 | variant fallback: v1k2成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
+- R157(04:21→04:31): ~5req/~5ok | 429 cycling: v10×3 | ALL-KEYS-429×0 | 0×502/500/timeout | v10→v1轮转
+
+## R156 burst恢复中(v10 partial)
 
 ## 本轮改动
 - 无改动
