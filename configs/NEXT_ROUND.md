@@ -1,10 +1,10 @@
-# Round 63 — 2026-06-13 12:42
+# Round 64 — 2026-06-13 12:52
 
 ## 本轮数据
-- R63(12:32+): 7req/4ok(2×429 cycling) | v4 16次429 attempts→cycling成功 | P50=10926ms | ms_rem=1811
+- R64(12:42+): 7req/5ok(2×429 cycling) | v5 6keys 429→cycling成功 | P50=10965ms | ms_rem=1813
 
 ## 本轮改动
-- 无改动（v4 token quota burst，0 all_keys exhausted）
+- 无改动
 
 ## 下轮待办
 - 系统稳定，继续监控
