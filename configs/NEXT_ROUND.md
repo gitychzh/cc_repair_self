@@ -1,15 +1,13 @@
-# Round 172 — 2026-06-14 07:03
+# Round 173 — 2026-06-14 07:13
 
 ## 本轮数据
-- R172(06:53→07:03): 5req/5ok | 2×ALL-KEYS-429(v5全7key) | 1×两级fallback(v5→v6 429→v7k4 ok) | 1×6-key cycling(v5k6 ok) | 0×502/500/timeout
-
-## v5跨variant token quota耗尽→fallback正常工作
+- R173(07:03→07:13): 6req/6ok | 429=0 | 0×502/500/timeout | v6直通(k5→k7)
 
 ## 本轮改动
 - 无改动
 
 ## 下轮待办
-- 继续监控v6轮换
+- 继续监控v7轮换
 
 ## 参数现状
 PROXY_TIMEOUT=300 | CPT=3.0 | SAFETY=170000 | COMPACT=155000
