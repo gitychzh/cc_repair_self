@@ -1,7 +1,7 @@
-# Round 87 — 2026-06-13 16:42
+# Round 88 — 2026-06-13 16:52
 
 ## 本轮数据
-- R87(16:32+): 5req/3ok(1×429 cycling) | v6 9keys 429→cycling成功 | P50=10737ms | ms_rem=1778
+- R88(16:42+): 8req/6ok(1×429 cycling) | v7 8keys 429→cycling成功 | P50=13871ms | ms_rem=1776
 
 ## 本轮改动
 - 无改动
