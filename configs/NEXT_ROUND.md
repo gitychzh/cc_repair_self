@@ -1,7 +1,11 @@
-# Round 117 — 2026-06-13 21:42
+# Round 118 — 2026-06-13 21:52
 
 ## 本轮数据
-- R117(21:31→21:41): ~6req/~6ok | 429 cycling: v5×2 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×1ok
+- R118(21:41→21:51): ~7req/~7ok | 429 cycling: v6×10 | variant fallback: v7k4→429→v8k4成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
+
+## 两级fallback连续验证
+- R116: v4→v5k4(429)→v6k4(成功)
+- R118: v6→v7k4(429)→v8k4(成功) — 机制可靠
 
 ## 本轮改动
 - 无改动
