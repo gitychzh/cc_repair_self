@@ -1,18 +1,16 @@
-# Round 119 — 2026-06-13 22:02
+# Round 120 — 2026-06-13 22:12
 
 ## 本轮数据
-- R119(21:52→22:01): ~3req/~2ok | 429 cycling: v7×12(7+5) | variant fallback: v8k3/v9k3→429→ALL-KEYS-429×1 | 0×502/500/timeout
+- R120(22:01→22:11): ~7req/~7ok | 429 cycling: v7×10 | variant fallback: v8k6成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×1ok
 
-## 429分析
-- 第2次ALL-KEYS-429(R108=R1次)：v7全7key+v8/v9 fallback也429
-- 跨variant token quota同时耗尽，非配置问题
-- 22:01 v7恢复：5×429→k2成功
+## R119 burst已恢复
+- v7全7key→fallback v8k6成功（单级fallback即成功，比R119两级全429恢复）
 
 ## 本轮改动
 - 无改动
 
 ## 下轮待办
-- 继续监控
+- 继续监控；R120=里程碑轮，可考虑更新baseline memory
 
 ## 参数现状
 PROXY_TIMEOUT=300 | CPT=3.0 | SAFETY=170000 | COMPACT=155000
