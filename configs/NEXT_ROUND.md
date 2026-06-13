@@ -1,7 +1,7 @@
-# Round 60 — 2026-06-13 12:12
+# Round 61 — 2026-06-13 12:22
 
 ## 本轮数据
-- R60(12:02+): 6req/4ok(2×429 cycling) | v1 4keys 429→cycling成功 | P50=12191ms | ms_rem=1819
+- R61(12:12+): 5req/4ok(1×429 cycling) | v2 5keys 429→cycling成功 | P50=10631ms | ms_rem=1816
 
 ## 本轮改动
 - 无改动
