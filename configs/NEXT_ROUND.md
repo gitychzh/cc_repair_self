@@ -1,7 +1,7 @@
-# Round 121 — 2026-06-13 22:22
+# Round 122 — 2026-06-13 22:32
 
 ## 本轮数据
-- R121(22:11→22:21): ~7req/~7ok | 429 cycling: v8×5+v9×4=9 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
+- R122(22:21→22:31): ~3req/~3ok | 429 cycling: v9×10 | variant fallback: v10k7成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout
 
 ## 本轮改动
 - 无改动
