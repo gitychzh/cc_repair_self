@@ -1,7 +1,7 @@
-# Round 103 — 2026-06-13 19:22
+# Round 104 — 2026-06-13 19:32
 
 ## 本轮数据
-- R103(19:12+): 6req/5ok(1×429 cycling+variant fallback) | v1全7key+v2k1 429→cycling成功 | P50=13812ms | ms_rem=1756
+- R104(19:22+): 5req/4ok(1×429 cycling) | v2 2keys 429→cycling成功 | P50=16173ms | ms_rem=1754
 
 ## 本轮改动
 - 无改动
