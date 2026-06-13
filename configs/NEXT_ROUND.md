@@ -1,14 +1,14 @@
-# Round 110 — 2026-06-13 20:32
+# Round 111 — 2026-06-13 20:42
 
 ## 本轮数据
-- R110(20:21→20:31): ~6req/~6ok | 429 cycling: v9×10 | variant fallback成功×1(v9全7key→v10k5) | ALL-KEYS-429×0 | 0×502/500/timeout
+- R111(20:31→20:41): ~7req/~7ok | 429 cycling: v10×8(6+2) | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
 
 ## 429分析
-- v9全7key 429 → R23 variant fallback v10k5成功，未触发ALL-KEYS-429
-- v9 partial burst: 部分429但有可用key，cycling成功
+- v10 token quota partial burst: 6key 429→k4成功，2key 429→k1成功
+- cycling机制有效，无需variant fallback
 
 ## 本轮改动
-- 无改��
+- 无改动
 
 ## 下轮待办
 - 继续监控
