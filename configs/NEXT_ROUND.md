@@ -1,11 +1,12 @@
-# Round 118 — 2026-06-13 21:52
+# Round 119 — 2026-06-13 22:02
 
 ## 本轮数据
-- R118(21:41→21:51): ~7req/~7ok | 429 cycling: v6×10 | variant fallback: v7k4→429→v8k4成功×1 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
+- R119(21:52→22:01): ~3req/~2ok | 429 cycling: v7×12(7+5) | variant fallback: v8k3/v9k3→429→ALL-KEYS-429×1 | 0×502/500/timeout
 
-## 两级fallback连续验证
-- R116: v4→v5k4(429)→v6k4(成功)
-- R118: v6→v7k4(429)→v8k4(成功) — 机制可靠
+## 429分析
+- 第2次ALL-KEYS-429(R108=R1次)：v7全7key+v8/v9 fallback也429
+- 跨variant token quota同时耗尽，非配置问题
+- 22:01 v7恢复：5×429→k2成功
 
 ## 本轮改动
 - 无改动
