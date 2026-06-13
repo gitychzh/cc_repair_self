@@ -1,17 +1,17 @@
-# Round 108 — 2026-06-13 20:12
+# Round 109 — 2026-06-13 20:22
 
 ## 本轮数据
-- R108(20:01→20:11): ~8req/~7ok | 429 cycling: v6×1+v7×7 | ALL-KEYS-429×1(v7全key+fallback v8/v9) | 0×502/500/timeout | P50≈12s | _ol×2ok
+- R109(20:11→20:21): ~10req/~10ok | 429 cycling: v8×2+v9×6=8 | ALL-KEYS-429×0 | 0×502/500/timeout | _ol×2ok
 
 ## 429分析
-- v7 token quota burst：全7key 429 + fallback v8/v9也429 → 正确触发all_keys_exhausted
-- R79同样模式：ModelScope暂时性，15min自动恢复，非配置问题
+- R108 v7 burst已恢复：v8/v9有部分key 429但都有可用key，cycling成功
+- 无ALL-KEYS-429，burst缓解
 
 ## 本轮改动
 - 无改动
 
 ## 下轮待办
-- 继续监控，注意429 burst恢复情况
+- 继续监控
 
 ## 参数现状
 PROXY_TIMEOUT=300 | CPT=3.0 | SAFETY=170000 | COMPACT=155000
