@@ -1,10 +1,10 @@
-# Round 79 — 2026-06-13 15:22
+# Round 80 — 2026-06-13 15:32
 
 ## 本轮数据
-- R79(15:12+): 4req/4ok | v9全7key 429+variant fallback也429→1×all_keys_exhausted | P50=14385ms | ms_rem=1794
+- R80(15:22+): 6req/6ok | 429=0 | 0错误 | P50=14645ms | ms_rem=1792
 
 ## 本轮改动
-- 无改动（token quota burst，1×all_keys_exhausted正常返回）
+- 无改动
 
 ## 下轮待办
 - 系统稳定，继续监控
