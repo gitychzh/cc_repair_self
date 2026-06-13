@@ -1,7 +1,7 @@
-# Round 81 — 2026-06-13 15:42
+# Round 82 — 2026-06-13 15:52
 
 ## 本轮数据
-- R81(15:32+): 5req/3ok(2×429 cycling) | v1 9keys 429→cycling成功 | P50=15943ms | ms_rem=1793
+- R82(15:42+): 8req/6ok(1×429 cycling) | 2×429(v2)→cycling成功 | P50=9952ms | ms_rem=1789
 
 ## 本轮改动
 - 无改动
