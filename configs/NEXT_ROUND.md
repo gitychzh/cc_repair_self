@@ -1,12 +1,12 @@
-# Round 244 — 2026-06-14 19:11
+# Round 245 — 2026-06-14 19:31
 
 ## 本轮数据
-- R244(19:01→19:11): 9req | 0×ALL-KEYS-429 | 0×KEY-CYCLE-SUCCESS | 0×429-cycling | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R245(19:11→19:31): 6req(低活跃) | 1×ALL-KEYS-429(v8全7key+fallback v9k7/v10k7) | 7×429-cycling | 0×KEY-CYCLE-SUCCESS | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第四轮v7k6，全部请求首次尝试成功，429完全缓解，系统非常稳定
+## v×k第四轮v9k2，v8短暂429 burst后恢复，低活跃期
 
 ## 本轮改动
-- 无改动
+- 无改动（v8 429 burst是暂时性token quota耗尽，已自动恢复）
 
 ## 下轮待办
 - 正常监控
