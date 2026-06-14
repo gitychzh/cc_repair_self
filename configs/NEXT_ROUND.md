@@ -1,9 +1,9 @@
-# Round 237 — 2026-06-14 17:54
+# Round 238 — 2026-06-14 18:02
 
 ## 本轮数据
-- R237(17:44→17:54): 34req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v4k3，2key 429 cycling后成功) | 2×429-cycling(v4k1,v4k2) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R238(17:51→18:02): 25req | 0×ALL-KEYS-429 | 2×KEY-CYCLE-SUCCESS(v4k3,v6k5) | 3×429-cycling(v4k1,v4k2,v6k4) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第二轮推进到v6k5，v4轻429后恢复，系统持续稳定
+## v×k第二轮推进到v7k5，v4和v6偶发429后恢复，系统持续稳定
 
 ## 本轮改动
 - 无改动
