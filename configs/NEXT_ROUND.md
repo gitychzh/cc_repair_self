@@ -1,9 +1,9 @@
-# Round 249 — 2026-06-14 20:11
+# Round 250 — 2026-06-14 20:22
 
 ## 本轮数据
-- R249(20:01→20:11): 42req | 0×ALL-KEYS-429 | 0×KEY-CYCLE-SUCCESS | 0×429-cycling | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R250(20:11→20:22): 36req | 0×ALL-KEYS-429 | 3×KEY-CYCLE-SUCCESS(v3k5,v3k6) | 15×429-cycling(v10全7key,v3轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第五轮v8k1，全部请求首次尝试成功，429完全缓解
+## v×k第六轮v3k6，v10全7key 429但无ALL-KEYS，v3轻429后恢复
 
 ## 本轮改动
 - 无改动
