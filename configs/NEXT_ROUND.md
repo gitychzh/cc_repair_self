@@ -1,9 +1,9 @@
-# Round 255 — 2026-06-14 21:21
+# Round 256 — 2026-06-14 21:32
 
 ## 本轮数据
-- R255(21:11→21:21): 8req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v3k5) | 6×429-cycling(v3轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R256(21:21→21:32): 31req(高活跃) | 0×ALL-KEYS-429 | 8×KEY-CYCLE-SUCCESS(v4k7,v5k4,v5k6,v6k2,v6k6,v7k3) | 30×429-cycling | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第七轮v4k2，v3轻429后cycling恢复，系统稳定
+## v×k第七轮v8k5，v4→v7密集429但cycling每次恢复，0×ALL-KEYS-429
 
 ## 本轮改动
 - 无改动
