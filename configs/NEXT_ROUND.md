@@ -1,13 +1,15 @@
-# Round 189 — 2026-06-14 09:53
+# Round 190 — 2026-06-14 10:03
 
 ## 本轮数据
-- R189(09:43→09:53): 7req/7ok | 6×429(v10+v1 keys) | 3×KEY-CYCLE-SUCCESS(v10k1,v1k3,v1k1) | 0×502/500/timeout | v10→v1新循环
+- R190(09:53→10:03): 4req/4ok | 2×ALL-KEYS-429(v2全7key) | 1×两级fallback(v2→v3 429→v4k2 ok) | 1×直接fallback(v2→v3k4 ok) | 1×cycling(v2k7) | 0×502/500/timeout
+
+## v2跨variant token quota密集耗尽
 
 ## 本轮改动
-- 无改动
+- 无改动(暂时性429 burst，自动恢复)
 
 ## 下轮待办
-- 继续监控v1轮换
+- 监控v2恢复+v3轮换
 
 ## 参数现状
 PROXY_TIMEOUT=300 | CPT=3.0 | SAFETY=170000 | COMPACT=155000
