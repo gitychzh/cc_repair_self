@@ -1,9 +1,9 @@
-# Round 259 — 2026-06-14 22:02
+# Round 260 — 2026-06-14 22:12
 
 ## 本轮数据
-- R259(21:52→22:02): 28req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v10k1) | 4×429-cycling(v10轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R260(22:02→22:12): 53req(高活跃) | 0×ALL-KEYS-429 | 7×KEY-CYCLE-SUCCESS(v1k3,v1k2,v4k4,v5k2,v6k3,v6k5,v7k7) | 31×429-cycling | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第八轮v10k5即将完成，429继续缓解(R257:38→R258:9→R259:4)
+## v×k第九轮v8k1，新一轮429 burst(v1/v4/v5/v6/v7)，cycling每次恢复，0×ALL-KEYS-429
 
 ## 本轮改动
 - 无改动
