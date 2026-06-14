@@ -1,9 +1,9 @@
-# Round 263 — 2026-06-14 22:42
+# Round 264 — 2026-06-14 22:52
 
 ## 本轮数据
-- R263(22:32→22:42): 7req | 0×ALL-KEYS-429 | 2×KEY-CYCLE-SUCCESS(v4k7,v4k1) | 7×429-cycling(v4轻) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R264(22:42→22:52): 10req | 0×ALL-KEYS-429 | 6×KEY-CYCLE-SUCCESS(v5k3,v5k4,v5k7,v5k2,v6k3,v6k7) | 13×429-cycling(v5/v6轻) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第九轮v4k7，429继续缓解(R260:31→R262:9→R263:7)，系统稳定
+## v×k第九轮v6k7，v5/v6轻429每次cycling恢复，系统稳定
 
 ## 本轮改动
 - 无改动
