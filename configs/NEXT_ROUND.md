@@ -1,9 +1,9 @@
-# Round 254 — 2026-06-14 21:11
+# Round 255 — 2026-06-14 21:21
 
 ## 本轮数据
-- R254(21:01→21:11): 8req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v1k2) | 2×429-cycling(v1k7,v1k1) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R255(21:11→21:21): 8req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v3k5) | 6×429-cycling(v3轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第七轮v2k7即将完成，v1轻429后恢复，系统稳定
+## v×k第七轮v4k2，v3轻429后cycling恢复，系统稳定
 
 ## 本轮改动
 - 无改动
