@@ -1,9 +1,9 @@
-# Round 268 — 2026-06-14 23:32
+# Round 269 — 2026-06-14 23:42
 
 ## 本轮数据
-- R268(23:21→23:32): 7req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v1k4) | 2×429-cycling(v1轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
+- R269(23:32→23:42): 9req | 0×ALL-KEYS-429 | 2×KEY-CYCLE-SUCCESS(v1k6,v2k5) | 2×429-cycling(v1/v2轻429) | 0×502/500/timeout | 0×variant-fallback | 0×LiteLLM-fallback
 
-## v×k第十轮v1k4，v1轻429后cycling恢复，系统稳定
+## v×k第十轮v2k5，v1/v2轻429每次cycling恢复，系统稳定
 
 ## 本轮改动
 - 无改动
