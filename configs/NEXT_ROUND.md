@@ -1,9 +1,9 @@
-# Round 232 — 2026-06-14 17:03
+# Round 233 — 2026-06-14 17:13
 
 ## 本轮数据
-- R232(16:53→17:03): 24req | 0×ALL-KEYS-429 | 5×KEY-CYCLE-SUCCESS(v3k3,v3k5,v3k1,v4k1,v5k1) | 14×429-cycling | 0×502/500/timeout | 0×variant-fallback
+- R233(17:03→17:13): 9req | 0×ALL-KEYS-429 | 1×KEY-CYCLE-SUCCESS(v6k2 5key cycling) | 12×429-cycling | 0×502/500/timeout | 0×variant-fallback
 
-## v2 429burst恢复，v3轻429(1-3key cycling ok)，v×k到达v6k3
+## 低请求量(9req)，v6有密集429但cycling成功，v×k到达v7k4
 
 ## 本轮改动
 - 无改动
