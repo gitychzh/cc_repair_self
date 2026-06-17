@@ -189,3 +189,27 @@ Backward compat: `glm5.2`=glm5.2_cc, `claude-opus-4-8`=glm5.2_cc, `glm5.2_ol`=ds
 ### R29: dsv4p thinking_budget stripping
 - passthrough proxy (40003) automatically strips `reasoning_effort` and `thinking_budget` from dsv4p requests
 - logged as "DSV4P-STRIP" for monitoring
+
+## R30 (2026-06-18): opc_uname glm5.1→glm5.2 实机升级 + 远程IP变更
+
+### 背景
+- opc_uname (opcsname-1) 实机仍跑 glm5.1（settings.json model=glm5.1_cc，/opt/cc-infra proxy代码glm5.1，单容器只有 40001+cc_postgres+ms_uni41001）
+- Git 仓库已是 glm5.2（R28/R29 已改名），仅 /opt/cc-infra 未同步
+- 远程 IP 变更：opc_uname tailscale 100.113.71.43 → **100.109.153.83**，LAN 192.168.1.102 → **192.168.1.111**
+
+### 执行步骤
+1. `bash scripts/sync_config.sh`（远程）同步 repo glm5.2 配置到 /opt/cc-infra（docker-compose/litellm config/proxy gateway 全部 COPIED）
+2. settings.json model: `glm5.1_cc` → `glm5.2_cc`
+3. 全量重建：`rm -rf proxy/gateway/__pycache__` + `docker compose build --no-cache` + `up -d --force-recreate`（**关键：__pycache__ 残留会导致旧 .pyc 进镜像，必须先清**）
+4. 验证：
+   - 40001 (CC) glm5.2 → HTTP 200，返回 `"model": "glm5.2"`，变体 `glm5.2v1kX` ✅
+   - 40002 (Codex) glm5.2_cx → KEY-CYCLE-SUCCESS on glm5.2v1k3 ✅
+   - 40003 (Passthrough) dsv4p → 3/3 HTTP 200 ✅
+   - 40001 role isolation → /v1/chat/completions 返回 404 ✅
+
+### 配套变更
+- 本机 `~/.ssh/config`: opc_uname Hostname LAN→192.168.1.111，tailscale→100.109.153.83
+- `scripts/ts_keepalive.sh`: PEERS 改为 `100.109.153.83`（opcsname-1），移除已下线的 opcsname-2/desktop/android 节点
+
+### 关键教训
+- **Docker COPY + __pycache__ 残留陷阱**：`docker compose build` 即使加 `--no-cache`，如果 host `proxy/gateway/__pycache__` 残留旧 .pyc，`COPY gateway/` 会把旧 .pyc 一起打进镜像。Python 优先加载 .pyc → 镜像里代码看起来是新的，实际跑的是旧的（grep glm5.2=59 但运行仍报 glm5.1）。**修复：build 前必须 `rm -rf proxy/gateway/__pycache__`**。

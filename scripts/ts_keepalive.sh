@@ -8,9 +8,7 @@
 
 # All Tailscale peers we want to maintain connections with
 PEERS=(
-    "100.120.104.114" # opcsname-2 (LAN peer - 192.168.1.102)
-    "100.121.137.118" # desktop-sgedrr5 (Windows)
-    "100.112.34.115"  # mi-cc-9-meitu-edition-1 (Android)
+    "100.109.153.83" # opcsname-1 (remote CC machine = opc_uname, LAN 192.168.1.111)
 )
 
 LOG="/tmp/ts_keepalive.log"

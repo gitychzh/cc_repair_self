@@ -1,0 +1,6 @@
+# Prevent stale compiled bytecode from being COPY'd into the image.
+# R30 lesson: __pycache__/*.pyc from old code can shadow new .py at runtime.
+__pycache__/
+*.pyc
+*.pyo
+logs/
