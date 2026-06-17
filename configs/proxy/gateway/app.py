@@ -23,6 +23,7 @@ class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
 
 
 def main():
+    from .handlers import ProxyHandler
     server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
     _log("START", f"PROXY_ROLE={PROXY_ROLE} — serving {DEFAULT_UPSTREAM_MODEL} upstream")
@@ -39,5 +40,4 @@ def main():
 
 
 if __name__ == "__main__":
-    from .handlers import ProxyHandler
     main()
