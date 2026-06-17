@@ -67,13 +67,21 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - **发现的问题**: proxy容器未重建 + CC settings model未同步 + Git仓库未同步
 - **修复**: rebuild proxy容器 + 更新CC settings + 同步Git仓库(glm5.1→glm5.2)
 
-**opc2_uname R29 THREE-PROXY + DSV4P RESTORE — PENDING DEPLOY**：
+**opc2_uname R29 THREE-PROXY + DSV4P RESTORE — DEPLOYED 2026-06-18 01:30 CST**：
 - **变更**: 三proxy容器分治(40001=cc, 40002=codex, 40003=passthrough) + dsv4p恢复(70 dep) + LiteLLM fallback去掉(ms_uni41002删除)
-- **注意事项**: 
-  - ms_uni41001需增加memory到1536MiB(140 dep) 
-  - 所有3个proxy容器需rebuild
-  - ms_uni41002需移除
-  - postgres DB只保留litellm_glm51
+- **部署过程**:
+  1. git pull + sync_config.sh → 所有config文件同步到/opt/cc-infra
+  2. docker restart ms_uni41001 → 140 dep配置加载
+  3. docker stop + docker rm ms_uni41002 → fallback LiteLLM移除
+  4. docker compose up -d --build --force-recreate → 5容器重建
+  5. hotfix: ProxyHandler import位置修正(NameError crash → 移入main()内部)
+- **验证**: 5容器全部healthy, curl测试全部通过:
+  - glm5.2 via 40001 (Anthropic) → 200 ✅
+  - glm5.2_cx via 40002 (Responses API) → 200 ✅
+  - dsv4p_ol via 40003 (OpenAI) → 200 ✅
+  - glm5.2_ol backward compat → dsv4p ✅
+  - 40001 rejects /v1/chat/completions → 404 ✅
+  - 40003 rejects /v1/messages → 404 ✅
 
 ## Current Parameters (R29)
 
@@ -125,15 +133,17 @@ Backward compat: `glm5.2`=glm5.2_cc, `claude-opus-4-8`=glm5.2_cc, `glm5.2_ol`=ds
 
 **NEVER modify/delete these — each variant has independent 200/id/day quota. rpm=1 per deployment is also immutable.**
 
-## opc2_uname Remote Verification (R27, 2026-06-13)
+## opc2_uname Remote Verification (R29, 2026-06-18)
 
-**opc2_uname（远程机器）R27配置与仓库完全一致** ✅：
-- 5个容器全部 healthy (ms_uni41001, ms_uni41002, cc_postgres, auth_to_api_40001, auth_to_api_40002)
-- curl test glm5.2_cc via 40001 returns 200 ✅
-- curl test glm5.2_ol via 40001 returns 200 ✅
-- curl test glm5.2_cx via 40001 returns 200 ✅
-
-**R29 deploy pending — needs full rebuild on opc2_uname**
+**opc2_uname（远程机器）R29配置与仓库完全一致** ✅：
+- 5个容器全部 healthy (ms_uni41001, cc_postgres, auth_to_api_40001, auth_to_api_40002, auth_to_api_40003)
+- PROXY_ROLE隔离: 40001=cc, 40002=codex, 40003=passthrough ✅
+- curl test glm5.2 via 40001 (Anthropic) → 200 ✅
+- curl test glm5.2_cx via 40002 (Responses API) → 200 ✅
+- curl test dsv4p_ol via 40003 (OpenAI) → 200 ✅
+- curl test glm5.2_ol backward compat → dsv4p ✅
+- Role isolation: 40001 rejects /v1/chat/completions → 404 ✅
+- Role isolation: 40003 rejects /v1/messages → 404 ✅
 
 ## Log System Analysis (R22, 2026-06-12)
 
