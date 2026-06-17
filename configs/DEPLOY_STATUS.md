@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname + opc2_uname (R27, 2026-06-13)
+# Deploy Status — opc_uname + opc2_uname (R28, 2026-06-17)
 
 ## Architecture (R27 — glm5.2 only + Codex + LiteLLM fallback)
 ```
@@ -64,7 +64,14 @@ bash ~/cc_ps/cc_recover/restart_claude.sh
 - **修复**: 创建 codex.py 模块（Responses API → Chat Completions 格式转换） + 同步所有 R26/R27 改动（UPSTREAM_TIMEOUT, LiteLLM fallback, _cx suffix）
 - **验证**: 4容器全部 healthy, curl 40001/40002 glm5.2_cc→200 ✅, glm5.2_ol→200 ✅, glm5.2_cx→200 ✅
 
-## Current Parameters (R27)
+**opc2_uname R28 GLM-5.2 UPGRADE DEPLOYED 2026-06-17**：
+- **变更**: 模型从 GLM-5.1 升级到 GLM-5.2（opc2_uname 用户手动升级）
+- **发现的问题**: (1) proxy容器未重建——磁盘代码已改但容器内还运行旧glm5.1代码→所有请求400 "Invalid model name"；(2) CC settings model=glm5.1_cc未同步→发送旧模型名；(3) Git仓库未同步
+- **修复**: rebuild proxy容器(两个auth_to_api) + 更新CC settings model=glm5.2_cc + 同步Git仓库所有文件(glm5.1→glm5.2)
+- **env var名保留**: LITELLM_URL_GLM51/NUM_VARIANTS_GLM51等不改名(避免部署不一致)，目录litellm-glm51/保留
+- **验证**: 5容器全部healthy, curl glm5.2_cc→200✅, glm5.2_ol→200✅, claude-opus-4-8→200✅
+
+## Current Parameters (R28)
 
 | Parameter | Value | File | Notes |
 |-----------|-------|------|-------|
