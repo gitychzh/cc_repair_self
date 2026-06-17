@@ -3,7 +3,7 @@
 # Codex CLI不支持自动fallback切换，需要在config.toml中手动指定model_provider
 # 当40001不可用时：修改config.toml的 model_provider = "litellm-fallback" 并重启codex
 
-model = "glm5.1_cx"
+model = "glm5.2_cx"
 model_provider = "litellm"
 personality = "pragmatic"
 
@@ -13,7 +13,7 @@ name = "Proxy Gateway 40001 (Codex)"
 base_url = "http://127.0.0.1:40001/v1"
 wire_api = "responses"
 api_key_env = "OPENAI_API_KEY"
-models = ["glm5.1_cx", "glm5.1", "codex-mini-latest"]
+models = ["glm5.2_cx", "glm5.2", "codex-mini-latest"]
 
 # Fallback provider — proxy gateway 40002 (R25)
 # When 40001 is being restarted/unavailable, switch to this provider:
@@ -23,7 +23,7 @@ name = "Proxy Gateway 40002 (Codex fallback)"
 base_url = "http://127.0.0.1:40002/v1"
 wire_api = "responses"
 api_key_env = "OPENAI_API_KEY"
-models = ["glm5.1_cx", "glm5.1", "codex-mini-latest"]
+models = ["glm5.2_cx", "glm5.2", "codex-mini-latest"]
 
 [projects."/home/opc2_uname"]
 trust_level = "trusted"

@@ -1,38 +1,38 @@
-# 41001 LiteLLM Config — glm5.1 only (7 key groups × 10 variants = 70 dep, rpm=1)
-# R24: dsv4p removed entirely — only glm5.1 remains
+# 41001 LiteLLM Config — glm5.2 only (7 key groups × 10 variants = 70 dep, rpm=1)
+# R24: dsv4p removed entirely — only glm5.2 remains
 # Container name: ms_uni41001
 #
 # Variant×Key round-robin (R21):
 #   Proxy 2D round-robin: request N → variant_idx=(N//7)%10, key_idx=N%7
-#   → model name format: glm5.1v{V}k{K} (e.g. glm5.1v1k1)
+#   → model name format: glm5.2v{V}k{K} (e.g. glm5.2v1k1)
 #   429 cycling: same variant, next key (k→k+1). All 7 keys 429 → variant fallback (R23)
 #   LiteLLM does NOT do routing — proxy precisely specifies variant+key combo
 #   Each dep has unique model_name for proxy-level routing control
 #
-# glm5.1 variant IDs (10, IMMUTABLE):
-#   ZHIPUAI/GLM-5.1 (v1)
-#   ZHIPUAI/GLm-5.1 (v2)
-#   ZHIPUAI/GlM-5.1 (v3)
-#   ZHIPUAI/Glm-5.1 (v4)
-#   ZHIPUAI/gLM-5.1 (v5)
-#   ZHIPUAI/gLm-5.1 (v6)
-#   ZHIPUAI/glM-5.1 (v7)
-#   ZHIPUAI/glm-5.1 (v8)
-#   ZHIPUAi/GLM-5.1 (v9)
-#   ZHIPUAi/GLm-5.1 (v10)
+# glm5.2 variant IDs (10, IMMUTABLE):
+#   ZHIPUAI/GLM-5.2 (v1)
+#   ZHIPUAI/GLm-5.2 (v2)
+#   ZHIPUAI/GlM-5.2 (v3)
+#   ZHIPUAI/Glm-5.2 (v4)
+#   ZHIPUAI/gLM-5.2 (v5)
+#   ZHIPUAI/gLm-5.2 (v6)
+#   ZHIPUAI/glM-5.2 (v7)
+#   ZHIPUAI/glm-5.2 (v8)
+#   ZHIPUAi/GLM-5.2 (v9)
+#   ZHIPUAi/GLm-5.2 (v10)
 #
-# model_name format: glm5.1v{variant_idx}k{key_idx}
-#   glm5.1v1k1 = GLM-5.1 variant1 + MS_KEY1
+# model_name format: glm5.2v{variant_idx}k{key_idx}
+#   glm5.2v1k1 = GLM-5.2 variant1 + MS_KEY1
 #   Total: 7 key groups × 10 variants = 70 unique model_name
 #   rpm=1 per deployment (immutable constraint)
 #
 # NEVER remove variants — removing = removing quota capacity (200/id/day)
 
 model_list:
-  # ─── glm5.1 Key group 1: MS_KEY1 ───
-  - model_name: glm5.1v1k1
+  # ─── glm5.2 Key group 1: MS_KEY1 ───
+  - model_name: glm5.2v1k1
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -58,9 +58,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k1
+  - model_name: glm5.2v2k1
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -86,9 +86,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k1
+  - model_name: glm5.2v3k1
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -114,9 +114,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k1
+  - model_name: glm5.2v4k1
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -142,9 +142,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k1
+  - model_name: glm5.2v5k1
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -170,9 +170,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k1
+  - model_name: glm5.2v6k1
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -198,9 +198,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k1
+  - model_name: glm5.2v7k1
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -226,9 +226,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k1
+  - model_name: glm5.2v8k1
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -254,9 +254,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k1
+  - model_name: glm5.2v9k1
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -282,9 +282,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k1
+  - model_name: glm5.2v10k1
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY1
       rpm: 1
@@ -310,10 +310,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 2: MS_KEY2 ───
-  - model_name: glm5.1v1k2
+  # ─── glm5.2 Key group 2: MS_KEY2 ───
+  - model_name: glm5.2v1k2
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -339,9 +339,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k2
+  - model_name: glm5.2v2k2
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -367,9 +367,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k2
+  - model_name: glm5.2v3k2
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -395,9 +395,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k2
+  - model_name: glm5.2v4k2
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -423,9 +423,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k2
+  - model_name: glm5.2v5k2
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -451,9 +451,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k2
+  - model_name: glm5.2v6k2
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -479,9 +479,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k2
+  - model_name: glm5.2v7k2
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -507,9 +507,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k2
+  - model_name: glm5.2v8k2
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -535,9 +535,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k2
+  - model_name: glm5.2v9k2
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -563,9 +563,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k2
+  - model_name: glm5.2v10k2
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY2
       rpm: 1
@@ -591,10 +591,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 3: MS_KEY3 ───
-  - model_name: glm5.1v1k3
+  # ─── glm5.2 Key group 3: MS_KEY3 ───
+  - model_name: glm5.2v1k3
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -620,9 +620,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k3
+  - model_name: glm5.2v2k3
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -648,9 +648,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k3
+  - model_name: glm5.2v3k3
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -676,9 +676,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k3
+  - model_name: glm5.2v4k3
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -704,9 +704,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k3
+  - model_name: glm5.2v5k3
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -732,9 +732,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k3
+  - model_name: glm5.2v6k3
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -760,9 +760,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k3
+  - model_name: glm5.2v7k3
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -788,9 +788,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k3
+  - model_name: glm5.2v8k3
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -816,9 +816,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k3
+  - model_name: glm5.2v9k3
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -844,9 +844,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k3
+  - model_name: glm5.2v10k3
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY3
       rpm: 1
@@ -872,10 +872,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 4: MS_KEY4 ───
-  - model_name: glm5.1v1k4
+  # ─── glm5.2 Key group 4: MS_KEY4 ───
+  - model_name: glm5.2v1k4
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -901,9 +901,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k4
+  - model_name: glm5.2v2k4
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -929,9 +929,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k4
+  - model_name: glm5.2v3k4
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -957,9 +957,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k4
+  - model_name: glm5.2v4k4
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -985,9 +985,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k4
+  - model_name: glm5.2v5k4
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1013,9 +1013,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k4
+  - model_name: glm5.2v6k4
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1041,9 +1041,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k4
+  - model_name: glm5.2v7k4
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1069,9 +1069,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k4
+  - model_name: glm5.2v8k4
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1097,9 +1097,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k4
+  - model_name: glm5.2v9k4
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1125,9 +1125,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k4
+  - model_name: glm5.2v10k4
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY4
       rpm: 1
@@ -1153,10 +1153,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 5: MS_KEY5 ───
-  - model_name: glm5.1v1k5
+  # ─── glm5.2 Key group 5: MS_KEY5 ───
+  - model_name: glm5.2v1k5
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1182,9 +1182,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k5
+  - model_name: glm5.2v2k5
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1210,9 +1210,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k5
+  - model_name: glm5.2v3k5
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1238,9 +1238,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k5
+  - model_name: glm5.2v4k5
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1266,9 +1266,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k5
+  - model_name: glm5.2v5k5
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1294,9 +1294,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k5
+  - model_name: glm5.2v6k5
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1322,9 +1322,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k5
+  - model_name: glm5.2v7k5
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1350,9 +1350,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k5
+  - model_name: glm5.2v8k5
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1378,9 +1378,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k5
+  - model_name: glm5.2v9k5
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1406,9 +1406,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k5
+  - model_name: glm5.2v10k5
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY5
       rpm: 1
@@ -1434,10 +1434,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 6: MS_KEY6 ───
-  - model_name: glm5.1v1k6
+  # ─── glm5.2 Key group 6: MS_KEY6 ───
+  - model_name: glm5.2v1k6
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1463,9 +1463,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k6
+  - model_name: glm5.2v2k6
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1491,9 +1491,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k6
+  - model_name: glm5.2v3k6
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1519,9 +1519,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k6
+  - model_name: glm5.2v4k6
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1547,9 +1547,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k6
+  - model_name: glm5.2v5k6
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1575,9 +1575,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k6
+  - model_name: glm5.2v6k6
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1603,9 +1603,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k6
+  - model_name: glm5.2v7k6
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1631,9 +1631,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k6
+  - model_name: glm5.2v8k6
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1659,9 +1659,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k6
+  - model_name: glm5.2v9k6
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1687,9 +1687,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k6
+  - model_name: glm5.2v10k6
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY6
       rpm: 1
@@ -1715,10 +1715,10 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  # ─── glm5.1 Key group 7: MS_KEY7 ───
-  - model_name: glm5.1v1k7
+  # ─── glm5.2 Key group 7: MS_KEY7 ───
+  - model_name: glm5.2v1k7
     litellm_params:
-      model: openai/ZHIPUAI/GLM-5.1
+      model: openai/ZHIPUAI/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1744,9 +1744,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v2k7
+  - model_name: glm5.2v2k7
     litellm_params:
-      model: openai/ZHIPUAI/GLm-5.1
+      model: openai/ZHIPUAI/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1772,9 +1772,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v3k7
+  - model_name: glm5.2v3k7
     litellm_params:
-      model: openai/ZHIPUAI/GlM-5.1
+      model: openai/ZHIPUAI/GlM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1800,9 +1800,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v4k7
+  - model_name: glm5.2v4k7
     litellm_params:
-      model: openai/ZHIPUAI/Glm-5.1
+      model: openai/ZHIPUAI/Glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1828,9 +1828,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v5k7
+  - model_name: glm5.2v5k7
     litellm_params:
-      model: openai/ZHIPUAI/gLM-5.1
+      model: openai/ZHIPUAI/gLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1856,9 +1856,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v6k7
+  - model_name: glm5.2v6k7
     litellm_params:
-      model: openai/ZHIPUAI/gLm-5.1
+      model: openai/ZHIPUAI/gLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1884,9 +1884,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v7k7
+  - model_name: glm5.2v7k7
     litellm_params:
-      model: openai/ZHIPUAI/glM-5.1
+      model: openai/ZHIPUAI/glM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1912,9 +1912,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v8k7
+  - model_name: glm5.2v8k7
     litellm_params:
-      model: openai/ZHIPUAI/glm-5.1
+      model: openai/ZHIPUAI/glm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1940,9 +1940,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v9k7
+  - model_name: glm5.2v9k7
     litellm_params:
-      model: openai/ZHIPUAi/GLM-5.1
+      model: openai/ZHIPUAi/GLM-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1
@@ -1968,9 +1968,9 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
-  - model_name: glm5.1v10k7
+  - model_name: glm5.2v10k7
     litellm_params:
-      model: openai/ZHIPUAi/GLm-5.1
+      model: openai/ZHIPUAi/GLm-5.2
       api_base: os.environ/MS_BASEURL
       api_key: os.environ/MS_KEY7
       rpm: 1

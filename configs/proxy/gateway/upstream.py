@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Upstream request executor with v×k 2D round-robin + error cycling.
 
-This module is the shared core for ALL agent types (CC/OpenClaw/OpenCode/Hermes).
+This module is the shared core for ALL agent types (CC/OpenClaw/OpenCode/Hermes/Codex).
 It handles:
   - v×k 2D round-robin counter for even distribution across ModelScope keys
   - 429/500/502 key cycling (same variant, shift key k→k+1)
@@ -10,10 +10,12 @@ It handles:
   - All-keys-exhausted classification (all_429 vs mixed failures)
   - Thinking_budget fix retry (400 InvalidParameter → adjust params → retry same key)
   - Resilience retry (401/403 AuthenticationError → retry once)
+  - Formatting error responses per agent type
 
 UpstreamResult is returned to handlers, which format the response per agent type:
   - CC (_cc): Anthropic format conversion
   - OpenClaw/OpenCode/Hermes (_ol/_oc/_hm): OpenAI format passthrough
+  - Codex (_cx): Responses API format conversion (via codex module)
 """
 import json
 import re
@@ -48,7 +50,7 @@ class UpstreamResult:
         # Success fields
         self.resp = None  # http.client.HTTPResponse
         self.conn = None  # http.client.HTTPConnection
-        self.litellm_model = ""  # e.g. "glm5.1v3k5"
+        self.litellm_model = ""  # e.g. "glm5.2v3k5"
         self.variant_idx = 0  # 0-based variant index
         self.key_idx = 0  # 0-based key index
         self.is_stream = False  # whether upstream was asked for streaming
@@ -74,7 +76,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         handler: ProxyHandler instance (needed for _make_upstream_conn)
         oai_body: dict — OpenAI-format request body (already converted from Anthropic
                   if CC path, or raw OpenAI body if OpenAI path)
-        mapped_model: str — backend model name ("glm5.1")
+        mapped_model: str — backend model name ("glm5.2")
         request_id: str — unique request ID for logging
         metrics: dict — metrics dict to update
         t_start: float — request start timestamp
@@ -254,12 +256,10 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                 metrics["variant_idx"] = start_variant_idx
                                 metrics["litellm_model"] = litellm_model
                                 metrics["thinking_budget_fix_success"] = True
-                                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                                 if key_cycle_attempts:
                                     metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                                     metrics["key_cycle_details"] = key_cycle_attempts
                                     _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1}")
-                                _log_metrics(metrics)
                                 return result
                             # Fix retry also failed
                             error_body_fix = resp_fix.read()
@@ -300,12 +300,10 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                             metrics["variant_idx"] = start_variant_idx
                             metrics["litellm_model"] = litellm_model
                             metrics["resilience_retry_success"] = True
-                            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
                             if key_cycle_attempts:
                                 metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                                 metrics["key_cycle_details"] = key_cycle_attempts
                                 _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1}")
-                            _log_metrics(metrics)
                             return result
                         # Resilience retry also failed
                         error_body2 = resp2.read()
@@ -353,18 +351,14 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
             result.key_idx = current_key_idx
             result.key_cycle_attempts = key_cycle_attempts
 
-            # R28: Log metrics for successful requests (was missing before — only error path logged metrics)
+            # Update metrics
             metrics["key_idx"] = current_key_idx
             metrics["variant_idx"] = start_variant_idx
             metrics["litellm_model"] = litellm_model
-            metrics["duration_ms"] = int((time.time() - t_start) * 1000)
             if key_cycle_attempts:
                 metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                 metrics["key_cycle_details"] = key_cycle_attempts
                 _log("KEY-CYCLE-SUCCESS", f"429 on {len(key_cycle_attempts)} key(s) before success on v{start_variant_idx+1} k{current_key_idx+1} ({litellm_model})")
-                # Only write upstream-level metrics when there's key cycling detail
-                # (handler will write its own metrics for all success cases including this one)
-                _log_metrics(metrics)
             return result  # Success — done
 
         except socket.timeout as e:
@@ -380,7 +374,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                 "total_keys": NUM_KEYS,
                 "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
                 "elapsed_since_request_start_ms": elapsed_ms,
-                "timeout_exceeded_by_ms": elapsed_ms - PROXY_TIMEOUT * 1000 if elapsed_ms > PROXY_TIMEOUT * 1000 else 0,
+                "timeout_exceeded_by_ms": elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0,
                 "error_message": str(e)[:200],
             }
             _log_error_detail(timeout_detail)
@@ -426,6 +420,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
             continue  # Try next key
 
     # ─── All keys exhausted in start variant ───
+    # Every key in this variant failed. Classify the failure type.
     # Check if all errors are connection errors → primary LiteLLM container may be down
     all_conn_err = all(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "SocketTimeout") for a in key_cycle_attempts)
 
@@ -552,9 +547,6 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                                 f"k{fb_key_idx+1} ({litellm_model_fb}) after "
                                                 f"{len(key_cycle_attempts)} connection errors on primary")
 
-                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                    _log_metrics(metrics)
-
                     result.success = True
                     result.resp = resp_fb
                     result.conn = conn_fb
@@ -600,7 +592,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                            f"Fallback: {[a.get('error_type') for a in key_cycle_attempts[NUM_KEYS:]]}")
         else:
             _log("LITELLM-FB-SKIP", f"All keys connection errors but no fallback LiteLLM URL configured for {mapped_model}")
-    # Every key in this variant failed. Classify the failure type.
+
     # Include both primary and fallback LiteLLM error types.
     all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_fallback") for a in key_cycle_attempts)
     has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_internal_server_error_fallback") for a in key_cycle_attempts)
@@ -725,9 +717,6 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                                                       f"k{fallback_k_idx+1} ({litellm_model_fb}) after "
                                                       f"{len(key_cycle_attempts)} key 429s + {len(variant_fallback_attempts)} variant 429s")
 
-                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
-                    _log_metrics(metrics)
-
                     result.success = True
                     result.resp = resp_fb
                     result.conn = conn_fb
@@ -816,7 +805,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         "variant_fallback_attempts": variant_fallback_attempts,
         "variant_fallback_attempt_types": [a.get("error_type") for a in variant_fallback_attempts],
         "elapsed_since_request_start_ms": elapsed_ms,
-        "proxy_timeout_setting_ms": PROXY_TIMEOUT * 1000,
+        "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
         "all_429": all_429,
         "has_500": has_500,
         "has_502": has_502,

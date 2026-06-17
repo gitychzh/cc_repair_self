@@ -1,26 +1,26 @@
 # Hermes (opc2_uname) 配置模板 — 通过 proxy gateway (40001) 路由
-# _key_changes: 1) base_url 从 41001→40001; 2) default 从 glm5.1→glm5.1_hm; 3) context_length 从 131072→170000
+# _key_changes: 1) base_url 从 41001→40001; 2) default 从 glm5.2→glm5.2_hm; 3) context_length 从 131072→170000
 # R25: Added fallback_providers pointing to 40002 proxy (fallback when 40001 restarts)
 # 所有 OpenAI agent 必须通过 proxy gateway，不能直连 LiteLLM
-# 原因: LiteLLM 的 model_list 只有 v×k 路由名(glm5.1v1k1~v10k7)，没有 glm5.1 别名
-# Proxy gateway 做: model name映射(glm5.1_hm→glm5.1→v×k routing) + error cycling + variant fallback
+# 原因: LiteLLM 的 model_list 只有 v×k 路由名(glm5.2v1k1~v10k7)，没有 glm5.2 别名
+# Proxy gateway 做: model name映射(glm5.2_hm→glm5.2→v×k routing) + error cycling + variant fallback
 
 model:
   base_url: http://127.0.0.1:40001/v1
-  default: glm5.1_hm
+  default: glm5.2_hm
   provider: proxy-gateway
   context_length: 170000
 providers:
   proxy-gateway:
     api_key: sk-litellm-local
     base_url: http://127.0.0.1:40001/v1
-    default_model: glm5.1_hm
+    default_model: glm5.2_hm
     name: Proxy Gateway (Hermes)
     transport: openai_chat
   proxy-gateway-fallback:
     api_key: sk-litellm-local
     base_url: http://127.0.0.1:40002/v1
-    default_model: glm5.1_hm
+    default_model: glm5.2_hm
     name: Proxy Gateway 40002 (Hermes fallback)
     transport: openai_chat
 fallback_providers:

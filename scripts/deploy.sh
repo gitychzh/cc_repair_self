@@ -28,7 +28,7 @@ elif [[ "${SERVICE}" == "proxy40002" ]] || [[ "${SERVICE}" == "auth_to_api_40002
 elif [[ "${SERVICE}" == "proxy-all" ]]; then
     echo "[1] Rebuilding both proxy containers (40001 + 40002)..."
     DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002
-elif [[ "${SERVICE}" == "ms_uni41001" ]] || [[ "${SERVICE}" == "glm5.1_uni41001" ]]; then
+elif [[ "${SERVICE}" == "ms_uni41001" ]] || [[ "${SERVICE}" == "glm5.2_uni41001" ]]; then
     echo "[1] Restarting ms_uni41001 (LiteLLM config changed)..."
     docker restart ms_uni41001
 elif [[ "${SERVICE}" == "ms_uni41002" ]] || [[ "${SERVICE}" == "litellm-fallback" ]]; then
@@ -53,23 +53,23 @@ docker ps --format 'table {{.Names}}\t{{.Status}}' | head -10
 echo ""
 echo "[4] Testing requests..."
 
-# Test glm5.1 via proxy 40001 (Anthropic format)
-echo "  Testing glm5.1 via 40001..."
+# Test glm5.2 via proxy 40001 (Anthropic format)
+echo "  Testing glm5.2 via 40001..."
 GLM_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40001/v1/messages \
     -H "Content-Type: application/json" \
     -H "x-api-key: sk-litellm-local" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
-echo "  glm5.1 via 40001 HTTP status: ${GLM_RESULT}"
+    -d '{"model":"glm5.2","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
+echo "  glm5.2 via 40001 HTTP status: ${GLM_RESULT}"
 
-# Test glm5.1 via proxy 40002 (Anthropic format) — R25 fallback
-echo "  Testing glm5.1 via 40002 (fallback)..."
+# Test glm5.2 via proxy 40002 (Anthropic format) — R25 fallback
+echo "  Testing glm5.2 via 40002 (fallback)..."
 GLM_RESULT_40002=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40002/v1/messages \
     -H "Content-Type: application/json" \
     -H "x-api-key: sk-litellm-local" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
-echo "  glm5.1 via 40002 HTTP status: ${GLM_RESULT_40002}"
+    -d '{"model":"glm5.2","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
+echo "  glm5.2 via 40002 HTTP status: ${GLM_RESULT_40002}"
 
 # Test LiteLLM 41001 health (direct)
 echo "  Testing LiteLLM 41001 health..."
@@ -83,12 +83,12 @@ echo "  LiteLLM 41002 health: ${LITELLM_41002}"
 
 echo ""
 if [[ "${GLM_RESULT}" == "200" ]]; then
-    echo "=== Deploy SUCCESS — glm5.1 working via 40001 proxy ==="
+    echo "=== Deploy SUCCESS — glm5.2 working via 40001 proxy ==="
 else
-    echo "=== WARNING — glm5.1 via 40001 returned ${GLM_RESULT}, check logs ==="
+    echo "=== WARNING — glm5.2 via 40001 returned ${GLM_RESULT}, check logs ==="
 fi
 if [[ "${GLM_RESULT_40002}" == "200" ]]; then
     echo "=== Fallback 40002 also working ==="
 else
-    echo "=== WARNING — glm5.1 via 40002 returned ${GLM_RESULT_40002}, check logs ==="
+    echo "=== WARNING — glm5.2 via 40002 returned ${GLM_RESULT_40002}, check logs ==="
 fi

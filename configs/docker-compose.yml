@@ -1,9 +1,9 @@
-# R24→R26: Unified architecture — ms_uni41001 + ms_uni41002 (7 groups × 10 variants = 70 dep each, glm5.1 only)
+# R24→R26: Unified architecture — ms_uni41001 + ms_uni41002 (7 groups × 10 variants = 70 dep each, glm5.2 only)
 # proxy gateway (40001 primary + 40002 fallback) — format conversion + metrics + variant×key 2D round-robin + variant fallback + LiteLLM fallback
 # gateway/ modular package handles ALL agent types: _cc (Anthropic), _ol/_oc/_hm (OpenAI), _cx (Responses)
 # R26: Added ms_uni41002 LiteLLM as infrastructure fallback — proxy auto-switches when 41001 container unavailable (ConnectionRefused)
 # R25: Re-added 40002 proxy as fallback — agents fallback to 40002 when 40001 restarts/unavailable
-# R24: Removed dsv4p from config. Only glm5.1 backend.
+# R24: Removed dsv4p from config. Only glm5.2 backend.
 #
 # Port assignments: 41001=unified(ms_uni41001,PRIMARY), 41002=unified(ms_uni41002,FALLBACK), 40001=proxy(primary), 40002=proxy(fallback)
 # ulimit nofile: 41001/41002 use 2048 soft / 65536 hard (70 dep)
@@ -50,8 +50,8 @@ services:
         max-file: '5'
         tag: container/{{.Name}}
 
-  # ─── R24: Unified ModelScope container (70 deployments, glm5.1 only) ───
-  # Formerly hosted both glm5.1 + dsv4p (140 dep). R24 removes dsv4p entirely.
+  # ─── R24: Unified ModelScope container (70 deployments, glm5.2 only) ───
+  # Formerly hosted both glm5.2 + dsv4p (140 dep). R24 removes dsv4p entirely.
   # 7 key groups × 10 variants = 70 dep. Proxy specifies exact variant+key combo.
   ms_uni41001:
     image: litellm/litellm:v1.87.0
@@ -172,7 +172,7 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # R24: Only glm5.1 routes to ms_uni41001 (dsv4p removed)
+      # R24: Only glm5.2 routes to ms_uni41001 (dsv4p removed)
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
       # R26: LiteLLM fallback — when 41001 container unavailable (ConnectionRefused), proxy auto-switches to 41002

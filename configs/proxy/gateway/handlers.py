@@ -7,7 +7,7 @@ R23 refactoring: handlers.py is now a slim dispatcher that delegates:
 - Streaming to stream module (Anthropic SSE path only)
 - Error mapping to error_mapping module (both Anthropic and OpenAI formats)
 
-Two main request paths:
+Three main request paths:
 1. /v1/messages → _handle_messages() → Anthropic format (CC/_cc)
 2. /v1/chat/completions → _handle_openai_with_cycling() → OpenAI format (_ol/_oc/_hm)
 3. /v1/responses → _handle_codex_responses() → Responses API format (Codex/_cx) [R24 NEW]
@@ -613,8 +613,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _proxy_models(self):
         """Return OpenAI-format model list for OpenAI agents.
 
-        Shows suffix-based model IDs: glm5.1_ol, glm5.1_oc, glm5.1_hm.
-        Also includes direct names (glm5.1) for backward compat.
+        Shows suffix-based model IDs: glm5.2_ol, glm5.2_oc, glm5.2_hm.
+        Also includes direct names (glm5.2) for backward compat.
         """
         all_models = []
         seen_ids = set()

@@ -1,6 +1,6 @@
 {
   "_comment": "OpenClaw (opc2_uname) 配置模板 — 通过 proxy gateway (40001) 路由",
-  "_key_changes": "1) baseUrl 从 41001→40001 (proxy gateway); 2) model 从 glm5.1→glm5.1_ol (suffix routing); 3) contextWindow 从 131072→170000; 4) R25: added fallback provider litellm-fallback (40002)",
+  "_key_changes": "1) baseUrl 从 41001→40001 (proxy gateway); 2) model 从 glm5.2→glm5.2_ol (suffix routing); 3) contextWindow 从 131072→170000; 4) R25: added fallback provider litellm-fallback (40002)",
   "gateway": {
     "mode": "local",
     "auth": {
@@ -17,7 +17,7 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "glm5.1_ol",
+            "id": "glm5.2_ol",
             "name": "GLM 5.1 (OpenClaw)",
             "contextWindow": 170000
           }
@@ -29,7 +29,7 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "glm5.1_ol",
+            "id": "glm5.2_ol",
             "name": "GLM 5.1 (OpenClaw fallback)",
             "contextWindow": 170000
           }
@@ -42,14 +42,14 @@
     "defaults": {
       "verboseDefault": "on",
       "model": {
-        "primary": "litellm/glm5.1_ol",
-        "fallback": "litellm-fallback/glm5.1_ol"
+        "primary": "litellm/glm5.2_ol",
+        "fallback": "litellm-fallback/glm5.2_ol"
       },
       "models": {
-        "litellm/glm5.1_ol": {
+        "litellm/glm5.2_ol": {
           "alias": "GLM 5.1 (OpenClaw)"
         },
-        "litellm-fallback/glm5.1_ol": {
+        "litellm-fallback/glm5.2_ol": {
           "alias": "GLM 5.1 (OpenClaw fallback)"
         }
       }

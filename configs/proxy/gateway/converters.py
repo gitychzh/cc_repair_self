@@ -174,7 +174,7 @@ def _convert_tool_choice(anth_choice):
 
 def anth_to_openai(body, target_model=None):
     """Convert Anthropic Messages API format to OpenAI Chat Completions format."""
-    model = target_model or body.get("model", "glm5.1")
+    model = target_model or body.get("model", "glm5.2")
     system_text = ""
     system_blocks = body.get("system")
     if system_blocks:
@@ -320,16 +320,16 @@ def anth_to_openai(body, target_model=None):
     if tc:
         oai_body["tool_choice"] = tc
 
-    # Anthropic thinking → GLM-5.1 thinking_budget + reasoning_effort
-    # ModelScope GLM-5.1 requires: max_completion_tokens > thinking_budget
+    # Anthropic thinking → GLM-5.2 thinking_budget + reasoning_effort
+    # ModelScope GLM-5.2 requires: max_completion_tokens > thinking_budget
     # Claude Code sends thinking.budget_tokens=32768 (default) with max_tokens=8192
     # We must ensure max_completion_tokens > thinking_budget
     # NOTE: DSv4P does NOT support reasoning_effort — only set it for models with thinking support
-    # Use THINKING_SUPPORT dict for multi-agent compatibility (not hardcoded "glm5.1")
+    # Use THINKING_SUPPORT dict for multi-agent compatibility (not hardcoded "glm5.2")
     if body.get("thinking") and THINKING_SUPPORT.get(target_model, False):
         thinking_cfg = body["thinking"]
         budget = thinking_cfg.get("budget_tokens", 8000)
-        # Pass thinking_budget directly for ModelScope GLM-5.1
+        # Pass thinking_budget directly for ModelScope GLM-5.2
         oai_body["thinking_budget"] = budget
         # Ensure max_completion_tokens > thinking_budget (ModelScope constraint)
         # Leave room for actual output after thinking: thinking_budget + output margin
@@ -338,8 +338,8 @@ def anth_to_openai(body, target_model=None):
             output_tokens = required_min
             oai_body["max_tokens"] = output_tokens
             oai_body["max_completion_tokens"] = output_tokens
-        # Set reasoning_effort for GLM-5.1 only — DSv4P doesn't support it
-        if target_model == "glm5.1":
+        # Set reasoning_effort for GLM-5.2 only — DSv4P doesn't support it
+        if target_model == "glm5.2":
             if budget >= 10000:
                 oai_body["reasoning_effort"] = "high"
             elif budget >= 5000:

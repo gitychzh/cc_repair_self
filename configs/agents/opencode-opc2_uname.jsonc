@@ -1,9 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "_comment": "OpenCode (opc2_uname) 配置 — 通过 proxy gateway (40001) 路由",
-  "_key_changes": "1) baseURL 从 41001→40001; 2) model 从 glm5.1→glm5.1_oc; 3) context 从 131072→170000; 4) R25: added fallback provider proxy-gateway-fallback (40002)",
-  "model": "proxy-gateway/glm5.1_oc",
-  "small_model": "proxy-gateway/glm5.1_oc",
+  "_key_changes": "1) baseURL 从 41001→40001; 2) model 从 glm5.2→glm5.2_oc; 3) context 从 131072→170000; 4) R25: added fallback provider proxy-gateway-fallback (40002)",
+  "model": "proxy-gateway/glm5.2_oc",
+  "small_model": "proxy-gateway/glm5.2_oc",
   "provider": {
     "proxy-gateway": {
       "id": "proxy-gateway",
@@ -15,8 +15,8 @@
         "baseURL": "http://127.0.0.1:40001/v1"
       },
       "models": {
-        "glm5.1_oc": {
-          "id": "glm5.1_oc",
+        "glm5.2_oc": {
+          "id": "glm5.2_oc",
           "name": "GLM 5.1 (OpenCode)",
           "family": "glm",
           "tool_call": true,
@@ -43,8 +43,8 @@
         "baseURL": "http://127.0.0.1:40002/v1"
       },
       "models": {
-        "glm5.1_oc": {
-          "id": "glm5.1_oc",
+        "glm5.2_oc": {
+          "id": "glm5.2_oc",
           "name": "GLM 5.1 (OpenCode fallback)",
           "family": "glm",
           "tool_call": true,
