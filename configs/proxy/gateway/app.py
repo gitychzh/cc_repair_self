@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Gateway proxy entry point.
 
-Architecture:
-  CC/OL/OC/HM/CX(40001) → this proxy (format conversion + metrics + variant×key 2D round-robin)
-      → 41001 ms_uni41001 LiteLLM (glm5.2 only, 70 dep)
+R29: Three proxy containers, each with a different role:
+  40001 (cc):          CC → Anthropic format → glm5.2 v×k cycling
+  40002 (codex):       Codex → Responses API → glm5.2 v×k cycling
+  40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → dsv4p v×k cycling
+
+All three share the same gateway code (same Docker image).
+Difference is injected via PROXY_ROLE env var + different upstream model.
 
 Env vars: see config.py for full list.
 """
 import socketserver
 
-from .config import LISTEN_HOST, LISTEN_PORT, MODEL_UPSTREAMS, UPSTREAM_TIMEOUT
+from .config import LISTEN_HOST, LISTEN_PORT, MODEL_UPSTREAMS, UPSTREAM_TIMEOUT, PROXY_ROLE, DEFAULT_UPSTREAM_MODEL
 from .logger import _log
-from .handlers import ProxyHandler
 
 
 class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
@@ -22,13 +25,12 @@ class ThreadedHTTPServer(socketserver.ThreadingTCPServer):
 def main():
     server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     _log("START", f"Proxy listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    _log("START", f"PROXY_ROLE={PROXY_ROLE} — serving {DEFAULT_UPSTREAM_MODEL} upstream")
     _log("START", f"UPSTREAM_TIMEOUT={UPSTREAM_TIMEOUT}s (per-key HTTP timeout)")
-    _log("START", f"GLM-5.2 primary gateway: {MODEL_UPSTREAMS['glm5.2']['chat_url']}")
-    fb_url = MODEL_UPSTREAMS['glm5.2'].get('fallback_chat_url', '')
-    if fb_url:
-        _log("START", f"GLM-5.2 fallback gateway: {fb_url}")
-    else:
-        _log("START", f"GLM-5.2 fallback gateway: not configured")
+
+    for model_key, upstream in MODEL_UPSTREAMS.items():
+        _log("START", f"  {model_key} gateway: {upstream['chat_url']}")
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -37,4 +39,5 @@ def main():
 
 
 if __name__ == "__main__":
+    from .handlers import ProxyHandler
     main()

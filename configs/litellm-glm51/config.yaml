@@ -1,15 +1,15 @@
-# 41001 LiteLLM Config — glm5.2 only (7 key groups × 10 variants = 70 dep, rpm=1)
-# R24: dsv4p removed entirely — only glm5.2 remains
+# 41001 LiteLLM Config — glm5.2 (70 dep) + dsv4p (70 dep) = 140 dep, rpm=1
+# R29: Restored dsv4p (70 dep) alongside glm5.2 (70 dep). Total 140 deployments.
 # Container name: ms_uni41001
 #
 # Variant×Key round-robin (R21):
 #   Proxy 2D round-robin: request N → variant_idx=(N//7)%10, key_idx=N%7
-#   → model name format: glm5.2v{V}k{K} (e.g. glm5.2v1k1)
+#   → model name format: {base}v{V}k{K} (e.g. glm5.2v1k1, dsv4pv3k5)
 #   429 cycling: same variant, next key (k→k+1). All 7 keys 429 → variant fallback (R23)
 #   LiteLLM does NOT do routing — proxy precisely specifies variant+key combo
 #   Each dep has unique model_name for proxy-level routing control
 #
-# glm5.2 variant IDs (10, IMMUTABLE):
+# ─── glm5.2 variant IDs (10, IMMUTABLE): ───
 #   ZHIPUAI/GLM-5.2 (v1)
 #   ZHIPUAI/GLm-5.2 (v2)
 #   ZHIPUAI/GlM-5.2 (v3)
@@ -1996,6 +1996,1922 @@ model_list:
     model_info:
       mode: chat
       max_tokens: 131072
+
+  # ─── dsv4p (DeepSeek V4 Pro) — 7 key groups × 10 variants = 70 dep ───
+  # R29: Restored from R24 deletion. Each variant has independent 200/id/day quota.
+  # dsv4p variant IDs (10, IMMUTABLE):
+  #   deepseek-ai/deepseek-v4-pro (v1)
+  #   deepseek-ai/Deepseek-V4-Pro (v2)
+  #   deepseek-ai/DeepSeek-v4-pro (v3)
+  #   deepseek-ai/DeepSeek-v4-Pro (v4)
+  #   deepseek-ai/DeepSeek-V4-PrO (v5)
+  #   deepseek-ai/DeepSeek-V4-PRo (v6)
+  #   deepseek-ai/DeepSeeK-V4-Pro (v7)
+  #   deepseek-ai/DeepSeEk-V4-Pro (v8)
+  #   deepseek-ai/DeepSEek-V4-Pro (v9)
+  #   deepseek-ai/DeePSeek-V4-Pro (v10)
+  # model_name format: dsv4pv{variant_idx}k{key_idx}
+  #   dsv4pv1k1 = DSv4P variant1 + MS_KEY1
+  #   Note: DSv4P does NOT support reasoning_effort/thinking_budget
+  #   Those params are excluded from allowed_openai_params for dsv4p
+
+  # ─── dsv4p Key group 1: MS_KEY1 ───
+  - model_name: dsv4pv1k1
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k1
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k1
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k1
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY1
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 2: MS_KEY2 ───
+  - model_name: dsv4pv1k2
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k2
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k2
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k2
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY2
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 3: MS_KEY3 ───
+  - model_name: dsv4pv1k3
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k3
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k3
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k3
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY3
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 4: MS_KEY4 ───
+  - model_name: dsv4pv1k4
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k4
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k4
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k4
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY4
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 5: MS_KEY5 ───
+  - model_name: dsv4pv1k5
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k5
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k5
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k5
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY5
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 6: MS_KEY6 ───
+  - model_name: dsv4pv1k6
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k6
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k6
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k6
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY6
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p Key group 7: MS_KEY7 ───
+  - model_name: dsv4pv1k7
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv2k7
+    litellm_params:
+      model: openai/deepseek-ai/Deepseek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv3k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv4k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-v4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv5k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PrO
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv6k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-PRo
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv7k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeeK-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv8k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeEk-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv9k7
+    litellm_params:
+      model: openai/deepseek-ai/DeepSEek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  - model_name: dsv4pv10k7
+    litellm_params:
+      model: openai/deepseek-ai/DeePSeek-V4-Pro
+      api_base: os.environ/MS_BASEURL
+      api_key: os.environ/MS_KEY7
+      rpm: 1
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+        - logprobs
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
 litellm_settings:
   drop_params: true
   json_logs: true

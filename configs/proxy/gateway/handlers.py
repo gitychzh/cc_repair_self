@@ -7,13 +7,15 @@ R23 refactoring: handlers.py is now a slim dispatcher that delegates:
 - Streaming to stream module (Anthropic SSE path only)
 - Error mapping to error_mapping module (both Anthropic and OpenAI formats)
 
-Three main request paths:
-1. /v1/messages → _handle_messages() → Anthropic format (CC/_cc)
-2. /v1/chat/completions → _handle_openai_with_cycling() → OpenAI format (_ol/_oc/_hm)
-3. /v1/responses → _handle_codex_responses() → Responses API format (Codex/_cx) [R24 NEW]
+R29: PROXY_ROLE determines which endpoints this proxy serves:
+  - "cc"          → /v1/messages only (Anthropic format, CC)
+  - "codex"       → /v1/responses only (Responses API, Codex)
+  - "passthrough" → /v1/chat/completions only (OpenAI format, _ol/_oc/_hm)
 
-All paths use the same upstream.execute_request() for v×k cycling + error handling.
-The only difference is response formatting: Anthropic vs OpenAI vs Responses.
+Three proxy containers each serve their own role:
+  40001 (cc):          CC → Anthropic format → glm5.2 v×k cycling
+  40002 (codex):       Codex → Responses API → glm5.2 v×k cycling
+  40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → dsv4p v×k cycling
 """
 import http.server
 import json
@@ -30,6 +32,7 @@ from .config import (
     MODEL_UPSTREAMS, MODEL_MAX_INPUT_TOKENS, MODEL_INPUT_TOKEN_SAFETY,
     CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS,
     AGENT_SUFFIXES, DEFAULT_AGENT_SUFFIX, detect_agent_type, format_model_id,
+    PROXY_ROLE, ROLE_DEFAULT_UPSTREAM,
     _is_routing_name,
 )
 from .logger import _log, _log_metrics, _log_error_detail
@@ -52,21 +55,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             gw_urls = {k: v["chat_url"] for k, v in MODEL_UPSTREAMS.items()}
             self._send_json(200, {
                 "status": "ok",
-                "proxy": "anthropic-to-openai",
+                "proxy_role": PROXY_ROLE,
                 "gateways": gw_urls,
                 "port": int(os.environ.get("LISTEN_PORT", "40001")),
             })
         elif parsed.path == "/v1/models" or parsed.path == "/models":
-            # Check if this is a Anthropic-format request (has anthropic-version header)
-            anth_version = self.headers.get("anthropic-version")
-            if anth_version:
-                self._anthropic_models_list()
+            # Only serve models if this proxy role handles the relevant endpoint
+            if PROXY_ROLE == "cc":
+                # CC proxy: Anthropic-format models (for CC startup check)
+                anth_version = self.headers.get("anthropic-version")
+                if anth_version:
+                    self._anthropic_models_list()
+                else:
+                    self._proxy_models()  # Fallback for non-Anthropic clients on CC port
+            elif PROXY_ROLE == "passthrough":
+                # Passthrough proxy: OpenAI-format models (for _ol/_oc/_hm)
+                self._proxy_models()
+            elif PROXY_ROLE == "codex":
+                # Codex proxy: OpenAI-format models (Codex checks /v1/models)
+                self._proxy_models()
             else:
                 self._proxy_models()
         elif parsed.path.startswith("/v1/models/") or parsed.path.startswith("/models/"):
-            # Anthropic model detail endpoint: /v1/models/{model_id}
-            model_id = parsed.path.split("/models/")[1].strip("/")
-            self._anthropic_model_detail(model_id)
+            if PROXY_ROLE == "cc":
+                model_id = parsed.path.split("/models/")[1].strip("/")
+                self._anthropic_model_detail(model_id)
+            else:
+                self._send_json(404, {"error": "not found"})
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -81,14 +96,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/v1/messages":
-            self._handle_messages()
-        elif parsed.path in ("/v1/chat/completions", "/chat/completions"):
-            self._handle_openai_with_cycling()
-        elif parsed.path in ("/v1/responses", "/responses"):  # R24: Responses API for Codex CLI
-            self._handle_codex_responses()
+        # Role-based endpoint filtering (R29)
+        if PROXY_ROLE == "cc":
+            # CC proxy: only /v1/messages (Anthropic format)
+            if parsed.path == "/v1/messages":
+                self._handle_messages()
+            else:
+                self._send_json(404, {"error": {"message": f"CC proxy only serves /v1/messages. Role={PROXY_ROLE}", "type": "invalid_request_error"}})
+        elif PROXY_ROLE == "codex":
+            # Codex proxy: only /v1/responses (Responses API format)
+            if parsed.path in ("/v1/responses", "/responses"):
+                self._handle_codex_responses()
+            else:
+                self._send_json(404, {"error": {"type": "invalid_request_error", "code": "404", "message": f"Codex proxy only serves /v1/responses. Role={PROXY_ROLE}"}})
+        elif PROXY_ROLE == "passthrough":
+            # Passthrough proxy: only /v1/chat/completions (OpenAI format)
+            if parsed.path in ("/v1/chat/completions", "/chat/completions"):
+                self._handle_openai_with_cycling()
+            else:
+                self._send_json(404, {"error": {"message": f"Passthrough proxy only serves /v1/chat/completions. Role={PROXY_ROLE}", "type": "invalid_request_error", "code": "404"}})
         else:
-            self._send_json(404, {"error": "not found"})
+            # Unknown role — serve all endpoints (legacy fallback)
+            if parsed.path == "/v1/messages":
+                self._handle_messages()
+            elif parsed.path in ("/v1/chat/completions", "/chat/completions"):
+                self._handle_openai_with_cycling()
+            elif parsed.path in ("/v1/responses", "/responses"):
+                self._handle_codex_responses()
+            else:
+                self._send_json(404, {"error": "not found"})
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -113,6 +149,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "request_id": request_id,
             "timestamp": datetime.datetime.now().isoformat(),
             "path": "/v1/messages",
+            "proxy_role": PROXY_ROLE,
             "request_model": "?",
             "mapped_model": "?",
             "agent_type": "?",
@@ -205,7 +242,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ─── ModelScope force-stream ───
         # Only force-stream for Anthropic path (CC) — OpenAI agents get proper non-stream responses
         force_stream_for_nonstream = (not is_stream)
-        metrics["_original_stream"] = is_stream  # Record original stream intent for upstream.py
+        metrics["_original_stream"] = is_stream
         if force_stream_for_nonstream:
             oai_body["stream"] = True
             _log("FORCE-STREAM", f"non-stream → forcing stream=True (collect+synthesize)")
@@ -221,7 +258,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling ───
             if result.all_keys_exhausted:
-                # All keys exhausted — format Anthropic error
                 if result.all_429:
                     cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
                     self._send_json(429, {
@@ -233,7 +269,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                        f"Keys cycled: {cycled_keys}"
                         },
                         "model": request_model,
-                    }, extra_headers={"retry-after": "180"})  # R23: 180s (3min) to reduce CC retry frequency and quota waste
+                    }, extra_headers={"retry-after": "180"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
                     timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
@@ -252,7 +288,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     })
                 return
             else:
-                # Non-cycling upstream error (400, 401, etc) — format Anthropic error
+                # Non-cycling upstream error (400, 401, etc)
                 error_json = result.final_error_json
                 resp_status = result.final_resp_status
 
@@ -284,7 +320,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ─── Success: process response ───
         resp = result.resp
         conn = result.conn
-        # R28: Merge upstream result info into handler metrics (key cycling, variant, model details)
         metrics["key_idx"] = result.key_idx
         metrics["variant_idx"] = result.variant_idx
         metrics["litellm_model"] = result.litellm_model
@@ -318,14 +353,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_openai_with_cycling(self):
         """Handle OpenAI-format requests from OpenClaw/OpenCode/Hermes.
 
+        R29: These agents now route to dsv4p backend via passthrough proxy (40003).
+        The proxy does nearly-transparent passthrough with v×k cycling.
+
         Flow:
           1. Parse OpenAI request body
           2. Detect agent type from model name (suffix required for OpenAI agents)
           3. Map model name to backend (strip suffix → get base model)
           4. Call upstream.execute_request() with v×k cycling
           5. On success: pass through OpenAI response (no format conversion)
-             - Streaming: pass SSE stream directly to client
-             - Non-stream: pass JSON response directly to client
           6. On error: format OpenAI error response
         """
         t_start = time.time()
@@ -334,6 +370,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "request_id": request_id,
             "timestamp": datetime.datetime.now().isoformat(),
             "path": "/v1/chat/completions",
+            "proxy_role": PROXY_ROLE,
             "request_model": "?",
             "mapped_model": "?",
             "agent_type": "?",
@@ -381,13 +418,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # ─── Execute upstream request with v×k cycling ───
         # For OpenAI agents: do NOT force-stream-for-nonstream
-        # OpenAI agents expect proper non-stream responses (the 'delta' bug only affects
-        # Anthropic-format conversion, not OpenAI passthrough)
+        # OpenAI agents expect proper non-stream responses
         metrics["_original_stream"] = is_stream
 
         # Add stream_options.include_usage for streaming (needed for metrics)
         if is_stream and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
+
+        # R29: Remove thinking_budget for dsv4p backend (DSv4P doesn't support it)
+        if mapped_model == "dsv4p":
+            # Strip thinking-related params that dsv4p doesn't support
+            for param in ["reasoning_effort", "thinking_budget"]:
+                if param in body:
+                    _log("DSV4P-STRIP", f"removing unsupported param '{param}' from dsv4p request")
+                    del body[param]
 
         result = execute_request(self, body, mapped_model, request_id, metrics, t_start)
 
@@ -395,10 +439,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # ─── Error handling for OpenAI format ───
             if result.all_keys_exhausted:
                 error_payload, client_status = format_openai_error_all_keys_exhausted(result, mapped_model, request_model)
-                # Add retry-after header for 429
                 extra_hdrs = None
                 if client_status == 429:
-                    extra_hdrs = {"retry-after": "180"}  # R23: 180s (3min) to reduce retry frequency
+                    extra_hdrs = {"retry-after": "180"}
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
             else:
@@ -406,7 +449,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 error_json = result.final_error_json
                 resp_status = result.final_resp_status
                 error_payload, client_status = format_openai_error_upstream(error_json, request_model, resp_status)
-                # Add retry-after for 429
                 extra_hdrs = None
                 if client_status == 429:
                     quota_exhaust = is_quota_exhaustion(error_json)
@@ -418,7 +460,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # ─── Success: pass through OpenAI response ───
         resp = result.resp
         conn = result.conn
-        # R28: Merge upstream result info into handler metrics (key cycling, variant, model details)
         metrics["key_idx"] = result.key_idx
         metrics["variant_idx"] = result.variant_idx
         metrics["litellm_model"] = result.litellm_model
@@ -453,7 +494,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             # Pass through the response body as-is
             self.send_response(resp.status)
-            # Copy relevant headers from upstream
             for h in ["Content-Type"]:
                 v = resp.getheader(h)
                 if v:
@@ -468,17 +508,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         Unlike CC's Anthropic SSE conversion (stream_to_anth), this is a simple
         byte-level passthrough — no format conversion needed for OpenAI agents.
-
-        We still:
-        - Track TTFB and duration in metrics
-        - Collect usage data from the final chunk for metrics logging
-        - Handle connection errors gracefully (close stream properly)
         """
         ttfb_recorded = False
         streaming_input_tokens = 0
         streaming_output_tokens = 0
 
-        # Start streaming to client
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -490,12 +524,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if not chunk:
                     break
 
-                # Record TTFB on first chunk
                 if not ttfb_recorded:
                     metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
                     ttfb_recorded = True
 
-                # Try to extract usage from SSE chunks for metrics
                 try:
                     text = chunk.decode("utf-8", errors="replace")
                     for line in text.split("\n"):
@@ -514,7 +546,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     pass  # Don't let metrics extraction break passthrough
 
-                # Pass through raw chunk to client
                 try:
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -538,7 +569,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             error_class = type(e).__name__
             _log("ERR", f"OpenAI stream unexpected {error_class} after {elapsed_ms}ms: {e}")
 
-        # Log final metrics
         metrics["status"] = 200
         metrics["duration_ms"] = int((time.time() - t_start) * 1000)
         if streaming_input_tokens > 0:
@@ -558,13 +588,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         Flow:
           1. Parse Responses API request body
-          2. Detect agent type from model name (suffix _cx or codex-mini-latest)
-          3. Map model name to backend (strip suffix → get base model)
-          4. Delegate to codex.handle_codex_responses() which:
-             - Converts Responses API → Chat Completions format
-             - Calls upstream.execute_request() with v×k cycling
-             - Converts Chat Completions response → Responses API format
-          5. Returns Responses API format response to Codex client
+          2. Detect agent type from model name
+          3. Map model name to backend
+          4. Delegate to codex.handle_codex_responses()
         """
         t_start = time.time()
         request_id = str(uuid.uuid4())[:8]
@@ -572,6 +598,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "request_id": request_id,
             "timestamp": datetime.datetime.now().isoformat(),
             "path": "/v1/responses",
+            "proxy_role": PROXY_ROLE,
             "request_model": "?",
             "mapped_model": "?",
             "agent_type": "_cx",
@@ -611,10 +638,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── /v1/models proxy ───
     def _proxy_models(self):
-        """Return OpenAI-format model list for OpenAI agents.
+        """Return OpenAI-format model list.
 
-        Shows suffix-based model IDs: glm5.2_ol, glm5.2_oc, glm5.2_hm.
-        Also includes direct names (glm5.2) for backward compat.
+        R29: Shows models appropriate for this proxy's role:
+          cc: glm5.2_cc + backward compat aliases
+          codex: glm5.2_cx + backward compat aliases
+          passthrough: dsv4p_ol/dsv4p_oc/dsv4p_hm + backward compat aliases
         """
         all_models = []
         seen_ids = set()
@@ -648,10 +677,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(resp.read())
                 for m in data.get("data", []):
                     model_id = m.get("id", "")
-                    # Filter out variant×key routing names
                     if _is_routing_name(model_id):
                         continue
-                    # Filter out base names (already covered by suffix versions)
                     if model_id in seen_ids or model_id in MODEL_UPSTREAMS:
                         continue
                     if model_id not in seen_ids:
@@ -669,7 +696,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 _log("ERROR", f"models proxy error for {model_key}: {e}")
 
-        # Include canonical names without suffix (backward compat)
+        # Include base model names if not covered
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
                 seen_ids.add(model_key)
@@ -686,11 +713,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── Anthropic-format /v1/models endpoints ───
     def _anthropic_models_list(self):
-        """Return Anthropic-format model list with context_window.
-
-        Shows _cc suffix model IDs for CC, plus backward compat names.
-        CC uses context_window to decide when to trigger built-in auto-compact.
-        """
+        """Return Anthropic-format model list with context_window."""
         all_models = []
         seen_ids = set()
 
@@ -713,7 +736,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if model_id not in seen_ids:
                 seen_ids.add(model_id)
                 safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
-                # Add _cc suffix to display name to show this is CC format
                 display = format_model_id(mapped, "_cc") if not model_id.endswith("_cc") else model_id
                 all_models.append({
                     "id": model_id,

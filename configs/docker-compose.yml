@@ -1,12 +1,12 @@
-# R24→R26: Unified architecture — ms_uni41001 + ms_uni41002 (7 groups × 10 variants = 70 dep each, glm5.2 only)
-# proxy gateway (40001 primary + 40002 fallback) — format conversion + metrics + variant×key 2D round-robin + variant fallback + LiteLLM fallback
-# gateway/ modular package handles ALL agent types: _cc (Anthropic), _ol/_oc/_hm (OpenAI), _cx (Responses)
-# R26: Added ms_uni41002 LiteLLM as infrastructure fallback — proxy auto-switches when 41001 container unavailable (ConnectionRefused)
-# R25: Re-added 40002 proxy as fallback — agents fallback to 40002 when 40001 restarts/unavailable
-# R24: Removed dsv4p from config. Only glm5.2 backend.
+# R29: Three-proxy architecture — 3 proxy containers + 1 LiteLLM + 1 postgres
+# 40001 (cc):          CC → Anthropic format → 41001 glm5.2 v×k
+# 40002 (codex):       Codex → Responses API → 41001 glm5.2 v×k
+# 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 dsv4p v×k
+# 41001: ms_uni41001 LiteLLM (70 glm5.2 + 70 dsv4p = 140 dep)
+# R29: Removed ms_uni41002 (LiteLLM fallback), removed 40002 fallback proxy
 #
-# Port assignments: 41001=unified(ms_uni41001,PRIMARY), 41002=unified(ms_uni41002,FALLBACK), 40001=proxy(primary), 40002=proxy(fallback)
-# ulimit nofile: 41001/41002 use 2048 soft / 65536 hard (70 dep)
+# Port assignments: 41001=LiteLLM, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough)
+# ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep)
 
 services:
   cc_postgres:
@@ -17,7 +17,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51,litellm_glm51_fallback
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51
       TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
@@ -50,9 +50,7 @@ services:
         max-file: '5'
         tag: container/{{.Name}}
 
-  # ─── R24: Unified ModelScope container (70 deployments, glm5.2 only) ───
-  # Formerly hosted both glm5.2 + dsv4p (140 dep). R24 removes dsv4p entirely.
-  # 7 key groups × 10 variants = 70 dep. Proxy specifies exact variant+key combo.
+  # ─── R29: Unified LiteLLM container (140 dep = 70 glm5.2 + 70 dsv4p) ───
   ms_uni41001:
     image: litellm/litellm:v1.87.0
     container_name: ms_uni41001
@@ -87,11 +85,11 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
-          cpus: "1.0"
+          memory: 1536M
+          cpus: "1.5"
         reservations:
-          memory: 512M
-          cpus: "0.25"
+          memory: 768M
+          cpus: "0.5"
     healthcheck:
       test:
         - CMD-SHELL
@@ -99,7 +97,7 @@ services:
       interval: 60s
       timeout: 30s
       retries: 3
-      start_period: 60s
+      start_period: 120s
     logging: *id001
     command:
       - --config
@@ -107,64 +105,7 @@ services:
       - --port
       - "4000"
 
-  # ─── R26: Fallback LiteLLM container (identical to ms_uni41001, but on port 41002) ───
-  # When ms_uni41001 is unavailable (restart/crash), proxy auto-switches to ms_uni41002.
-  # Same 70 dep, same MS_KEY1~7, same config.yaml — shared infrastructure fallback.
-  # Independent PostgreSQL DB (litellm_glm51_fallback) to avoid lock contention.
-  ms_uni41002:
-    image: litellm/litellm:v1.87.0
-    container_name: ms_uni41002
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 2048
-        hard: 65536
-    environment:
-      LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51_fallback
-      MS_BASEURL: https://api-inference.modelscope.cn/v1
-      MS_KEY1: ms-bb4e5bee-ca0e-49be-8de3-2347a57752f5
-      MS_KEY2: ms-b836c297-9cb3-45f7-86b3-a33e1b76f48f
-      MS_KEY3: ms-202e8dc3-b2f0-4aa3-9b56-0fa6798ac5b9
-      MS_KEY4: ms-ed773f9d-9ca1-4fd9-87e4-b6acd0e545ae
-      MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
-      MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
-      MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
-      TZ: Asia/Shanghai
-    volumes:
-      - ./litellm-glm51/config.yaml:/app/config.yaml:ro
-      - /etc/localtime:/etc/localtime:ro
-      - ./logs/litellm-glm51-fallback:/app/logs
-    ports:
-      - 41002:4000
-    networks:
-      - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 1024M
-          cpus: "1.0"
-        reservations:
-          memory: 512M
-          cpus: "0.25"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 60s
-    logging: *id001
-    command:
-      - --config
-      - /app/config.yaml
-      - --port
-      - "4000"
-
+  # ─── 40001: CC proxy (Anthropic format → glm5.2 v×k) ───
   auth_to_api_40001:
     build:
       context: ./proxy
@@ -172,12 +113,11 @@ services:
     container_name: auth_to_api_40001
     restart: unless-stopped
     environment:
-      # R24: Only glm5.2 routes to ms_uni41001 (dsv4p removed)
+      PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      # R26: LiteLLM fallback — when 41001 container unavailable (ConnectionRefused), proxy auto-switches to 41002
-      LITELLM_FALLBACK_URL_GLM51: http://ms_uni41002:4000/v1/chat/completions
-      LITELLM_FALLBACK_MODELS_URL_GLM51: http://ms_uni41002:4000/v1/models
+      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
@@ -186,8 +126,10 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
+      NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -199,7 +141,6 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-      - ms_uni41002
     deploy:
       resources:
         limits:
@@ -218,9 +159,7 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── R25: Fallback proxy (identical to 40001, but on port 40002) ───
-  # When 40001 is being restarted/rebuilt, agents fallback to 40002.
-  # R26: 40002 proxy also has LiteLLM fallback (41001→41002) just like 40001.
+  # ─── 40002: Codex proxy (Responses API → glm5.2 v×k) ───
   auth_to_api_40002:
     build:
       context: ./proxy
@@ -228,11 +167,11 @@ services:
     container_name: auth_to_api_40002
     restart: unless-stopped
     environment:
+      PROXY_ROLE: codex
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      # R26: LiteLLM fallback — when 41001 container unavailable, proxy auto-switches to 41002
-      LITELLM_FALLBACK_URL_GLM51: http://ms_uni41002:4000/v1/chat/completions
-      LITELLM_FALLBACK_MODELS_URL_GLM51: http://ms_uni41002:4000/v1/models
+      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
@@ -241,8 +180,10 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
+      NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -254,7 +195,6 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-      - ms_uni41002
     deploy:
       resources:
         limits:
@@ -267,6 +207,61 @@ services:
       test:
         - CMD-SHELL
         - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40002/health')" || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *id001
+
+  # ─── 40003: Passthrough proxy (OpenAI → dsv4p v×k) ───
+  # Handles Hermes/OpenClaw/OpenCode (_hm/_ol/_oc) — nearly-transparent passthrough
+  auth_to_api_40003:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    container_name: auth_to_api_40003
+    restart: unless-stopped
+    environment:
+      PROXY_ROLE: passthrough
+      LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
+      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
+      LITELLM_KEY: sk-litellm-local
+      LISTEN_PORT: "40003"
+      PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
+      MAX_TOOL_DESC: "2000"
+      MAX_SCHEMA_DESC: "600"
+      CHARS_PER_TOKEN_ESTIMATE: "3.0"
+      MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
+      NUM_KEYS: "7"
+      NUM_VARIANTS_GLM51: "10"
+      NUM_VARIANTS_DSV4P: "10"
+      LOG_DIR: /app/logs
+      TZ: Asia/Shanghai
+    volumes:
+      - ./logs/proxy40003:/app/logs
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - 40003:40003
+    networks:
+      - cc-net
+    depends_on:
+      - ms_uni41001
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 256M
+          cpus: "0.1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40003/health')" || exit 1
       interval: 30s
       timeout: 5s
       retries: 3

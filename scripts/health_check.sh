@@ -1,10 +1,13 @@
 #!/bin/bash
 # health_check.sh — Check health of all components, return structured result
+# R29: 5 containers (cc_postgres, ms_uni41001, auth_to_api_40001/40002/40003)
 set -e
 
 CLAUDE_ALIVE="no"
-PROXY_HEALTHY="no"
-LITELLM_UNIFIED_HEALTHY="no"
+PROXY_40001_HEALTHY="no"
+PROXY_40002_HEALTHY="no"
+PROXY_40003_HEALTHY="no"
+LITELLM_HEALTHY="no"
 CONTAINERS_HEALTHY=0
 
 # Check Claude Code process
@@ -15,28 +18,41 @@ if pgrep -f 'node.*claude' > /dev/null 2>&1; then
   CLAUDE_ALIVE="yes"
 fi
 
-# Check proxy health
+# Check proxy health — 3 proxy containers
 if curl -sf http://127.0.0.1:40001/health > /dev/null 2>&1; then
-  PROXY_HEALTHY="yes"
+  PROXY_40001_HEALTHY="yes"
+fi
+if curl -sf http://127.0.0.1:40002/health > /dev/null 2>&1; then
+  PROXY_40002_HEALTHY="yes"
+fi
+if curl -sf http://127.0.0.1:40003/health > /dev/null 2>&1; then
+  PROXY_40003_HEALTHY="yes"
 fi
 
-# Check LiteLLM unified health — MUST use /health/liveliness, NOT /health!
-# /health triggers on-demand health check → choices=null → ALL deployments marked unhealthy → freeze
+# Check LiteLLM health — MUST use /health/liveliness, NOT /health!
 if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/health/liveliness > /dev/null 2>&1; then
-  LITELLM_UNIFIED_HEALTHY="yes"
+  LITELLM_HEALTHY="yes"
 fi
 
-# Check Docker containers (4 containers: cc_postgres, ms_uni41001, auth_to_api_40001, auth_to_api_40002)
+# Check Docker containers (5 containers: cc_postgres, ms_uni41001, auth_to_api_40001/40002/40003)
 CONTAINERS_HEALTHY=$(docker ps --filter 'health=healthy' --format '{{.Names}}' | grep -c 'cc_\|ms_\|auth_to' 2>/dev/null || echo "0")
 
+# Show proxy roles
+echo "PROXY_40001_ROLE=$(curl -sf http://127.0.0.1:40001/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
+echo "PROXY_40002_ROLE=$(curl -sf http://127.0.0.1:40002/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
+echo "PROXY_40003_ROLE=$(curl -sf http://127.0.0.1:40003/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
+
 echo "CLAUDE_ALIVE=$CLAUDE_ALIVE"
-echo "PROXY_HEALTHY=$PROXY_HEALTHY"
-echo "LITELLM_UNIFIED_HEALTHY=$LITELLM_UNIFIED_HEALTHY"
-echo "CONTAINERS_HEALTHY=$CONTAINERS_HEALTHY/4"
+echo "PROXY_40001_HEALTHY=$PROXY_40001_HEALTHY"
+echo "PROXY_40002_HEALTHY=$PROXY_40002_HEALTHY"
+echo "PROXY_40003_HEALTHY=$PROXY_40003_HEALTHY"
+echo "LITELLM_HEALTHY=$LITELLM_HEALTHY"
+echo "CONTAINERS_HEALTHY=$CONTAINERS_HEALTHY/5"
 
 ALL_OK="yes"
 if [ "$CLAUDE_ALIVE" = "no" ]; then ALL_OK="no"; fi
-if [ "$PROXY_HEALTHY" = "no" ]; then ALL_OK="no"; fi
-if [ "$LITELLM_UNIFIED_HEALTHY" = "no" ]; then ALL_OK="no"; fi
+if [ "$PROXY_40001_HEALTHY" = "no" ]; then ALL_OK="no"; fi
+if [ "$PROXY_40003_HEALTHY" = "no" ]; then ALL_OK="no"; fi
+if [ "$LITELLM_HEALTHY" = "no" ]; then ALL_OK="no"; fi
 
 echo "ALL_OK=$ALL_OK"
