@@ -164,6 +164,9 @@ services:
 
   # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.2 v×k, shares 41001) ───
   # R31: 40005 = default CC endpoint (opus), 40001 = manual fallback (sonnet).
+  # R31.5: builds from ./proxy/cc-proxy (physically isolated cc-role code).
+  #   The shared ./proxy gateway (codex/passthrough/codex logic) is no longer
+  #   in 40005's image — a cc-proxy change cannot affect 40002/40003, and vice versa.
   # Both share 41001 LiteLLM + same glm5.2 variants + same MS_KEY → quota is shared
   # per model-id+key, NOT per proxy port. So:
   #   - 40005 PROXY crash / bad params / counter corruption → switch to 40001 (works, different container)
@@ -174,7 +177,7 @@ services:
   # health_check.sh reports 40005 status but does NOT put it in ALL_OK (manual failover only).
   auth_to_api_40005:
     build:
-      context: ./proxy
+      context: ./proxy/cc-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40005
     restart: unless-stopped
