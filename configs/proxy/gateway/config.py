@@ -11,6 +11,8 @@ R29: Added PROXY_ROLE, dsv4p backend routing, removed LiteLLM fallback.
 Proxy precisely specifies variant+key combo → LiteLLM just forwards.
 """
 import os
+import sys
+import json
 import threading
 
 # ─── Network ──────────────────────────────────────────────────────────────
@@ -259,10 +261,45 @@ VARIANT_IDS = {"glm5.2": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
 _vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.2": 0, "dsv4p": 0}
 _vk_rr_lock = threading.Lock()
 
+# R30: Persist counter to disk so container restarts do NOT reset to v1k1.
+# Without this, every --force-recreate (e.g. monitor.sh) dumps all fresh
+# traffic onto v1~v3, blowing their RPM quota and causing the 429 storm.
+_RR_COUNTER_FILE = os.path.join(LOG_DIR, "rr_counter.json")
+_RR_COUNTER_SAVE_EVERY = 10  # flush to disk every N increments (cheap; crash loses ≤9 steps, acceptable vs full reset)
+
+def _load_rr_counter() -> None:
+    """Restore counters from disk at startup. Best-effort; on any error, start at 0."""
+    try:
+        with open(_RR_COUNTER_FILE, "r") as f:
+            saved = json.load(f)
+        if isinstance(saved, dict):
+            for k, v in saved.items():
+                if isinstance(k, str) and isinstance(v, int) and v >= 0:
+                    _vk_rr_counter[k] = v
+            print(f"[RR-COUNTER] restored from {_RR_COUNTER_FILE}: {_vk_rr_counter}", file=sys.stderr, flush=True)
+    except FileNotFoundError:
+        pass  # first boot — fine
+    except Exception as e:
+        print(f"[RR-COUNTER] WARN could not load {_RR_COUNTER_FILE}: {e}; starting fresh", file=sys.stderr, flush=True)
+
+def _save_rr_counter() -> None:
+    """Persist counters to disk. Best-effort; failures only logged to stderr."""
+    try:
+        tmp = _RR_COUNTER_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_vk_rr_counter, f)
+        os.replace(tmp, _RR_COUNTER_FILE)
+    except Exception as e:
+        print(f"[RR-COUNTER] WARN could not save {_RR_COUNTER_FILE}: {e}", file=sys.stderr, flush=True)
+
+# Restore immediately on module import (before any request is served)
+_load_rr_counter()
+
 def _next_variant_key_pair(model: str) -> tuple:
     """Get next (variant_idx, key_idx) for 2D round-robin.
     Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
     Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+    R30: counter is persisted to disk so restarts don't reset it.
     """
     num_variants = NUM_VARIANTS.get(model, 10)
     with _vk_rr_lock:
@@ -270,7 +307,16 @@ def _next_variant_key_pair(model: str) -> tuple:
         variant_idx = (counter // NUM_KEYS) % num_variants
         key_idx = counter % NUM_KEYS
         _vk_rr_counter[model] = counter + 1
+        new_total = counter + 1
+        # Flush periodically (every Nth increment) to amortize disk I/O
+        if new_total % _RR_COUNTER_SAVE_EVERY == 0:
+            _save_rr_counter()
         return (variant_idx, key_idx)
+
+# R30: Also flush on interpreter exit / container SIGTERM so the very latest
+# counter survives even a clean restart between save intervals.
+import atexit
+atexit.register(_save_rr_counter)
 
 def _is_routing_name(name: str) -> bool:
     """Check if a model name is an internal variant×key routing name.

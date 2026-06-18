@@ -213,3 +213,43 @@ Backward compat: `glm5.2`=glm5.2_cc, `claude-opus-4-8`=glm5.2_cc, `glm5.2_ol`=ds
 
 ### 关键教训
 - **Docker COPY + __pycache__ 残留陷阱**：`docker compose build` 即使加 `--no-cache`，如果 host `proxy/gateway/__pycache__` 残留旧 .pyc，`COPY gateway/` 会把旧 .pyc 一起打进镜像。Python 优先加载 .pyc → 镜像里代码看起来是新的，实际跑的是旧的（grep glm5.2=59 但运行仍报 glm5.1）。**修复：build 前必须 `rm -rf proxy/gateway/__pycache__`**。
+
+## R30.1 (2026-06-18): glm5.2 v×k counter 均衡性修复 — counter 持久化 + monitor.sh 误重启修复
+
+### 问题现象
+日志分析发现 glm5.2 v1k1~v10k7 分布**极度不均衡**：
+- v1=47次 vs v7/v8=7次（差 6.7 倍）
+- 理论上 70 个 deployment 应最多只差 1 个请求
+- 新版本 429 暴增，连环 cycling（v1k1~v1k7 全 429 + fallback 也 429）
+
+### 根因（三个 bug 串联）
+1. **Bug #1（主因）：counter 不持久化**
+   - `gateway/config.py` 的 `_vk_rr_counter` 是纯内存 dict，容器每次重启归零
+   - counter 逻辑本身正确（锁保护 + 单调递增 + `N→(N//7)%10, N%7`），只是没持久化
+   - 重启后流量全部砸向 v1~v3，打爆 RPM quota → 429 storm
+
+2. **Bug #2（放大器）：monitor.sh 每30分钟误判重建 40001**
+   - `monitor.sh:215-217` grep `PROXY_HEALTHY=yes` / `LITELLM_GLM51_HEALTHY=yes` / `LITELLM_DSV4P_HEALTHY=yes`
+   - 但 `health_check.sh` 实际输出 `PROXY_40001_HEALTHY=yes` / `LITELLM_HEALTHY=yes`
+   - 三个 grep 永远匹配失败 → 每30分钟（cron `*/30 * * * *`）判定 unhealthy → `--force-recreate auth_to_api_40001`（只重建40001）
+   - 证据：proxy.log 每整 :00/:30 有 `[START] Proxy listening`，共20次/天；docker RestartCount=0（不是docker restart，是 force-recreate）
+
+3. **Bug #3：monitor.sh 调用不存在的容器名**
+   - `docker restart glm5.1_uni41001` / `dsv4p_uni42001` 不存在（实际是 `ms_uni41001`）
+   - `|| true` 静默吞错，说明 monitor.sh 是 R25 之前的陈旧版本
+
+### 修复
+- **config.py**：counter 持久化到 `$LOG_DIR/rr_counter.json`
+  - import 时 `_load_rr_counter()` 恢复；每10次递增 `_save_rr_counter()` 落盘；`atexit.register` 注册退出保存
+  - 用 `print(stderr)` 而非 `_log`，避免与 logger.py 的循环 import
+- **monitor.sh**：修正 grep 字符串匹配真实输出；LiteLLM 重启目标改 `ms_uni41001`
+
+### 验证
+- counter 文件 `{"glm5.2": 10}`，重启后 startup 日志 `[RR-COUNTER] restored: {'glm5.2': 10}` ✅
+- 重启后落点在 v2k5(N=11) 而非 v1k1 ✅
+- monitor.sh 模拟判断：PROXY_OK=y GLM_OK=y DSV_OK=y → 不再误重建 ✅
+- 角色隔离 404 正常；cycling（v3k2→v3k3→...）正常 ✅
+
+### 注意
+- `atexit` 在 `docker stop`(SIGTERM) 时不触发，仅靠每10次落盘；非整数边界重启最多丢9步（可接受，远好于全重置）
+- 部署后短期 429/502 是 burst quota 被 storm 耗尽的临时状态，~15分钟自动恢复
