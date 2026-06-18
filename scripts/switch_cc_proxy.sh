@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # switch_cc_proxy.sh — 把 CC (经由 cloudcli webui) 切换到指定 proxy 端口。
 #
-# 背景 (R31.6):
-#   浏览器里的 CC 会话由 cloudcli-webui 托管,webui 进程是所有 claude 子进程
-#   的父进程。claude 继承 webui 的 ANTHROPIC_BASE_URL env (在 systemd unit 的
-#   Environment= 行里), 而非读 settings.json/.bashrc。所以"切换 CC 走哪个 proxy"
-#   = 改 webui unit 的 env + 重启 webui + 杀掉所有残留 claude 子进程。
+# 进程链真相 (R31.6 修正, 2026-06-18):
+#   浏览器里的 CC 会话由 system-level `cloudcli.service` 托管, 它 ExecStart
+#   /usr/bin/node cc_webui/dist-server/server/index.js 并 EnvironmentFile=.../cc_webui/.env。
+#   webui 进程 fork 出 claude 子进程, claude-sdk.js:133 `sdkOptions.env={...process.env}`
+#   把 webui 的 env (含 .env 里的 ANTHROPIC_BASE_URL) 原样透传给 claude。
+#   所以 claude 的 ANTHROPIC_BASE_URL 唯一来源 = cc_webui/.env。
+#   (注: 还有另一个 user-level cloudcli-webui.service 是没在用的影子, 别改它。)
 #
-#   关键: 这个脚本杀掉 webui = 杀掉当前 CC 会话 = 杀掉我自己。所以脚本主体
-#   只负责"改 env + 停 systemd 侧", 然后派发一个完全脱离会话的 watchdog
-#   (setsid + & + /tmp 日志) 去完成 杀进程→重启→验证。watchdog 不依赖任何终端
-#   或 CC 会话存活。
+#   切换 = 改 .env 的 ANTHROPIC_BASE_URL → sudo systemctl restart cloudcli.service
+#   → 杀旧webui+claude → 新webui读新.env → 新claude走新proxy。
+#
+#   关键: 重启 cloudcli.service = 杀掉 webui = 杀掉当前 CC 会话 = 杀掉我自己。
+#   所以脚本主体只负责"改.env", 然后派发一个完全脱离会话的 watchdog (setsid + /tmp日志)
+#   去执行 restart + 验证。watchdog 不依赖任何终端或 CC 会话存活。
 #
 # 用法:
 #   switch_cc_proxy.sh            # 默认切到 40005 (opus, R31.2 起 default)
@@ -18,7 +22,7 @@
 #   switch_cc_proxy.sh 40001      # 切回 40001 (sonnet fallback)
 #
 # 不自动回退 (用户选择手动处理)。watchdog 把结果写到 /tmp/switch_cc_watchdog.log。
-# 失败时人工 SSH 进机器: systemctl --user start cloudcli-webui.service
+# 失败时人工 SSH 进机器: sudo systemctl restart cloudcli.service
 
 set -euo pipefail
 
@@ -29,107 +33,98 @@ case "$TARGET_PORT" in
   *) echo "ERROR: TARGET_PORT 必须是 40001 或 40005, got '$TARGET_PORT'" >&2; exit 1 ;;
 esac
 
-UNIT="$HOME/.config/systemd/user/cloudcli-webui.service"
+ENV_FILE="/home/opc2_uname/cc_ps/cc_webui/.env"
 NEW_BASE_URL="http://127.0.0.1:${TARGET_PORT}"
 WATCHDOG_LOG="/tmp/switch_cc_watchdog.log"
 
-if [ ! -f "$UNIT" ]; then
-  echo "ERROR: unit 不存在: $UNIT" >&2; exit 1
+if [ ! -f "$ENV_FILE" ]; then
+  echo "ERROR: .env 不存在: $ENV_FILE" >&2; exit 1
+fi
+
+# 预检: 目标 proxy 必须健康, 否则切过去 CC 无法工作
+if ! curl -sf --max-time 5 "http://127.0.0.1:${TARGET_PORT}/health" >/dev/null 2>&1; then
+  echo "ERROR: 目标 proxy $TARGET_PORT /health 不通, 中止切换" >&2; exit 1
 fi
 
 echo "=== 切换 CC proxy → $TARGET_PORT ==="
 
-# 1. 先停 systemd 侧 (停止当前 EADDRINUSE crash-loop)
-echo "[1/4] 停止 cloudcli-webui.service (systemd 侧)"
-systemctl --user stop cloudcli-webui.service 2>/dev/null || true
-systemctl --user reset-failed cloudcli-webui.service 2>/dev/null || true
-
-# 2. 备份 unit + 改 ANTHROPIC_BASE_URL 行
-cp "$UNIT" "${UNIT}.bak.$(date +%s)"
-echo "[2/4] 备份 unit → ${UNIT}.bak.*"
-# 用 python3 改 ini-like 行 (Environment=ANTHROPIC_BASE_URL=...), 精确替换该 key
-python3 - "$UNIT" "$NEW_BASE_URL" <<'PY'
+# 1. 备份 .env + 改 ANTHROPIC_BASE_URL 行 (system-level cloudcli.service 的 EnvironmentFile)
+cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%s)"
+python3 - "$ENV_FILE" "$NEW_BASE_URL" <<'PY'
 import re, sys
 path, new = sys.argv[1], sys.argv[2]
 with open(path) as f:
     lines = f.readlines()
-pat = re.compile(r'^(Environment=ANTHROPIC_BASE_URL=).*$')
+pat = re.compile(r'^(ANTHROPIC_BASE_URL=).*$')
 hit = False
 for i, ln in enumerate(lines):
-    if pat.match(ln):
+    if pat.match(ln.strip()):
         lines[i] = pat.sub(lambda m: m.group(1) + new + '\n', ln)
         hit = True
         break
 if not hit:
-    sys.exit("ERROR: unit 内未找到 Environment=ANTHROPIC_BASE_URL= 行")
+    sys.exit("ERROR: .env 内未找到 ANTHROPIC_BASE_URL= 行")
 with open(path, 'w') as f:
     f.writelines(lines)
-print(f"    unit env 改为 ANTHROPIC_BASE_URL={new}")
+print(f"[1/3] .env 已改: ANTHROPIC_BASE_URL={new}")
 PY
 
-systemctl --user daemon-reload
-echo "[3/4] daemon-reload 完成"
+# 2. sudo 非交互预检
+if ! sudo -n true 2>/dev/null; then
+  echo "ERROR: sudo 需要密码, 无法非交互 restart cloudcli.service。请配置 passwordless sudo。" >&2; exit 1
+fi
 
-# 3. 派发脱离会话的 watchdog (setsid + nohup-style, 日志到 /tmp)
-#    watchdog 负责: 杀全部 claude + 孤儿 webui → 等 3001 释放 → systemd 拉新 webui → 验证
-echo "[4/4] 派发 watchdog → $WATCHDOG_LOG (脚本将随后退出, CC 会话会被杀)"
-setsid bash -c '
-  WATCHDOG_LOG="'"$WATCHDOG_LOG"'"
-  TARGET_PORT="'"$TARGET_PORT"'"
-  log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$WATCHDOG_LOG"; }
-  exec >>"$WATCHDOG_LOG" 2>&1
-  echo "=========================================="
-  log "watchdog 启动, 目标 proxy=$TARGET_PORT"
+# 3. 派发 watchdog 执行 restart + 验证。
+#    关键教训: watchdog 不能在 cloudcli.service 的 cgroup 内, 否则 restart cloudcli.service
+#    会把它和 webui/claude 一起杀 (它即使 setsid 脱离了终端会话, 仍在同一 cgroup)。
+#    解法: 用 systemd-run --scope 派到独立 transient unit (switch-cc-watchdog.scope),
+#    完全脱离 cloudcli.service 的 cgroup, restart 杀不到它, 才能活到 restart 之后做验证。
+echo "[2/3] 派发 watchdog (systemd-run 独立 scope) → $WATCHDOG_LOG (脚本将随后退出, CC 会话会被杀)"
 
-  log "等待主脚本退出 (2s)..."
-  sleep 2
+sudo systemd-run --service-type=oneshot --unit=switch-cc-watchdog \
+  --working-directory=/tmp \
+  bash -c '
+    WATCHDOG_LOG="'"$WATCHDOG_LOG"'"
+    TARGET_PORT="'"$TARGET_PORT"'"
+    exec >>"$WATCHDOG_LOG" 2>&1
+    echo "=========================================="
+    echo "[$(date +%H:%M:%S)] watchdog 启动 (independent scope), 目标 proxy=$TARGET_PORT"
 
-  log "深度检索并杀掉所有 claude 子进程..."
-  pkill -9 -f "/home/.*\.npm-global/bin/claude" 2>/dev/null && log "  claude 子进程已杀" || log "  无 claude 子进程残留"
+    # 改 .env 已由主脚本完成, 这里只需 restart service
+    echo "[$(date +%H:%M:%S)] 等主脚本退出 (2s)..."
+    sleep 2
 
-  log "杀掉孤儿 webui (占 3001 的旧进程)..."
-  pkill -9 -f "cc_webui/dist-server/server/index.js" 2>/dev/null && log "  webui 已杀" || log "  无 webui 残留"
+    echo "[$(date +%H:%M:%S)] restart cloudcli.service (杀旧webui+claude, 拉新webui读新.env)..."
+    systemctl restart cloudcli.service
 
-  log "等待 3001 端口释放 (3s)..."
-  sleep 3
+    echo "[$(date +%H:%M:%S)] 等待新 webui 起来 (10s)..."
+    sleep 10
 
-  log "启动 cloudcli-webui.service (systemd 拉起, 读新 env)..."
-  systemctl --user reset-failed cloudcli-webui.service 2>/dev/null || true
-  systemctl --user start cloudcli-webui.service
+    NEWPID=$(systemctl show -p MainPID --value cloudcli.service 2>/dev/null)
+    echo "[$(date +%H:%M:%S)] 新 webui MainPID=$NEWPID"
 
-  log "等待 webui + DB schema 起来 (10s)..."
-  sleep 10
-
-  log "验证 webui (3001)..."
-  if curl -sf --max-time 5 http://127.0.0.1:3001/ >/dev/null 2>&1; then
-    log "  WEBUI OK"
-  else
-    log "  WEBUI FAIL — 检查 journalctl --user -u cloudcli-webui.service"
-  fi
-
-  log "验证目标 proxy $TARGET_PORT /health..."
-  if curl -sf --max-time 5 "http://127.0.0.1:${TARGET_PORT}/health" >/dev/null 2>&1; then
-    log "  PROXY $TARGET_PORT OK"
-  else
-    log "  PROXY $TARGET_PORT FAIL"
-  fi
-
-  log "验证新 webui 实际 env (确认注入 40005)..."
-  NEWPID=$(systemctl --user show -p MainPID --value cloudcli-webui.service 2>/dev/null)
-  if [ -n "$NEWPID" ] && [ "$NEWPID" != "0" ]; then
+    # 验证 webui env (确认注入了目标端口)
     ENV_URL=$(tr "\0" "\n" < /proc/$NEWPID/environ 2>/dev/null | grep "^ANTHROPIC_BASE_URL=" || echo "(读取失败)")
-    log "  webui PID=$NEWPID $ENV_URL"
-  else
-    log "  webui MainPID 未获取 (可能仍在启动)"
-  fi
+    echo "[$(date +%H:%M:%S)] 新 webui env: $ENV_URL"
 
-  log "watchdog 完成。浏览器刷新/重开会话即可, 新 CC 走 $TARGET_PORT。"
-  echo "=========================================="
-' </dev/null >/dev/null 2>&1 &
+    # 验证 webui 端口
+    if curl -sf --max-time 5 http://127.0.0.1:3001/ >/dev/null 2>&1; then
+      echo "[$(date +%H:%M:%S)] WEBUI OK"
+    else
+      echo "[$(date +%H:%M:%S)] WEBUI FAIL — journalctl -u cloudcli.service 查原因"
+    fi
 
-echo ""
-echo "watchdog 已派发 (PID $!)。脚本 1 秒后退出。"
+    case "$ENV_URL" in
+      *":$TARGET_PORT"*) echo "[$(date +%H:%M:%S)] ✓ 切换成功, 新 webui 走 $TARGET_PORT" ;;
+      *) echo "[$(date +%H:%M:%S)] ✗ 切换未生效 (env 不含 $TARGET_PORT)" ;;
+    esac
+
+    echo "[$(date +%H:%M:%S)] watchdog 完成。刷新浏览器重开会话, 新 CC 走 $TARGET_PORT。"
+    echo "=========================================="
+'
+
+echo "[3/3] watchdog 已派发 (systemd-run unit: switch-cc-watchdog)。脚本 1 秒后退出。"
 echo "→ CC 会话将断开, 几秒后新 webui 起来, 刷新浏览器重开会话。"
-echo "→ 进度看: tail -f $WATCHDOG_LOG"
+echo "→ 进度: tail -f $WATCHDOG_LOG"
 sleep 1
 exit 0
