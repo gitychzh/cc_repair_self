@@ -34,6 +34,7 @@ from .config import (
     _next_variant_key_pair,
 )
 from .logger import _log, _log_metrics, _log_error_detail
+from .error_mapping import is_quota_exhaustion
 
 
 class UpstreamResult:
@@ -62,6 +63,7 @@ class UpstreamResult:
         # Error fields (only if not success)
         self.all_keys_exhausted = False
         self.all_429 = False
+        self.all_non_quota_429 = False
         self.has_500 = False
         self.has_502 = False
         self.has_timeout = False
@@ -160,11 +162,16 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                 should_cycle_to_next_key = resp.status in (429, 500, 502)
 
                 if should_cycle_to_next_key:
-                    cycle_reason = {
-                        429: "429_rate_limit",
-                        500: "500_internal_server_error",
-                        502: "502_bad_gateway",
-                    }.get(resp.status, "unknown")
+                    if resp.status == 429:
+                        if is_quota_exhaustion(error_json):
+                            cycle_reason = "429_quota_exhausted"
+                        else:
+                            cycle_reason = "429_rate_limit"
+                    else:
+                        cycle_reason = {
+                            500: "500_internal_server_error",
+                            502: "502_bad_gateway",
+                        }.get(resp.status, "unknown")
                     key_cycle_attempts.append({
                         "variant_idx": start_variant_idx,
                         "key_idx": current_key_idx,
@@ -414,7 +421,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     # ─── All keys exhausted in start variant ───
     # Every key in this variant failed. Classify the failure type.
 
-    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit") for a in key_cycle_attempts)
+    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted") for a in key_cycle_attempts)
     has_500 = any(a.get("error_type") == "500_internal_server_error" for a in key_cycle_attempts)
     has_502 = any(a.get("error_type") == "502_bad_gateway" for a in key_cycle_attempts)
     has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
@@ -428,10 +435,18 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
     if all_429 and not has_500 and not has_502 and not has_timeout and not has_conn_err:
         num_variants = NUM_VARIANTS.get(mapped_model, 10)
+        # If ALL 429s are non-quota (RPM/false-positive), brief delay before sweeping all variants
+        all_non_quota_v429 = all(
+            a.get("error_type") in (None, "429", "429_rate_limit")
+            for a in key_cycle_attempts
+        )
+        if all_non_quota_v429:
+            _log("VARIANT-FALLBACK-DELAY", f"All {NUM_KEYS} non-quota 429s — 2s delay before sweeping ALL variants")
+            time.sleep(2)
         _log("VARIANT-FALLBACK-START", f"All {NUM_KEYS} keys 429 for v{start_variant_idx+1}, "
-                                       f"trying up to 2 fallback variants for {mapped_model}")
+                                       f"trying ALL fallback variants for {mapped_model}")
 
-        for fallback_v_offset in range(1, min(3, num_variants)):
+        for fallback_v_offset in range(1, num_variants):
             fallback_v_idx = (start_variant_idx + fallback_v_offset) % num_variants
             fallback_k_idx = start_key_idx  # Use same starting key position
             litellm_model_fb = f"{litellm_model_base}v{fallback_v_idx+1}k{fallback_k_idx+1}"
@@ -484,12 +499,16 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
                     # Only 429 errors should try next fallback variant
                     if resp_fb.status == 429:
+                        if is_quota_exhaustion(error_json_fb):
+                            fb_error_type = "429_quota_exhausted_variant_fallback"
+                        else:
+                            fb_error_type = "429_rate_limit_variant_fallback"
                         variant_fallback_attempts.append({
                             "variant_idx": fallback_v_idx,
                             "key_idx": fallback_k_idx,
                             "litellm_model": litellm_model_fb,
                             "error_body": err_str_fb[:500],
-                            "error_type": "429_rate_limit_variant_fallback",
+                            "error_type": fb_error_type,
                         })
                         _log_error_detail({
                             "request_id": request_id,
@@ -580,7 +599,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
         # Merge fallback attempts into classification
         all_attempts = key_cycle_attempts + variant_fallback_attempts
-        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback") for a in all_attempts)
+        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted", "429_rate_limit_variant_fallback", "429_quota_exhausted_variant_fallback") for a in all_attempts)
         has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_variant_fallback_non429") for a in all_attempts)
         has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_variant_fallback_non429") for a in all_attempts)
         has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_variant_fallback") for a in all_attempts)
@@ -591,11 +610,22 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
     elapsed_ms = int((time.time() - t_start) * 1000)
 
+    all_non_quota_429 = False
     if all_429:
-        error_subcategory = "429_all_keys_exhausted"
-        _log("ALL-KEYS-429", f"All keys 429 for {mapped_model} (including variant fallbacks). "
-                             f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]} "
-                             f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
+        all_non_quota_429 = all(
+            a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback")
+            for a in all_attempts
+        )
+        if all_non_quota_429:
+            error_subcategory = "429_all_transient"
+            _log("ALL-KEYS-TRANSIENT", f"All 429s non-quota (transient) for {mapped_model}. "
+                                       f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]} "
+                                       f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
+        else:
+            error_subcategory = "429_all_keys_exhausted"
+            _log("ALL-KEYS-429", f"All keys 429 for {mapped_model} (including variant fallbacks). "
+                                 f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]} "
+                                 f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
     elif has_500 or has_502:
         error_subcategory = "all_keys_500_or_502"
         _log("ALL-KEYS-500/502", f"All keys failed for {mapped_model} (includes 500/502). "
@@ -644,6 +674,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     result.success = False
     result.all_keys_exhausted = True
     result.all_429 = all_429
+    result.all_non_quota_429 = all_non_quota_429 if all_429 else False
     result.has_500 = has_500
     result.has_502 = has_502
     result.has_timeout = has_timeout

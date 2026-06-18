@@ -171,13 +171,24 @@ def format_openai_error_all_keys_exhausted(result, mapped_model, request_model):
       - Has connection error → server_error + code "502" (agent retries)
       NEVER use code "529" — same disaster as CC overloaded_error for some agents.
     """
-    if result.all_429:
+    if result.all_429 and not result.all_non_quota_429:
         cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
         return {
             "error": {
                 "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys have exhausted their "
                            f"token quota for model {mapped_model}. Please wait for quota recovery "
                            f"(typically 15 minutes). Keys cycled: {cycled_keys}",
+                "type": "rate_limit_error",
+                "code": "429",
+            }
+        }, 429
+    elif result.all_429 and result.all_non_quota_429:
+        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        return {
+            "error": {
+                "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys returned transient 429 errors "
+                           f"for model {mapped_model}. This is a temporary rate limit — not quota exhaustion. "
+                           f"Please retry in a few seconds. Keys cycled: {cycled_keys}",
                 "type": "rate_limit_error",
                 "code": "429",
             }
@@ -267,7 +278,7 @@ def format_responses_error_all_keys_exhausted(result, mapped_model, request_mode
       - Has 500/502/timeout → server_error + code "502"
       - Has connection error → server_error + code "502"
     """
-    if result.all_429:
+    if result.all_429 and not result.all_non_quota_429:
         cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
         return {
             "error": {
@@ -276,6 +287,17 @@ def format_responses_error_all_keys_exhausted(result, mapped_model, request_mode
                 "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys have exhausted their "
                            f"token quota for model {mapped_model}. Please wait for quota recovery "
                            f"(typically 15 minutes). Keys cycled: {cycled_keys}",
+            }
+        }, 429
+    elif result.all_429 and result.all_non_quota_429:
+        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        return {
+            "error": {
+                "type": "rate_limit_error",
+                "code": "429",
+                "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys returned transient 429 errors "
+                           f"for model {mapped_model}. This is a temporary rate limit — not quota exhaustion. "
+                           f"Please retry in a few seconds. Keys cycled: {cycled_keys}",
             }
         }, 429
     else:

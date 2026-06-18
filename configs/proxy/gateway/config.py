@@ -204,9 +204,31 @@ MODEL_MAP = {
 THINKING_SUPPORT = {"glm5.2": True, "dsv4p": False}
 DEFAULT_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.2")
 
-# ─── Input token safety limits ───────────────────────────────────────────
-# ModelScope GLM-5.2 actual API input token limit is 202745
-# DSv4P context window — using conservative estimate (128K), will verify later
+# ─── Context-window budget system (R31.4) ────────────────────────────────
+# Two layers per model:
+#   MODEL_MAX_INPUT_TOKENS  — the BACKEND HARD CEILING enforced by ModelScope.
+#                              Used for overflow-error detection only (NOT
+#                              advertised to clients — advertising it invites
+#                              them to fill up to the ceiling and hit 400).
+#                              GLM-5.2 nominally supports 1M context upstream,
+#                              but the ModelScope-hosted endpoint caps it at
+#                              202745 (verified via its 400 error:
+#                              "Range of input length should be [1, 202745]").
+#   MODEL_INPUT_TOKEN_SAFETY — the SAFE CAPACITY advertised to clients in
+#                              /v1/models (both OpenAI `context_length` and
+#                              Anthropic `context_window`). Deliberately below
+#                              the hard ceiling to leave headroom for:
+#                                - output + thinking tokens (output/thinking
+#                                  share the model's total window)
+#                                - long-context quality degradation (effective
+#                                  context < nominal; CC should compact before
+#                                  the ceiling, never at it)
+#                              This is the single source of truth for what we
+#                              tell clients; tune via env, keep SAFETY < MAX.
+#                              Pair with CC-side settings:
+#                                contextWindow     = SAFETY
+#                                autoCompactWindow = SAFETY - ~15000
+DEFAULT_CONTEXT_FALLBACK = 131072  # generic fallback when a model isn't listed
 MODEL_MAX_INPUT_TOKENS = {
     "glm5.2": 202745,
     "dsv4p": 128000,

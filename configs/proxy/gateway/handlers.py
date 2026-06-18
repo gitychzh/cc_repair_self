@@ -29,7 +29,7 @@ import socket
 
 from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, MODEL_MAP, DEFAULT_MODEL, DEFAULT_UPSTREAM_MODEL,
-    MODEL_UPSTREAMS, MODEL_MAX_INPUT_TOKENS, MODEL_INPUT_TOKEN_SAFETY,
+    MODEL_UPSTREAMS, MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
     CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS,
     AGENT_SUFFIXES, DEFAULT_AGENT_SUFFIX, detect_agent_type, format_model_id,
     PROXY_ROLE, ROLE_DEFAULT_UPSTREAM,
@@ -258,7 +258,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling ───
             if result.all_keys_exhausted:
-                if result.all_429:
+                if result.all_429 and not result.all_non_quota_429:
                     cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
                     self._send_json(429, {
                         "type": "error",
@@ -270,6 +270,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         },
                         "model": request_model,
                     }, extra_headers={"retry-after": "180"})
+                elif result.all_429 and result.all_non_quota_429:
+                    cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+                    self._send_json(429, {
+                        "type": "error",
+                        "error": {
+                            "type": "rate_limit_error",
+                            "message": f"All {NUM_KEYS} ModelScope API keys returned transient 429 errors for model {mapped_model}. "
+                                       f"This is a temporary rate limit — not quota exhaustion. "
+                                       f"Please retry in a few seconds. Keys cycled: {cycled_keys}"
+                        },
+                        "model": request_model,
+                    }, extra_headers={"retry-after": "5"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
                     timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
@@ -441,7 +453,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 error_payload, client_status = format_openai_error_all_keys_exhausted(result, mapped_model, request_model)
                 extra_hdrs = None
                 if client_status == 429:
-                    extra_hdrs = {"retry-after": "180"}
+                    retry_seconds = 5 if result.all_non_quota_429 else 180
+                    extra_hdrs = {"retry-after": str(retry_seconds)}
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
             else:
@@ -654,7 +667,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 model_id = format_model_id(base_model, suffix)
                 if model_id not in seen_ids:
                     seen_ids.add(model_id)
-                    context_len = MODEL_MAX_INPUT_TOKENS.get(base_model, 131072)
+                    # R31.4: advertise SAFE capacity (not the hard ceiling) so clients
+                    # don't fill up to the ModelScope limit and hit 400. Matches the
+                    # Anthropic /v1/models context_window value for the same model.
+                    context_len = MODEL_INPUT_TOKEN_SAFETY.get(base_model, DEFAULT_CONTEXT_FALLBACK)
                     all_models.append({
                         "id": model_id,
                         "object": "model",
@@ -684,7 +700,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if model_id not in seen_ids:
                         seen_ids.add(model_id)
                         upstream_key = MODEL_MAP.get(model_id, model_id)
-                        context_len = MODEL_MAX_INPUT_TOKENS.get(upstream_key, 131072)
+                        context_len = MODEL_INPUT_TOKEN_SAFETY.get(upstream_key, DEFAULT_CONTEXT_FALLBACK)
                         all_models.append({
                             "id": model_id,
                             "object": "model",
@@ -700,7 +716,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
                 seen_ids.add(model_key)
-                context_len = MODEL_MAX_INPUT_TOKENS.get(model_key, 131072)
+                context_len = MODEL_INPUT_TOKEN_SAFETY.get(model_key, DEFAULT_CONTEXT_FALLBACK)
                 all_models.append({
                     "id": model_key,
                     "object": "model",
@@ -722,7 +738,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             model_id = format_model_id(base_model, "_cc")
             if model_id not in seen_ids:
                 seen_ids.add(model_id)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(base_model, 128000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(base_model, DEFAULT_CONTEXT_FALLBACK)
                 all_models.append({
                     "id": model_id,
                     "type": "model",
@@ -735,7 +751,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for model_id, mapped in MODEL_MAP.items():
             if model_id not in seen_ids:
                 seen_ids.add(model_id)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, DEFAULT_CONTEXT_FALLBACK)
                 display = format_model_id(mapped, "_cc") if not model_id.endswith("_cc") else model_id
                 all_models.append({
                     "id": model_id,
@@ -749,7 +765,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for model_key in MODEL_UPSTREAMS:
             if model_key not in seen_ids:
                 seen_ids.add(model_key)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, 128000)
+                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, DEFAULT_CONTEXT_FALLBACK)
                 all_models.append({
                     "id": model_key,
                     "type": "model",
@@ -763,7 +779,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _anthropic_model_detail(self, model_id):
         """Return Anthropic-format model detail for a specific model ID."""
         mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
-        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, 128000)
+        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, DEFAULT_CONTEXT_FALLBACK)
         self._send_json(200, {
             "id": model_id,
             "type": "model",
