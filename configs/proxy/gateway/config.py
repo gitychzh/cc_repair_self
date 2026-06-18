@@ -261,17 +261,29 @@ VARIANT_IDS = {"glm5.2": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
 _vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.2": 0, "dsv4p": 0}
 _vk_rr_lock = threading.Lock()
 
-# R30: Persist counter to disk so container restarts do NOT reset to v1k1.
+# R30/R31.3: Persist counter to disk so container restarts do NOT reset to v1k1.
 # Without this, every --force-recreate (e.g. monitor.sh) dumps all fresh
 # traffic onto v1~v3, blowing their RPM quota and causing the 429 storm.
+#
+# R31.3 hardening (this is the PRIMARY CC proxy now — must survive power loss):
+#   - Persist EVERY increment immediately (was: every 10th). Atomic os.replace
+#     is ~microseconds, negligible vs a ModelScope call (~1-5s).
+#   - Register SIGTERM/SIGINT handler explicitly. Python atexit does NOT fire
+#     on SIGTERM (i.e. `docker stop`), so the atexit-only approach lost the
+#     tail. Now both fire; the per-increment write makes this belt-and-suspenders.
+#   - _load tolerates empty/corrupt/truncated files cleanly (no WARN spam on
+#     first boot after a log reset).
 _RR_COUNTER_FILE = os.path.join(LOG_DIR, "rr_counter.json")
-_RR_COUNTER_SAVE_EVERY = 10  # flush to disk every N increments (cheap; crash loses ≤9 steps, acceptable vs full reset)
 
 def _load_rr_counter() -> None:
-    """Restore counters from disk at startup. Best-effort; on any error, start at 0."""
+    """Restore counters from disk at startup. Best-effort; on any error (missing,
+    empty, or corrupt file), start fresh at 0 without raising."""
     try:
         with open(_RR_COUNTER_FILE, "r") as f:
-            saved = json.load(f)
+            raw = f.read().strip()
+        if not raw:
+            return  # empty file (e.g. after log reset) — fresh start, silent
+        saved = json.loads(raw)
         if isinstance(saved, dict):
             for k, v in saved.items():
                 if isinstance(k, str) and isinstance(v, int) and v >= 0:
@@ -279,13 +291,20 @@ def _load_rr_counter() -> None:
             print(f"[RR-COUNTER] restored from {_RR_COUNTER_FILE}: {_vk_rr_counter}", file=sys.stderr, flush=True)
     except FileNotFoundError:
         pass  # first boot — fine
+    except (json.JSONDecodeError, ValueError) as e:
+        # Corrupt/truncated file — log once and start fresh, do NOT crash
+        print(f"[RR-COUNTER] file corrupt/empty ({e}); starting fresh at 0", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[RR-COUNTER] WARN could not load {_RR_COUNTER_FILE}: {e}; starting fresh", file=sys.stderr, flush=True)
 
 def _save_rr_counter() -> None:
-    """Persist counters to disk. Best-effort; failures only logged to stderr."""
+    """Persist counters to disk atomically (per-thread tmp file + os.replace).
+    Best-effort; failures only logged to stderr — must NEVER raise, since this
+    runs in the request hot path AND in signal handlers (main thread) concurrently
+    with request threads. The unique tmp suffix avoids two concurrent saves
+    clobbering each other's tmp file."""
     try:
-        tmp = _RR_COUNTER_FILE + ".tmp"
+        tmp = "%s.tmp.%d.%d" % (_RR_COUNTER_FILE, os.getpid(), threading.get_ident())
         with open(tmp, "w") as f:
             json.dump(_vk_rr_counter, f)
         os.replace(tmp, _RR_COUNTER_FILE)
@@ -300,6 +319,7 @@ def _next_variant_key_pair(model: str) -> tuple:
     Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
     Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
     R30: counter is persisted to disk so restarts don't reset it.
+    R31.3: persist EVERY increment (was every 10th) so even power loss loses 0 steps.
     """
     num_variants = NUM_VARIANTS.get(model, 10)
     with _vk_rr_lock:
@@ -307,16 +327,23 @@ def _next_variant_key_pair(model: str) -> tuple:
         variant_idx = (counter // NUM_KEYS) % num_variants
         key_idx = counter % NUM_KEYS
         _vk_rr_counter[model] = counter + 1
-        new_total = counter + 1
-        # Flush periodically (every Nth increment) to amortize disk I/O
-        if new_total % _RR_COUNTER_SAVE_EVERY == 0:
-            _save_rr_counter()
+        _save_rr_counter()  # R31.3: immediate persist — survive power loss / SIGKILL
         return (variant_idx, key_idx)
 
-# R30: Also flush on interpreter exit / container SIGTERM so the very latest
-# counter survives even a clean restart between save intervals.
+# R31.3: flush on exit. atexit covers normal interpreter exit; explicit signal
+# handlers cover SIGTERM/SIGINT (which is how `docker stop` and Ctrl-C kill the
+# process — atexit does NOT fire for these). The handler saves then re-raises
+# via SystemExit so the interpreter runs the rest of teardown cleanly.
 import atexit
+import signal as _signal
+
+def _flush_and_exit(signum, _frame):
+    _save_rr_counter()
+    raise SystemExit(128 + signum)
+
 atexit.register(_save_rr_counter)
+_signal.signal(_signal.SIGTERM, _flush_and_exit)
+_signal.signal(_signal.SIGINT, _flush_and_exit)
 
 def _is_routing_name(name: str) -> bool:
     """Check if a model name is an internal variant×key routing name.
