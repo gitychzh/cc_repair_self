@@ -29,8 +29,8 @@ fi
 if curl -sf http://127.0.0.1:40003/health > /dev/null 2>&1; then
   PROXY_40003_HEALTHY="yes"
 fi
-# R31: 40005 experimental CC proxy — reported for visibility but NOT in ALL_OK
-# (it is an isolation sandbox that may be intentionally down during experiments).
+# R31: 40005 = PRIMARY CC proxy (opus default). Reported for visibility but NOT in ALL_OK
+# (manual failover only; monitor.sh should not auto-recreate it). 40001 is the fallback.
 if curl -sf http://127.0.0.1:40005/health > /dev/null 2>&1; then
   PROXY_40005_HEALTHY="yes"
 fi
