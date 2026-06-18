@@ -7,6 +7,7 @@ CLAUDE_ALIVE="no"
 PROXY_40001_HEALTHY="no"
 PROXY_40002_HEALTHY="no"
 PROXY_40003_HEALTHY="no"
+PROXY_40005_HEALTHY="no"
 LITELLM_HEALTHY="no"
 CONTAINERS_HEALTHY=0
 
@@ -28,6 +29,11 @@ fi
 if curl -sf http://127.0.0.1:40003/health > /dev/null 2>&1; then
   PROXY_40003_HEALTHY="yes"
 fi
+# R31: 40005 experimental CC proxy — reported for visibility but NOT in ALL_OK
+# (it is an isolation sandbox that may be intentionally down during experiments).
+if curl -sf http://127.0.0.1:40005/health > /dev/null 2>&1; then
+  PROXY_40005_HEALTHY="yes"
+fi
 
 # Check LiteLLM health — MUST use /health/liveliness, NOT /health!
 if curl -sf -H "Authorization: Bearer sk-litellm-local" http://127.0.0.1:41001/health/liveliness > /dev/null 2>&1; then
@@ -41,13 +47,15 @@ CONTAINERS_HEALTHY=$(docker ps --filter 'health=healthy' --format '{{.Names}}' |
 echo "PROXY_40001_ROLE=$(curl -sf http://127.0.0.1:40001/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
 echo "PROXY_40002_ROLE=$(curl -sf http://127.0.0.1:40002/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
 echo "PROXY_40003_ROLE=$(curl -sf http://127.0.0.1:40003/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'unknown')"
+echo "PROXY_40005_ROLE=$(curl -sf http://127.0.0.1:40005/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("proxy_role","unknown"))' 2>/dev/null || echo 'down_or_unknown')"
 
 echo "CLAUDE_ALIVE=$CLAUDE_ALIVE"
 echo "PROXY_40001_HEALTHY=$PROXY_40001_HEALTHY"
 echo "PROXY_40002_HEALTHY=$PROXY_40002_HEALTHY"
 echo "PROXY_40003_HEALTHY=$PROXY_40003_HEALTHY"
+echo "PROXY_40005_HEALTHY=$PROXY_40005_HEALTHY"
 echo "LITELLM_HEALTHY=$LITELLM_HEALTHY"
-echo "CONTAINERS_HEALTHY=$CONTAINERS_HEALTHY/5"
+echo "CONTAINERS_HEALTHY=$CONTAINERS_HEALTHY/6"
 
 ALL_OK="yes"
 if [ "$CLAUDE_ALIVE" = "no" ]; then ALL_OK="no"; fi
