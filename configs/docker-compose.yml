@@ -231,9 +231,11 @@ services:
     logging: *id001
 
   # ─── 40002: Codex proxy (Responses API → glm5.2 v×k) ───
+  # R31.6: physically isolated — builds from configs/proxy/codex-proxy/ (own image,
+  # not shared with 40001/40003/40005). A change here cannot affect other roles.
   auth_to_api_40002:
     build:
-      context: ./proxy
+      context: ./proxy/codex-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40002
     restart: unless-stopped
@@ -286,9 +288,10 @@ services:
 
   # ─── 40003: Passthrough proxy (OpenAI → dsv4p v×k) ───
   # Handles Hermes/OpenClaw/OpenCode (_hm/_ol/_oc) — nearly-transparent passthrough
+  # R31.6: physically isolated — builds from configs/proxy/passthrough-proxy/ (own image).
   auth_to_api_40003:
     build:
-      context: ./proxy
+      context: ./proxy/passthrough-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40003
     restart: unless-stopped
