@@ -159,6 +159,69 @@ services:
       start_period: 15s
     logging: *id001
 
+  # ─── R31: 40005 experimental CC proxy (Anthropic format → glm5.2 v×k, shares 41001) ───
+  # Purpose: isolation sandbox for parameter experiments. CC defaults to 40001 (stable baseline,
+  # NEVER modify its params). To experiment: point CC's ANTHROPIC_BASE_URL at 40005, then tune
+  # the EXPERIMENT PARAMS below and `docker compose up -d --build --force-recreate auth_to_api_40005`.
+  # If 40005 crashes/misbehaves → revert CC's BASE_URL to :40001 and restart CC; 40001 untouched.
+  # NOTE: shares 41001 LiteLLM (no 41005) — ModelScope quota is per model-id+key, not per LiteLLM.
+  # NOTE: rr_counter.json isolated in ./logs/proxy40005 (R30.1 persistence, independent from 40001).
+  # NOTE: monitor.sh should NOT auto-recreate 40005 during experiments (would reset experiment counter).
+  auth_to_api_40005:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    container_name: auth_to_api_40005
+    restart: unless-stopped
+    environment:
+      PROXY_ROLE: cc
+      LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
+      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
+      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
+      LITELLM_KEY: sk-litellm-local
+      LISTEN_PORT: "40005"
+      # ── EXPERIMENT PARAMS (tune here only; 40001 stays at stable baseline) ──
+      PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
+      MAX_TOOL_DESC: "2000"
+      MAX_SCHEMA_DESC: "600"
+      CHARS_PER_TOKEN_ESTIMATE: "3.0"
+      MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
+      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
+      NUM_KEYS: "7"
+      NUM_VARIANTS_GLM51: "10"
+      NUM_VARIANTS_DSV4P: "10"
+      # ── end experiment params ──
+      LOG_DIR: /app/logs
+      TZ: Asia/Shanghai
+    volumes:
+      - ./logs/proxy40005:/app/logs
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - 40005:40005
+    networks:
+      - cc-net
+    depends_on:
+      - ms_uni41001
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 256M
+          cpus: "0.1"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40005/health')" || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *id001
+
   # ─── 40002: Codex proxy (Responses API → glm5.2 v×k) ───
   auth_to_api_40002:
     build:
