@@ -8,7 +8,7 @@
 - [REQ] 总请求: 66 | 成功(KEY-CYCLE-SUCCESS): 19 | 成功率 ~29%
 - ABORT-NO-FALLBACK(7key全429): 14 | ALL-KEYS-TRANSIENT: 14 | KEY-CYCLE: 171
 - 502/500/timeout: 0 | variant-fallback: 0 | LiteLLM-fallback: 0
-- rr_counter(glm5.2): 575（自重启处理~97 req）
+- rr_counter(glm5.1): 575（自重启处理~97 req）
 - 14次ABORT集中在 18:16-18:42 burst窗口；burst恢复后(18:40+)仍有零散成功
 
 ## 关键发现（本轮新）

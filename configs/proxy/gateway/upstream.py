@@ -54,7 +54,7 @@ class UpstreamResult:
         # Success fields
         self.resp = None  # http.client.HTTPResponse
         self.conn = None  # http.client.HTTPConnection
-        self.litellm_model = ""  # e.g. "glm5.2v3k5" or "dsv4pv3k5"
+        self.litellm_model = ""  # e.g. "glm5.1v3k5" or "dsv4pv3k5"
         self.variant_idx = 0  # 0-based variant index
         self.key_idx = 0  # 0-based key index
         self.is_stream = False  # whether upstream was asked for streaming
@@ -80,7 +80,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     Args:
         handler: ProxyHandler instance (needed for _make_upstream_conn)
         oai_body: dict — OpenAI-format request body
-        mapped_model: str — backend model name ("glm5.2" or "dsv4p")
+        mapped_model: str — backend model name ("glm5.1" or "dsv4p")
         request_id: str — unique request ID for logging
         metrics: dict — metrics dict to update
         t_start: float — request start timestamp

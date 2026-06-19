@@ -15,7 +15,7 @@ set -u
 set -o pipefail
 
 COMPOSE_FILE="${CC_COMPOSE_FILE:-/opt/cc-infra/docker-compose.yml}"
-MODEL="${MS_QUOTA_MODEL:-ZHIPUAI/GLM-5.2}"
+MODEL="${MS_QUOTA_MODEL:-ZHIPUAI/GLM-5.1}"
 BASE="https://api-inference.modelscope.cn/v1/chat/completions"
 INTERVAL=3   # 请求间隔，避免 RPM burst throttle
 

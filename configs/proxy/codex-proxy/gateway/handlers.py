@@ -13,8 +13,8 @@ R29: PROXY_ROLE determines which endpoints this proxy serves:
   - "passthrough" → /v1/chat/completions only (OpenAI format, _ol/_oc/_hm)
 
 Three proxy containers each serve their own role:
-  40001 (cc):          CC → Anthropic format → glm5.2 v×k cycling
-  40002 (codex):       Codex → Responses API → glm5.2 v×k cycling
+  40001 (cc):          CC → Anthropic format → glm5.1 v×k cycling
+  40002 (codex):       Codex → Responses API → glm5.1 v×k cycling
   40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → dsv4p v×k cycling
 """
 import http.server
@@ -654,8 +654,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Return OpenAI-format model list.
 
         R29: Shows models appropriate for this proxy's role:
-          cc: glm5.2_cc + backward compat aliases
-          codex: glm5.2_cx + backward compat aliases
+          cc: glm5.1_cc + backward compat aliases
+          codex: glm5.1_cx + backward compat aliases
           passthrough: dsv4p_ol/dsv4p_oc/dsv4p_hm + backward compat aliases
         """
         all_models = []

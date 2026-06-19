@@ -1,8 +1,8 @@
 # R29: Three-proxy architecture — 3 proxy containers + 1 LiteLLM + 1 postgres
-# 40001 (cc):          CC → Anthropic format → 41001 glm5.1 v×k
-# 40002 (codex):       Codex → Responses API → 41001 glm5.1 v×k
+# 40001 (cc):          CC → Anthropic format → 41001 glm5.2 v×k
+# 40002 (codex):       Codex → Responses API → 41001 glm5.2 v×k
 # 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 dsv4p v×k
-# 41001: ms_uni41001 LiteLLM (70 glm5.1 + 70 dsv4p = 140 dep)
+# 41001: ms_uni41001 LiteLLM (70 glm5.2 + 70 dsv4p = 140 dep)
 # R29: Removed ms_uni41002 (LiteLLM fallback), removed 40002 fallback proxy
 #
 # Port assignments: 41001=LiteLLM, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough)
@@ -50,7 +50,7 @@ services:
         max-file: '5'
         tag: container/{{.Name}}
 
-  # ─── R29: Unified LiteLLM container (140 dep = 70 glm5.1 + 70 dsv4p) ───
+  # ─── R29: Unified LiteLLM container (140 dep = 70 glm5.2 + 70 dsv4p) ───
   ms_uni41001:
     image: litellm/litellm:v1.87.0
     container_name: ms_uni41001
@@ -105,10 +105,7 @@ services:
       - --port
       - "4000"
 
-  # ─── 40001: FALLBACK CC proxy (Anthropic format → glm5.1 v×k) ───
-  # R31: 40001 = manual fallback (sonnet). Keep config STABLE — never modify params here.
-  # Only used when 40005 (primary) has a proxy-level crash. See 40005 notes for caveat
-  # (shared glm5.1 quota means switching here does NOT help with all-429 quota exhaustion).
+  # ─── 40001: CC proxy (Anthropic format → glm5.2 v×k) ───
   auth_to_api_40001:
     build:
       context: ./proxy
@@ -162,125 +159,10 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k, shares 41001) ───
-  # R31: 40005 = default CC endpoint (opus), 40001 = manual fallback (sonnet).
-  # R31.5: builds from ./proxy/cc-proxy (physically isolated cc-role code).
-  #   The shared ./proxy gateway (codex/passthrough/codex logic) is no longer
-  #   in 40005's image — a cc-proxy change cannot affect 40002/40003, and vice versa.
-  # Both share 41001 LiteLLM + same glm5.1 variants + same MS_KEY → quota is shared
-  # per model-id+key, NOT per proxy port. So:
-  #   - 40005 PROXY crash / bad params / counter corruption → switch to 40001 (works, different container)
-  #   - glm5.1 quota exhausted (all 429) → 40001 will ALSO be all-429 (shared quota, switch useless)
-  # Manual failover: change ANTHROPIC_BASE_URL from :40005 to :40001 in
-  # ~/.claude/settings.json + .bashrc + .profile, then restart CC.
-  # rr_counter.json isolated in ./logs/proxy40005 (R30.1 persistence, independent from 40001).
-  # health_check.sh reports 40005 status but does NOT put it in ALL_OK (manual failover only).
-  auth_to_api_40005:
-    build:
-      context: ./proxy/cc-proxy
-      dockerfile: Dockerfile
-    container_name: auth_to_api_40005
-    restart: unless-stopped
-    environment:
-      PROXY_ROLE: cc
-      LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
-      LITELLM_KEY: sk-litellm-local
-      LISTEN_PORT: "40005"
-      # ── CC proxy params (kept identical to 40001 — 40005 is now primary, not an experiment lab) ──
-      PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "60"
-      MAX_TOOL_DESC: "2000"
-      MAX_SCHEMA_DESC: "600"
-      CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
-      NUM_KEYS: "7"
-      NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
-      # ── end experiment params ──
-      LOG_DIR: /app/logs
-      TZ: Asia/Shanghai
-    volumes:
-      - ./logs/proxy40005:/app/logs
-      - /etc/localtime:/etc/localtime:ro
-    ports:
-      - 40005:40005
-    networks:
-      - cc-net
-    depends_on:
-      - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 256M
-          cpus: "0.1"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40005/health')" || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    logging: *id001
-
-  # ─── 40000: CC model→endpoint dispatcher (R31.7) ───
-  # CC reads ONE ANTHROPIC_BASE_URL. /model only changes the request body model field,
-  # not the downstream port. This dispatcher routes by that field so /model switching =
-  # upstream switching with zero CC restart:
-  #   claude-sonnet-* → 40001 (fallback), everything else (opus, glm5.1_*) → 40005 (primary)
-  # Pure relay: no parsing/truncation/format conversion. SSE streamed byte-for-byte.
-  # CC's settings.json env.ANTHROPIC_BASE_URL points here permanently (one-time switch).
-  auth_to_api_40000:
-    build:
-      context: ./proxy/dispatcher
-      dockerfile: Dockerfile
-    container_name: auth_to_api_40000
-    restart: unless-stopped
-    environment:
-      LISTEN_PORT: "40000"
-      DISPATCH_PRIMARY: "http://auth_to_api_40005:40005"
-      DISPATCH_FALLBACK: "http://auth_to_api_40001:40001"
-      UPSTREAM_TIMEOUT: "60"
-      PROXY_TIMEOUT: "600"
-      TZ: Asia/Shanghai
-    ports:
-      - 40000:40000
-    networks:
-      - cc-net
-    depends_on:
-      - auth_to_api_40005
-      - auth_to_api_40001
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-          cpus: "0.05"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40000/health')" || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    logging: *id001
-
-  # ─── 40002: Codex proxy (Responses API → glm5.1 v×k) ───
-  # R31.6: physically isolated — builds from configs/proxy/codex-proxy/ (own image,
-  # not shared with 40001/40003/40005). A change here cannot affect other roles.
+  # ─── 40002: Codex proxy (Responses API → glm5.2 v×k) ───
   auth_to_api_40002:
     build:
-      context: ./proxy/codex-proxy
+      context: ./proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40002
     restart: unless-stopped
@@ -333,10 +215,9 @@ services:
 
   # ─── 40003: Passthrough proxy (OpenAI → dsv4p v×k) ───
   # Handles Hermes/OpenClaw/OpenCode (_hm/_ol/_oc) — nearly-transparent passthrough
-  # R31.6: physically isolated — builds from configs/proxy/passthrough-proxy/ (own image).
   auth_to_api_40003:
     build:
-      context: ./proxy/passthrough-proxy
+      context: ./proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40003
     restart: unless-stopped

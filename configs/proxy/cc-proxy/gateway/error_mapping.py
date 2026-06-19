@@ -146,15 +146,20 @@ def json_to_str_lower(error_json):
 
 
 def is_quota_exhaustion(error_json):
-    """Detect if a 429 error is quota exhaustion vs RPM throttle."""
-    err_msg_lower = json.dumps(error_json).lower()
-    return (
-        "quota" in err_msg_lower
-        or "exhausted" in err_msg_lower
-        or "insufficient" in err_msg_lower
-        or "balance" in err_msg_lower
-        or "limit reached" in err_msg_lower
-    )
+    """R31.8: Disabled — never classify 429 as quota exhaustion.
+
+    Previously matched keywords like 'quota/exhausted' in the error body. But
+    ModelScope's 429 body uses Aliyun's stock 'exceeded your current quota'
+    phrase for BOTH token-burst AND rpm-burst throttling (type=throttling_error
+    either way), so the keyword test mislabels every burst 429 as 'quota
+    exhausted' (325/331 false positives in a day's logs). LiteLLM does not
+    forward ModelScope's ratelimit-*-remaining headers on 429, so the proxy
+    cannot read remaining=0 either. Actual daily quota is always ample (verified
+    against ModelScope backend). Returning False uniformly means all 429s are
+    treated as rate_limit bursts → uniform cycling + fallback behavior, and
+    logs stop falsely claiming exhaustion.
+    """
+    return False
 
 # ─── cc-proxy: OpenAI/Responses error formatters removed ───────────────
 # R31.5: this is the cc-role (Anthropic format) error_mapping. The four

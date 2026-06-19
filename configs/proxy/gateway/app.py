@@ -2,8 +2,8 @@
 """Gateway proxy entry point.
 
 R29: Three proxy containers, each with a different role:
-  40001 (cc):          CC → Anthropic format → glm5.2 v×k cycling
-  40002 (codex):       Codex → Responses API → glm5.2 v×k cycling
+  40001 (cc):          CC → Anthropic format → glm5.1 v×k cycling
+  40002 (codex):       Codex → Responses API → glm5.1 v×k cycling
   40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → dsv4p v×k cycling
 
 All three share the same gateway code (same Docker image).

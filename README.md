@@ -14,7 +14,7 @@
                     ├── _hm (Hermes)         → /v1/chat/completions → OpenAI 直通
                     ├── _cx (Codex CLI)      → /v1/responses → Responses↔Chat Completions 转换
                     │
-                    → :41001 LiteLLM ms_uni41001 (glm5.2v1k1~v10k7 = 70 dep)
+                    → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep)
                     → ModelScope API
 ```
 
@@ -23,7 +23,7 @@
 | 端口 | 容器 | 作用 |
 |------|------|------|
 | 40001 | auth_to_api_40001 | Proxy gateway (格式转换 + v×k 2D round-robin + error cycling + variant fallback) |
-| 41001 | ms_uni41001 | 统一 LiteLLM 网关 (glm5.2 only = 70 dep) |
+| 41001 | ms_uni41001 | 统一 LiteLLM 网关 (glm5.1 only = 70 dep) |
 | 5432 | cc_postgres | PostgreSQL 16 |
 
 ## 不可变更约束
@@ -42,7 +42,7 @@
 | `_hm` | Hermes | OpenAI → /v1/chat/completions |
 | `_cx` | Codex CLI | Responses → /v1/responses |
 
-无后缀 = `_cc`（向后兼容：`glm5.2` = `glm5.2_cc`）
+无后缀 = `_cc`（向后兼容：`glm5.1` = `glm5.1_cc`）
 
 ## 优化轮次历史
 

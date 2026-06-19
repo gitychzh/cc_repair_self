@@ -1,6 +1,6 @@
 # Hermes (opc2_uname) 配置模板 — 通过 passthrough proxy gateway (40003) 路由
 # R29: _ol/_oc/_hm now route to dsv4p backend via 40003 (passthrough proxy)
-# _key_changes: 1) base_url 从 40001→40003; 2) default 从 glm5.2_hm→dsv4p_hm; 3) context_length 保持 170000
+# _key_changes: 1) base_url 从 40001→40003; 2) default 从 glm5.1_hm→dsv4p_hm; 3) context_length 保持 170000
 # 所有 OpenAI agent 必须通过 passthrough proxy gateway (40003)，不能直连 LiteLLM
 # 原因: LiteLLM 的 model_list 只有 v×k 路由名(dsv4pv1k1~v10k7)，没有 dsv4p 别名
 # Proxy gateway 做: model name映射(dsv4p_hm→dsv4p→v×k routing) + error cycling + variant fallback

@@ -5,7 +5,7 @@
 #
 # Routing:
 #   claude-sonnet-*  → 40001 (fallback)
-#   everything else → 40005 (primary, incl opus + unknown + glm5.2_*)
+#   everything else → 40005 (primary, incl opus + unknown + glm5.1_*)
 #
 # Pure HTTP relay: no parsing/truncation/format conversion. Uses http.client for
 # raw chunked streaming (urllib blocks on SSE responses with no Content-Length).

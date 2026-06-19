@@ -1,6 +1,6 @@
 {
   "_comment": "OpenClaw (opc2_uname) 配置模板 — 通过 passthrough proxy gateway (40003) 路由",
-  "_key_changes": "R29: 1) baseUrl 从 40001→40003; 2) model 从 glm5.2_ol→dsv4p_ol; 3) fallback 去掉",
+  "_key_changes": "R29: 1) baseUrl 从 40001→40003; 2) model 从 glm5.1_ol→dsv4p_ol; 3) fallback 去掉",
   "gateway": {
     "mode": "local",
     "auth": {

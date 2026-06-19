@@ -50,22 +50,22 @@ docker ps --format 'table {{.Names}}\t{{.Status}}' | head -10
 echo ""
 echo "[4] Testing requests..."
 
-# Test glm5.2 via proxy 40001 (Anthropic format, CC)
-echo "  Testing glm5.2 via 40001 (CC proxy)..."
+# Test glm5.1 via proxy 40001 (Anthropic format, CC)
+echo "  Testing glm5.1 via 40001 (CC proxy)..."
 GLM_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40001/v1/messages \
     -H "Content-Type: application/json" \
     -H "x-api-key: sk-litellm-local" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"glm5.2","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
-echo "  glm5.2 via 40001 HTTP status: ${GLM_RESULT}"
+    -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
+echo "  glm5.1 via 40001 HTTP status: ${GLM_RESULT}"
 
-# Test glm5.2_cx via proxy 40002 (Codex, Responses API)
-echo "  Testing glm5.2_cx via 40002 (Codex proxy)..."
+# Test glm5.1_cx via proxy 40002 (Codex, Responses API)
+echo "  Testing glm5.1_cx via 40002 (Codex proxy)..."
 CX_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40002/v1/responses \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer sk-litellm-local" \
-    -d '{"model":"glm5.2_cx","input":"test"}')
-echo "  glm5.2_cx via 40002 HTTP status: ${CX_RESULT}"
+    -d '{"model":"glm5.1_cx","input":"test"}')
+echo "  glm5.1_cx via 40002 HTTP status: ${CX_RESULT}"
 
 # Test dsv4p via proxy 40003 (OpenAI passthrough, OpenClaw/OpenCode/Hermes)
 echo "  Testing dsv4p via 40003 (Passthrough proxy)..."
@@ -90,14 +90,14 @@ echo "  40001 /v1/chat/completions HTTP status: ${ISOLATION_RESULT} (expected: 4
 
 echo ""
 if [[ "${GLM_RESULT}" == "200" ]]; then
-    echo "=== CC proxy (40001) OK — glm5.2 working ==="
+    echo "=== CC proxy (40001) OK — glm5.1 working ==="
 else
-    echo "=== WARNING — glm5.2 via 40001 returned ${GLM_RESULT}, check logs ==="
+    echo "=== WARNING — glm5.1 via 40001 returned ${GLM_RESULT}, check logs ==="
 fi
 if [[ "${CX_RESULT}" == "200" ]]; then
-    echo "=== Codex proxy (40002) OK — glm5.2_cx working ==="
+    echo "=== Codex proxy (40002) OK — glm5.1_cx working ==="
 else
-    echo "=== WARNING — glm5.2_cx via 40002 returned ${CX_RESULT}, check logs ==="
+    echo "=== WARNING — glm5.1_cx via 40002 returned ${CX_RESULT}, check logs ==="
 fi
 if [[ "${DSV4P_RESULT}" == "200" ]]; then
     echo "=== Passthrough proxy (40003) OK — dsv4p working ==="

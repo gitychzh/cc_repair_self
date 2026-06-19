@@ -32,6 +32,7 @@ from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     _next_variant_key_pair,
+    throttle_outbound, MIN_OUTBOUND_INTERVAL_S,
 )
 from .logger import _log, _log_metrics, _log_error_detail
 from .error_mapping import is_quota_exhaustion
@@ -54,7 +55,7 @@ class UpstreamResult:
         # Success fields
         self.resp = None  # http.client.HTTPResponse
         self.conn = None  # http.client.HTTPConnection
-        self.litellm_model = ""  # e.g. "glm5.2v3k5" or "dsv4pv3k5"
+        self.litellm_model = ""  # e.g. "glm5.1v3k5" or "dsv4pv3k5"
         self.variant_idx = 0  # 0-based variant index
         self.key_idx = 0  # 0-based key index
         self.is_stream = False  # whether upstream was asked for streaming
@@ -80,7 +81,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     Args:
         handler: ProxyHandler instance (needed for _make_upstream_conn)
         oai_body: dict — OpenAI-format request body
-        mapped_model: str — backend model name ("glm5.2" or "dsv4p")
+        mapped_model: str — backend model name ("glm5.1" or "dsv4p")
         request_id: str — unique request ID for logging
         metrics: dict — metrics dict to update
         t_start: float — request start timestamp
@@ -128,6 +129,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
         try:
             conn = handler._make_upstream_conn(parsed_upstream)
+            throttle_outbound()  # R31.9: enforce MIN_OUTBOUND_INTERVAL_S to smooth burst
             conn.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
             resp = conn.getresponse()
 
@@ -241,6 +243,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                         })
                         try:
                             conn_fix = handler._make_upstream_conn(parsed_upstream)
+                            throttle_outbound()  # R31.9: burst smoothing
                             conn_fix.request("POST", parsed_upstream.path, body=fixed_data, headers=fixed_headers)
                             resp_fix = conn_fix.getresponse()
                             if resp_fix.status < 400:
@@ -285,6 +288,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                     })
                     try:
                         conn2 = handler._make_upstream_conn(parsed_upstream)
+                        throttle_outbound()  # R31.9: burst smoothing
                         conn2.request("POST", parsed_upstream.path, body=oai_data, headers=headers_out)
                         resp2 = conn2.getresponse()
                         if resp2.status < 400:
@@ -433,7 +437,15 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     variant_fallback_attempts = []
     variant_fallback_success = False
 
-    if all_429 and not has_500 and not has_502 and not has_timeout and not has_conn_err:
+    if False and all_429 and not has_500 and not has_502 and not has_timeout and not has_conn_err:
+        # R31.8: Variant fallback DISABLED.
+        # Previously, when all 7 keys returned 429, the proxy retried 9 fallback
+        # variants (each 1 key) — 16-17x request amplification. In a systemic
+        # failure (e.g. a software bug causing every request to 429), this would
+        # rapidly burn through account quota. Per user requirement: 7 keys all-429
+        # must terminate immediately and return the error to CC. CC retries on its
+        # own terms; the proxy no longer amplifies. `if False` keeps the fallback
+        # code intact for future re-enablement while guaranteeing it never runs.
         num_variants = NUM_VARIANTS.get(mapped_model, 10)
         # If ALL 429s are non-quota (RPM/false-positive), brief delay before sweeping all variants
         all_non_quota_v429 = all(
@@ -448,7 +460,12 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
         for fallback_v_offset in range(1, num_variants):
             fallback_v_idx = (start_variant_idx + fallback_v_offset) % num_variants
-            fallback_k_idx = start_key_idx  # Use same starting key position
+            # R31.8: rotate the physical key too, not just the variant. Previously
+            # fixed to start_key_idx, so all 9 fallback attempts landed on the SAME
+            # physical key (e.g. all k7) and, since ModelScope RPM is per-key, all
+            # 9 retried the same burst-exhausted key. Rotating by offset spreads
+            # the 9 attempts across distinct physical keys.
+            fallback_k_idx = (start_key_idx + fallback_v_offset) % num_keys
             litellm_model_fb = f"{litellm_model_base}v{fallback_v_idx+1}k{fallback_k_idx+1}"
             oai_body_fb = dict(oai_body)  # Clone body for fallback
             oai_body_fb["model"] = litellm_model_fb
@@ -467,6 +484,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
 
             try:
                 conn_fb = handler._make_upstream_conn(parsed_upstream_fb)
+                throttle_outbound()  # R31.9: burst smoothing
                 conn_fb.request("POST", parsed_upstream_fb.path, body=oai_data_fb, headers=headers_fb)
                 resp_fb = conn_fb.getresponse()
 
@@ -609,6 +627,13 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         all_attempts = key_cycle_attempts
 
     elapsed_ms = int((time.time() - t_start) * 1000)
+
+    # R31.8: hard termination — no variant fallback. Log clearly so the
+    # 7-key-all-429-immediate-stop is observable in real traffic.
+    if all_429 and not variant_fallback_attempts:
+        _log("ABORT-NO-FALLBACK", f"7 keys all-429 for v{start_variant_idx+1} ({mapped_model}) — "
+                                 f"terminating immediately (no variant fallback), returning error to client. "
+                                 f"Keys: {[a['litellm_model'] for a in key_cycle_attempts]} elapsed={elapsed_ms}ms")
 
     all_non_quota_429 = False
     if all_429:

@@ -2,8 +2,8 @@
 """gateway — multi-proxy gateway with role-based endpoint serving.
 
 R29: Three proxy containers, each with PROXY_ROLE determining behavior:
-  cc          → /v1/messages (Anthropic) → glm5.2 v×k
-  codex       → /v1/responses (Responses API) → glm5.2 v×k
+  cc          → /v1/messages (Anthropic) → glm5.1 v×k
+  codex       → /v1/responses (Responses API) → glm5.1 v×k
   passthrough → /v1/chat/completions (OpenAI passthrough) → dsv4p v×k
 
 Modular structure (R23→R29):

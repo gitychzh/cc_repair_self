@@ -112,4 +112,4 @@ echo "  3. docker stop ms_uni41002 && docker rm ms_uni41002  # Remove old fallba
 echo "  4. bash scripts/deploy.sh proxy-all      # Rebuild all 3 proxy containers"
 echo "  5. bash scripts/deploy.sh all            # Full rebuild (5 containers)"
 echo "  6. bash scripts/health_check.sh          # Verify all containers healthy"
-echo "  7. curl test (see CLAUDE.md)             # Verify glm5.2 + dsv4p return 200"
+echo "  7. curl test (see CLAUDE.md)             # Verify glm5.1 + dsv4p return 200"

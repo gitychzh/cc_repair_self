@@ -4,7 +4,7 @@
 R31.5: This is the cc-role gateway, physically isolated from the codex/
 passthrough gateways. The old "one shared image + PROXY_ROLE switch" design
 caused cross-container breakage (a change for one role affected all three).
-This file serves ONLY Claude Code (Anthropic /v1/messages → glm5.2 v×k).
+This file serves ONLY Claude Code (Anthropic /v1/messages → glm5.1 v×k).
 
 Delegation:
 - Upstream v×k cycling     → upstream.py
@@ -232,7 +232,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                        f"Please retry in a few seconds. Keys cycled: {cycled_keys}"
                         },
                         "model": request_model,
-                    }, extra_headers={"retry-after": "5"})
+                    }, extra_headers={"retry-after": "10"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
                     timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]

@@ -49,7 +49,7 @@ def responses_to_chat_body(cx_body, target_model):
 
     Args:
         cx_body: dict — Responses API request body
-        target_model: str — backend model name ("glm5.2" or "dsv4p")
+        target_model: str — backend model name ("glm5.1" or "dsv4p")
 
     Returns:
         dict — Chat Completions format request body ready for upstream.py
@@ -253,7 +253,7 @@ def chat_to_responses(oai_response, request_model):
 
     Args:
         oai_response: dict — Chat Completions response from upstream
-        request_model: str — frontend model name (e.g. "glm5.2_cx")
+        request_model: str — frontend model name (e.g. "glm5.1_cx")
 
     Returns:
         dict — Responses API format response object
@@ -485,7 +485,7 @@ def stream_responses_passthrough(handler, resp, conn, metrics, t_start, request_
                 fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
                 # ── Content delta → response.output_text.delta ──
-                # GLM-5.2 sends reasoning_content and content in the SAME delta chunk.
+                # GLM-5.1 sends reasoning_content and content in the SAME delta chunk.
                 # For Codex CLI (Responses API), there's no separate "reasoning" output type —
                 # we merge both reasoning_content AND content into output_text so Codex gets
                 # the full model output. This is different from CC's Anthropic path which
@@ -849,7 +849,7 @@ def _collect_stream_to_responses(handler, resp, conn, request_model, mapped_mode
                 fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
                 # Collect reasoning + content — merge into output_text for Codex
-                # Same logic as streaming: GLM-5.2 puts reasoning and content in the same
+                # Same logic as streaming: GLM-5.1 puts reasoning and content in the same
                 # delta chunk. For Responses API, there's no separate reasoning output type.
                 # Codex needs the full model output (reasoning + content) as output_text.
                 reasoning = delta.get("reasoning_content", "")

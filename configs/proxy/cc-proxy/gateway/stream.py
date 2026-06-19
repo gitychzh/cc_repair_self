@@ -72,6 +72,23 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
         If those are 0, falls back to provided output_tokens/input_tokens_real.
         """
         nonlocal message_start_sent, message_delta_sent, active_block_type, pending_stop_reason
+        # R31.8: detect empty stream — no content block was ever opened means the
+        # upstream stream produced no content (only finish_reason / [DONE]).
+        if next_block_idx == 0:
+            _log("WARN", f"empty_stream_response: stream ended with no content "
+                         f"(model={metrics.get('litellm_model','?')} output_tokens={streaming_output_tokens})")
+            _log_error_detail({
+                "request_id": metrics.get("request_id", "?"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "error_subcategory": "empty_stream_response",
+                "upstream_status": 200,
+                "litellm_model": metrics.get("litellm_model", "?"),
+                "variant_idx": metrics.get("variant_idx", "?"),
+                "key_idx": metrics.get("key_idx", "?"),
+                "streaming_output_tokens": streaming_output_tokens,
+                "finish_reason": pending_stop_reason,
+            })
+            metrics["empty_stream_response"] = True
         if active_block_type is not None:
             handler._send_sse("content_block_stop",
                            {"type": "content_block_stop", "index": next_block_idx - 1})
