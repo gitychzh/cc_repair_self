@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:40005",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:40000",
     "ANTHROPIC_API_KEY": "sk-litellm-local",
     "HTTPS_PROXY": "http://127.0.0.1:7880",
     "HTTP_PROXY": "http://127.0.0.1:7880",
