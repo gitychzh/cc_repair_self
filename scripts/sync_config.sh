@@ -2,7 +2,7 @@
 # sync_config.sh — One-click sync from Git repo configs to /opt/cc-infra/
 # Usage: bash sync_config.sh [--dry-run]
 # Must be run on opc_uname (or opc2_uname) with /opt/cc-infra/ deployed
-# R29: Updated for gateway module package + gateway_main.py entry point + no proxy.py
+# R32: Updated for physical proxy split (cc-proxy/codex-proxy/passthrough-proxy/dispatcher)
 
 set -euo pipefail
 
@@ -16,12 +16,58 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 # Files to sync: repo → deploy
-# R29: gateway module package (all .py files) + gateway_main.py + Dockerfile
+# R32: All proxy directories physically isolated
 SYNC_MAP=(
+    # Docker compose & LiteLLM
     "configs/docker-compose.yml:docker-compose.yml"
     "configs/litellm-glm51/config.yaml:litellm-glm51/config.yaml"
-    "configs/proxy/gateway_main.py:proxy/gateway_main.py"
-    "configs/proxy/Dockerfile:proxy/Dockerfile"
+
+    # Dispatcher (40000)
+    "configs/proxy/dispatcher/Dockerfile:proxy/dispatcher/Dockerfile"
+    "configs/proxy/dispatcher/gateway_main.py:proxy/dispatcher/gateway_main.py"
+
+    # CC-proxy (40005 primary, 40001 fallback builds from ./proxy for now)
+    "configs/proxy/cc-proxy/Dockerfile:proxy/cc-proxy/Dockerfile"
+    "configs/proxy/cc-proxy/gateway_main.py:proxy/cc-proxy/gateway_main.py"
+    "configs/proxy/cc-proxy/gateway/__init__.py:proxy/cc-proxy/gateway/__init__.py"
+    "configs/proxy/cc-proxy/gateway/app.py:proxy/cc-proxy/gateway/app.py"
+    "configs/proxy/cc-proxy/gateway/config.py:proxy/cc-proxy/gateway/config.py"
+    "configs/proxy/cc-proxy/gateway/handlers.py:proxy/cc-proxy/gateway/handlers.py"
+    "configs/proxy/cc-proxy/gateway/upstream.py:proxy/cc-proxy/gateway/upstream.py"
+    "configs/proxy/cc-proxy/gateway/converters.py:proxy/cc-proxy/gateway/converters.py"
+    "configs/proxy/cc-proxy/gateway/stream.py:proxy/cc-proxy/gateway/stream.py"
+    "configs/proxy/cc-proxy/gateway/error_mapping.py:proxy/cc-proxy/gateway/error_mapping.py"
+    "configs/proxy/cc-proxy/gateway/logger.py:proxy/cc-proxy/gateway/logger.py"
+
+    # Codex-proxy (40002)
+    "configs/proxy/codex-proxy/Dockerfile:proxy/codex-proxy/Dockerfile"
+    "configs/proxy/codex-proxy/gateway_main.py:proxy/codex-proxy/gateway_main.py"
+    "configs/proxy/codex-proxy/gateway/__init__.py:proxy/codex-proxy/gateway/__init__.py"
+    "configs/proxy/codex-proxy/gateway/app.py:proxy/codex-proxy/gateway/app.py"
+    "configs/proxy/codex-proxy/gateway/config.py:proxy/codex-proxy/gateway/config.py"
+    "configs/proxy/codex-proxy/gateway/handlers.py:proxy/codex-proxy/gateway/handlers.py"
+    "configs/proxy/codex-proxy/gateway/upstream.py:proxy/codex-proxy/gateway/upstream.py"
+    "configs/proxy/codex-proxy/gateway/converters.py:proxy/codex-proxy/gateway/converters.py"
+    "configs/proxy/codex-proxy/gateway/stream.py:proxy/codex-proxy/gateway/stream.py"
+    "configs/proxy/codex-proxy/gateway/error_mapping.py:proxy/codex-proxy/gateway/error_mapping.py"
+    "configs/proxy/codex-proxy/gateway/logger.py:proxy/codex-proxy/gateway/logger.py"
+    "configs/proxy/codex-proxy/gateway/codex.py:proxy/codex-proxy/gateway/codex.py"
+
+    # Passthrough-proxy (40003)
+    "configs/proxy/passthrough-proxy/Dockerfile:proxy/passthrough-proxy/Dockerfile"
+    "configs/proxy/passthrough-proxy/gateway_main.py:proxy/passthrough-proxy/gateway_main.py"
+    "configs/proxy/passthrough-proxy/gateway/__init__.py:proxy/passthrough-proxy/gateway/__init__.py"
+    "configs/proxy/passthrough-proxy/gateway/app.py:proxy/passthrough-proxy/gateway/app.py"
+    "configs/proxy/passthrough-proxy/gateway/config.py:proxy/passthrough-proxy/gateway/config.py"
+    "configs/proxy/passthrough-proxy/gateway/handlers.py:proxy/passthrough-proxy/gateway/handlers.py"
+    "configs/proxy/passthrough-proxy/gateway/upstream.py:proxy/passthrough-proxy/gateway/upstream.py"
+    "configs/proxy/passthrough-proxy/gateway/converters.py:proxy/passthrough-proxy/gateway/converters.py"
+    "configs/proxy/passthrough-proxy/gateway/stream.py:proxy/passthrough-proxy/gateway/stream.py"
+    "configs/proxy/passthrough-proxy/gateway/error_mapping.py:proxy/passthrough-proxy/gateway/error_mapping.py"
+    "configs/proxy/passthrough-proxy/gateway/logger.py:proxy/passthrough-proxy/gateway/logger.py"
+    "configs/proxy/passthrough-proxy/gateway/codex.py:proxy/passthrough-proxy/gateway/codex.py"
+
+    # Shared legacy gateway (still used by 40001 fallback)
     "configs/proxy/gateway/__init__.py:proxy/gateway/__init__.py"
     "configs/proxy/gateway/app.py:proxy/gateway/app.py"
     "configs/proxy/gateway/config.py:proxy/gateway/config.py"
@@ -30,8 +76,12 @@ SYNC_MAP=(
     "configs/proxy/gateway/converters.py:proxy/gateway/converters.py"
     "configs/proxy/gateway/stream.py:proxy/gateway/stream.py"
     "configs/proxy/gateway/error_mapping.py:proxy/gateway/error_mapping.py"
-    "configs/proxy/gateway/codex.py:proxy/gateway/codex.py"
     "configs/proxy/gateway/logger.py:proxy/gateway/logger.py"
+    "configs/proxy/gateway/codex.py:proxy/gateway/codex.py"
+    "configs/proxy/Dockerfile:proxy/Dockerfile"
+    "configs/proxy/gateway_main.py:proxy/gateway_main.py"
+
+    # Postgres
     "configs/postgres/init-db.sh:postgres/init-db.sh"
 )
 
@@ -91,25 +141,16 @@ done
 echo "[4] Checking .env template..."
 if [[ -f "${DEPLOY_DIR}/.env" ]]; then
     echo "  .env exists (not overwritten — manual update required for new env vars)"
-    # Check if new R29 env vars are present
-    if ! grep -q "NUM_VARIANTS_DSV4P" "${DEPLOY_DIR}/.env" 2>/dev/null; then
-        echo "  ⚠️  .env missing NUM_VARIANTS_DSV4P — add it for R29"
-    fi
-    if ! grep -q "MODEL_INPUT_TOKEN_SAFETY_DSV4P" "${DEPLOY_DIR}/.env" 2>/dev/null; then
-        echo "  ⚠️  .env missing MODEL_INPUT_TOKEN_SAFETY_DSV4P — add it for R29"
-    fi
-    if ! grep -q "LITELLM_URL_DSV4P" "${DEPLOY_DIR}/.env" 2>/dev/null; then
-        echo "  ⚠️  .env missing LITELLM_URL_DSV4P — add it for R29"
+    # Check if MIN_OUTBOUND_INTERVAL_S is present (R31.9 throttle)
+    if ! grep -q "MIN_OUTBOUND_INTERVAL_S" "${DEPLOY_DIR}/.env" 2>/dev/null; then
+        echo "  ⚠️  .env missing MIN_OUTBOUND_INTERVAL_S — docker-compose.yml provides default 2.0"
     fi
 fi
 
 echo ""
 echo "=== Sync complete ==="
 echo "Next steps:"
-echo "  1. Update .env with new R29 env vars (NUM_VARIANTS_DSV4P, MODEL_INPUT_TOKEN_SAFETY_DSV4P, etc.)"
-echo "  2. bash scripts/deploy.sh ms_uni41001    # Restart LiteLLM with 140 dep config"
-echo "  3. docker stop ms_uni41002 && docker rm ms_uni41002  # Remove old fallback container"
-echo "  4. bash scripts/deploy.sh proxy-all      # Rebuild all 3 proxy containers"
-echo "  5. bash scripts/deploy.sh all            # Full rebuild (5 containers)"
-echo "  6. bash scripts/health_check.sh          # Verify all containers healthy"
-echo "  7. curl test (see CLAUDE.md)             # Verify glm5.1 + dsv4p return 200"
+echo "  1. cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40005 auth_to_api_40002 auth_to_api_40003"
+echo "  2. docker compose up -d --force-recreate auth_to_api_40001  # 40001 uses shared ./proxy"
+echo "  3. docker restart ms_uni41001  # LiteLLM config (volume-mounted)"
+echo "  4. curl test (see CLAUDE.md)  # Verify all endpoints return 200"
