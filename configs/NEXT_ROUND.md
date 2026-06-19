@@ -22,6 +22,7 @@
 ## 下轮待办（实验设计）
 - 对比实验：若仍高频ABORT，可试 MIN_OUTBOUND_INTERVAL_S 2.0→2.5（更稀疏出站，可能降burst期429，但牺牲QPS；需测净收益）
 - 或 retry-after 10→15（让CC重试更晚，给burst更多恢复）— 注意>60s CC会放弃报错
+- **每轮必做**：`bash scripts/check_quota_balance.sh` 查 7 key 剩余额度（spread ≤ 5 = 循环正确，> 5 = 深挖代码）
 
 ## 参数现状
 PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | COMPACT=155000 | THROTTLE=2.0s | transient-ABORT-retry-after=10

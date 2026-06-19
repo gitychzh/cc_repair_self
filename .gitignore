@@ -36,3 +36,7 @@ plan.md
 
 # Cross-optimize requests (outdated after each round)
 cross_optimize/
+
+# optimization loop runtime artifacts
+.run_optimization_loop.lock
+logs/optimization_loop.log

@@ -4,246 +4,191 @@
 
 ## 你的身份
 
-你是 **opc_uname** 机器上的 Claude Code。你的任务是拉取此仓库，分析 **opc2_uname**（远程机器）上的 cc-infra 配置，发现可优化的点，修改配置并测试，然后 push 回仓库让 opc2_uname 拉取继续优化。
+你是 **opc2_uname** 机器上的 Claude Code。你的任务是分析本机 cc-infra 配置，发现可优化的点，修改配置并测试，push 回仓库。 opc_uname 也会拉取后优化本机。
 
-## 架构
+**默认沟通语言：中文。**
+
+## 架构（R31.7 dispatcher + R31.5/R31.6 物理拆分）
 
 ```
-                    :40001 proxy (PROXY_ROLE=cc, CC only)
-                    ├── _cc (Claude Code) → /v1/messages → Anthropic→OpenAI转换 → upstream.py glm5.2 v×k cycling
+CC (settings.json ANTHROPIC_BASE_URL=40000)
+  → :40000 dispatcher (按 request body 的 model 字段路由)
+      ├── opus/未知 → :40005 proxy (PROXY_ROLE=cc, primary)  → 41001
+      └── sonnet    → :40001 proxy (PROXY_ROLE=cc, fallback)  → 41001
 
-                    :40002 proxy (PROXY_ROLE=codex, Codex only)
-                    ├── _cx (Codex CLI)   → /v1/responses → Responses→Chat转换 → upstream.py glm5.2 v×k cycling
+:40005 / :40001  cc-proxy      → _cc /v1/messages      → Anthropic→OpenAI 转换 → glm5.2 v×k cycling
+:40002          codex-proxy    → _cx /v1/responses     → Responses→Chat 转换    → glm5.2 v×k cycling
+:40003          openai-proxy   → _ol/_oc/_hm chat/completions → OpenAI passthrough → dsv4p v×k cycling
 
-                    :40003 proxy (PROXY_ROLE=passthrough, OpenAI agents only)
-                    ├── _ol (OpenClaw)    → /v1/chat/completions → OpenAI passthrough → upstream.py dsv4p v×k cycling
-                    ├── _oc (OpenCode)    → /v1/chat/completions → OpenAI passthrough → upstream.py dsv4p v×k cycling
-                    ├── _hm (Hermes)      → /v1/chat/completions → OpenAI passthrough → upstream.py dsv4p v×k cycling
-
-                    → :41001 LiteLLM ms_uni41001 (glm5.2v1k1~v10k7 = 70 dep + dsv4pv1k1~v10k7 = 70 dep = 140 dep)
-                    → ModelScope API
+→ :41001 LiteLLM ms_uni41001 (glm5.2v1k1~v10k7 = 70 dep + dsv4pv1k1~v10k7 = 70 dep = 140 dep)
+→ ModelScope API
 ```
 
-核心原则：**proxy gateway做格式转换(CC/Codex) / 透传(OpenAI agents) + metrics logging + variant×key 2D round-robin + variant fallback (R23) + error cycling（所有agent类型共享upstream.py的v×k cycling和错误处理，429/500/502时同variant换下一个key，7 key全失败→尝试2个fallback variant（各1 key），fallback也失败才返回agent，retry-after=180s），不做压缩、不做截断。LiteLLM纯转发（proxy精确指定variant+key组合，num_retries=0，所有allowed_fails=0，避免浪费ModelScope quota）。压缩完全由CC内置auto-compact控制。**
+**proxy gateway 职责**：格式转换(CC/Codex)/透传(OpenAI agents) + metrics logging + variant×key 2D round-robin + error cycling。**不做压缩、不做截断**（压缩只由 CC 内置 auto-compact 控制）。LiteLLM 纯转发（proxy 精确指定 variant+key，num_retries=0，所有 allowed_fails=0）。
 
-**R29: 三容器分治架构**
-- 3个proxy容器共享相同gateway代码（同一Docker镜像），通过PROXY_ROLE env var差异化
-- 每个proxy只服务对应role的endpoint，其他endpoint返回404
-- CC专用(40001) + Codex专用(40002) + 透传专用(40003)，互相独立
-- LiteLLM fallback暂时去掉（只有ms_uni41001，无ms_uni41002）
+## Agent Suffix System（R23.1, R29）
 
-**Agent Suffix System (R23.1, R29 backend routing update):**
-- 模型ID格式：`{base_model}{agent_suffix}` → 如 `glm5.2_cc`, `dsv4p_ol`, `dsv4p_oc`, `dsv4p_hm`, `glm5.2_cx`
-- 向后兼容：`glm5.2_ol`=dsv4p_ol（old suffix with glm5.2 base仍然路由到dsv4p backend）
-- `_cc` → Anthropic格式（/v1/messages），需要格式转换 + force-stream-for-nonstream，backend=glm5.2
-- `_cx` → Responses API格式（/v1/responses），Codex CLI专用，需要格式转换，backend=glm5.2
-- `_ol/_oc/_hm` → OpenAI格式（/v1/chat/completions），直通passthrough，backend=dsv4p
-- 所有agent共享相同的error cycling + variant fallback：429/500/502 key cycling + timeout cycling + thinking_budget fix retry
-- 错误格式根据agent类型：_cc返回Anthropic格式错误，_ol/_oc/_hm返回OpenAI格式错误，_cx返回Responses API格式错误
+- `{base}{suffix}`：`glm5.2_cc`(Anthropic) / `glm5.2_cx`(Responses/Codex) / `dsv4p_ol`,`dsv4p_oc`,`dsv4p_hm`(OpenAI passthrough)
+- 向后兼容：`glm5.2`=glm5.2_cc, `claude-opus-4-8`=glm5.2_cc, `glm5.2_ol`=dsv4p_ol
 
-**Variant×Key 2D Round-Robin + Variant Fallback (R21→R23, R29扩展到dsv4p):**
-- Proxy 维护 2D轮换 counter：request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS → model `{base}v{V}k{K}`
-- glm5.2轮询序列：v1k1→v1k2→...→v1k7→v2k1→v2k2→...→v10k7→回到v1k1
-- dsv4p轮询序列：v1k1→v1k2→...→v1k7→v2k1→v2k2→...→v10k7→回到v1k1
-- 429/500/502 时：同variant换下一个key（k→k+1），不变variant（ModelScope每种错误都扣quota，cycling避免浪费）
-- 7 key 全部失败（同variant） → **R23: 尝试2个fallback variant（各试1个key），减少quota浪费的同时利用不同variant的独立RPM quota**
-- R29: 不再有LiteLLM fallback（去掉ms_uni41002），所有key连接错误也走variant fallback
-- 合并所有错误分类返回：全429→rate_limit_error（retry-after=180s）；有500→api_error；有502→api_error；有timeout→502 api_error
-- 每个key的 cycling 尝试都记录在 error_detail 日志中（含variant_idx、error_type）
-- 成功时：记录 variant_idx、key_idx 和 litellm_model，以及之前的 cycling 信息
-- 不cycling的错误：400 input overflow、400 inappropriate content、400 thinking_budget InvalidParameter、401/403 AuthenticationError
-- **R29: dsv4p不支持thinking_budget/reasoning_effort** — passthrough proxy(40003)会自动strip这些参数
+## Variant×Key 2D Round-Robin + Error Cycling（R21→R31.9）
+
+- counter 持久化到文件 `rr_counter.json`（R30/R31.3），重启/断电不归零，每次 increment 立即 atomic 落盘
+- request N → `variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS` → model `{base}v{V}k{K}`（行优先；R31.9 对角线实验证伪已回退）
+- 429/500/502 时：**同 variant 换下一个 key**（k→k+1，ModelScope 每种错误都扣 quota，cycling 避免浪费）
+- **R31.8: 7 key 全 429 → 立即终止返回错误（ABORT-NO-FALLBACK），不再 variant fallback**（曾 17x 放大，软件 bug 会耗尽账号）
+- 错误返回格式按 agent 类型：_cc=Anthropic / _ol,_oc,_hm=OpenAI / _cx=Responses
+- 不 cycling 的错误：400 input overflow / 400 inappropriate content / 400 thinking_budget InvalidParameter / 401/403
+
+**R31.9 出站节流**：`MIN_OUTBOUND_INTERVAL_S=2.0`，`throttle_outbound()` 在每个 `conn.request` 前强制上次发送≥2s（缓解 ModelScope RPM burst throttle，根因见下）。env var 可调，设 0 禁用。
+
+## CC 内置 429 重试机制（逆向自 claude.exe 原生二进制，非外部脚本）
+
+CC 收到 429 会自动退避重试，对用户透明（"7key 全 429 你无感知"的原因）：
+- 429 走 `h = HP5(err) ?? min(r7H(attempt, retryAfter, cap=30000), EF6)`
+- **有 retry-after header** → `parseInt(retryAfter)` 秒（我们发 `retry-after:5` → 每次等 5s）
+- **无 retry-after** → 指数退避 0.5s→1s→2s（bL5=500）
+- **retry-after > 60s → 抛 too_long，CC 直接放弃不重试**（180s 的 quota-exhausted 用此路径，让用户看到错误）
+- 重试上限 SL5=2（重试 2 次仍 429 → 抛 api_request_retry_exhausted）
+- **proxy 不能阻止 CC 重试，只能用 retry-after 调节奏**
 
 ## 不可变更约束（NEVER CHANGE）
 
 | 约束 | 原因 |
 |------|------|
-| **所有 variant model IDs** | 每个变体model ID有独立额度200/id/天。删减变体=删减额度，**绝对禁止增删改**（R21用户主动删除dsv4p v11） |
-| **rpm=1 per deployment** | 每个deployment限速1 RPM。**绝对禁止修改** |
-| frontend model_name (agent-facing) | `glm5.2_cc`, `dsv4p_ol`, `dsv4p_oc`, `dsv4p_hm`, `glm5.2_cx` — R29 suffix system; backward compat: `glm5.2`=glm5.2_cc, `claude-opus-4-8`=glm5.2_cc, `glm5.2_ol`=dsv4p_ol |
-| LiteLLM model_name (internal, R21) | `glm5.2v1k1`~`glm5.2v10k7` + `dsv4pv1k1`~`dsv4pv10k7` — proxy精确指定variant+key |
-| Docker container names | `ms_uni41001`, `cc_postgres`, `auth_to_api_40001/40002/40003` |
-| port assignments | 41001=LiteLLM(ms_uni41001), 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough) |
-| PROXY_ROLE per container | `auth_to_api_40001`=cc, `auth_to_api_40002`=codex, `auth_to_api_40003`=passthrough — 不可混淆 |
+| **所有 variant model IDs** | 每个变体有独立 200/id/天额度，**绝对禁止增删改** |
+| **rpm=1 per deployment** | 每个 deployment 限速 1 RPM，**绝对禁止修改** |
+| frontend model_name | `glm5.2_cc`/`dsv4p_ol`/`dsv4p_oc`/`dsv4p_hm`/`glm5.2_cx` + 向后兼容 |
+| LiteLLM model_name | `glm5.2v1k1`~`glm5.2v10k7` + `dsv4pv1k1`~`dsv4pv10k7` |
+| Docker containers | `ms_uni41001`, `cc_postgres`, `auth_to_api_40000/40001/40002/40003/40005` |
+| port assignments | 40000=dispatcher, 40001=cc(fallback), 40002=codex, 40003=openai, 40005=cc(primary), 41001=LiteLLM |
+| PROXY_ROLE per container | 40001/40005=cc, 40002=codex, 40003=passthrough，不可混淆 |
 
-### 10 Variant Model IDs（R21/R29, ms_uni41001）
+### 10 Variant Model IDs（ms_uni41001）
 
-**GLM-5.2 (10 variants):**
-`ZHIPUAI/GLM-5.2`, `ZHIPUAI/GLm-5.2`, `ZHIPUAI/GlM-5.2`, `ZHIPUAI/Glm-5.2`, `ZHIPUAI/gLM-5.2`, `ZHIPUAI/gLm-5.2`, `ZHIPUAI/glM-5.2`, `ZHIPUAI/glm-5.2`, `ZHIPUAi/GLM-5.2`, `ZHIPUAi/GLm-5.2`
+**GLM-5.2 (10):** `ZHIPUAI/GLM-5.2`, `ZHIPUAI/GLm-5.2`, `ZHIPUAI/GlM-5.2`, `ZHIPUAI/Glm-5.2`, `ZHIPUAI/gLM-5.2`, `ZHIPUAI/gLm-5.2`, `ZHIPUAI/glM-5.2`, `ZHIPUAI/glm-5.2`, `ZHIPUAi/GLM-5.2`, `ZHIPUAi/GLm-5.2`
 
-**DSv4P (10 variants, R29 restored):**
-`deepseek-ai/deepseek-v4-pro`, `deepseek-ai/Deepseek-V4-Pro`, `deepseek-ai/DeepSeek-v4-pro`, `deepseek-ai/DeepSeek-v4-Pro`, `deepseek-ai/DeepSeek-V4-PrO`, `deepseek-ai/DeepSeek-V4-PRo`, `deepseek-ai/DeepSeeK-V4-Pro`, `deepseek-ai/DeepSeEk-V4-Pro`, `deepseek-ai/DeepSEek-V4-Pro`, `deepseek-ai/DeePSeek-V4-Pro`
+**DSv4P (10):** `deepseek-ai/deepseek-v4-pro`, `...Deepseek-V4-Pro`, `...DeepSeek-v4-pro`, `...DeepSeek-v4-Pro`, `...DeepSeek-V4-PrO`, `...DeepSeek-V4-PRo`, `...DeepSeeK-V4-Pro`, `...DeepSeEk-V4-Pro`, `...DeepSEek-V4-Pro`, `...DeePSeek-V4-Pro`
 
 ## 关键原则（长期知识）
 
-- **删除资源前必须验证其独立价值** — 曾删除11个变体model ID以为是"不支持的混合大小写"，但每个变体有独立200/id/day额度。正确流程：观察→测试→验证→决定。R24删了dsv4p，R29恢复（因为需要独立后端模型）。
-- **proxy-level retry增加37%延迟** — 有proxy_retry的请求avg=15963ms vs 正常11635ms。proxy只做格式转换，retry由LiteLLM负责。
-- **proxy绝不做截断/压缩** — proxy-level auto-compact导致灾难性上下文丢失。压缩只由CC内置auto-compact控制。
-- **429→529 转换会导致CC崩溃** — 429=rate_limit(backoff retry)，529=overloaded(CC auto-compact→灾难性上下文丢失)。绝不转换。
-- **CC v2.1.170+ startup check用shell env vars** — CC启动时的connectivity check用shell环境变量（ANTHROPIC_BASE_URL等），不读settings.json。必须三层保障：.bashrc（在non-interactive return之前）+.profile+restart_claude.sh用bash --login。
-- **CC auto-compact质量远低于手动/compact** — 自动compact用stripNonEssential=true（截断tool输出，tools=[]），手动/compact用stripNonEssential=false（完整上下文）。CC提示compact时，主动/compact加自定义指令可获得更好的摘要。
-- **/health endpoint会触发fd耗尽** — LiteLLM的/health触发per-deployment checks→OSError Too many open files。用/health/liveliness监控LiteLLM。Proxy的/health是简单状态检查（只返回{"status":"ok"}+proxy_role），SAFE用于Docker healthcheck。
-- **CC tokenizer overestimates tokens ~1.7x** — 对中文+代码+JSON混合内容，Anthropic tokenizer估算值比ModelScope实际值高约1.7倍。autoCompactWindow必须考虑此偏差。
-- **ModelScope双 quota 系统** — RPM quota（200/id/day/variant）和 Token quota（per-key hourly/daily）是独立的。burst是暂时性的（15分钟自动恢复），不可通过配置修复。ModelScope对每种错误都扣quota，所以必须在proxy层做error cycling。
-- **多CC进程加速token quota耗尽** — R23修复：variant fallback(2个额外variant各1key) + retry-after=180s(3分钟) + kill多余CC进程
-- **ModuleNotFoundError → proxy崩溃 → CC ConnectionRefused卡死** — R27教训：修改import后必须确认被引用的.py文件存在于gateway目录中。
-- **proxy超时日志详细记录** — socket.timeout单独捕获，记录elapsed_ms、proxy_timeout_setting_ms、timeout_exceeded_by_ms。
-- **R29: dsv4p不支持thinking_budget** — passthrough proxy(40003)会自动strip reasoning_effort和thinking_budget参数，避免ModelScope 400 InvalidParameter错误。
+- **429 根因是 RPM burst throttle，不是 quota 耗尽**（R31.8/R31.9 核实）— 配额常剩 97% 但仍 429，因 ModelScope sliding-window token-bucket "这一秒打太快"。burst 自动恢复（~15min）。缓解靠 proxy throttle 2s 间隔，不可配置消除。
+- **429 是 HTTP 状态码逐跳透传**（非 body 字符串）。body 的 `"code":"429"` 字段不参与分类。
+- **variant/key 都不是瓶颈**（R31.9 对角线实验）— 41 次 ABORT 均匀分布 v1~v10。换 variant 无效，靠间隔。
+- **删除资源前必须验证其独立价值** — 曾删 11 个变体以为是"不支持的混合大小写"，实际每个有独立 200/id/day 额度。
+- **proxy 绝不做截断/压缩** — proxy-level auto-compact 导致灾难性上下文丢失。
+- **429→529 转换会致 CC 崩溃** — 529=overloaded 触发 CC auto-compact→上下文丢失。绝不转换。
+- **proxy 不做 retry** — proxy-level retry 增加 37% 延迟（15963ms vs 11635ms）。
+- **CC auto-compact 质量远低于手动 /compact** — 自动用 stripNonEssential=true（截断 tool 输出），手动更完整。
+- **CC tokenizer 高估 ~1.7x**（中文+代码+JSON 混合）— autoCompactWindow 需考虑此偏差。
+- **CC env 优先级**：settings.json 的 env 块 > webui 系统env > shell env。改链路必须改 settings.json。
+- **CC v2.1.170+ startup check 用 shell env**（不读 settings.json）— 需 .bashrc + .profile + restart 脚本 bash --login 三层保障。
+- **/health 触发 LiteLLM fd 耗尽** — 用 /health/liveliness 监控 LiteLLM；proxy 的 /health 安全。
+- **ModuleNotFoundError → proxy 崩溃 → CC ConnectionRefused 卡死**（R27）— 改 import 后确认 .py 存在。
+- **代码改了必须 rebuild 容器**（proxy 代码 COPY 进镜像非 mount）— `--build --force-recreate` 才生效。
+- **dsv4p 不支持 thinking_budget/reasoning_effort** — openai-proxy(40003) 自动 strip。
 
 ## 可调整参数（有数据支撑才能改）
 
-### Proxy / Docker-compose.yml env
+### Proxy env（docker-compose.yml）
 
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
-| CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | proxy用CPT估算tokens |
-| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120000-190000 | /v1/models报告的glm5.2 context_window |
-| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 128000 | 64000-128000 | /v1/models报告的dsv4p context_window |
-| MAX_TOOL_DESC | 2000 | 800-4000 | 工具描述截断上限chars |
-| MAX_SCHEMA_DESC | 600 | 300-1200 | Schema描述截断上限chars |
-| PROXY_TIMEOUT | 300 | 120-600 | proxy请求超时秒 |
-| PROXY_ROLE | cc/codex/passthrough | 固定 | 每个proxy容器固定role，不可动态切换 |
+| CHARS_PER_TOKEN_ESTIMATE | 3.0 | 1.5-6 | token 估算 |
+| MODEL_INPUT_TOKEN_SAFETY_GLM51 | 170000 | 120-190k | glm5.2 context_window |
+| MODEL_INPUT_TOKEN_SAFETY_DSV4P | 128000 | 64-128k | dsv4p context_window |
+| PROXY_TIMEOUT | 300 | 120-600 | proxy 请求超时秒 |
+| UPSTREAM_TIMEOUT | 60 | 30-120 | per-key HTTPConnection 超时 |
+| MIN_OUTBOUND_INTERVAL_S | 2.0 | 0-5 | **R31.9 出站节流秒数（burst 缓解核心）** |
+| NUM_VARIANTS_GLM51/DSV4P | 10 | 5-10 | 每 backend variant 数 |
 
-### CC settings (claude/settings-*.json)
-
-| 参数 | 当前值 | 范围 | 说明 |
-|------|--------|------|------|
-| contextWindow | 170000 | 120000-190000 | CC认知的上下文容量上限 |
-| autoCompactWindow | 155000 | 90000-180000 | CC自动compact触发阈值（est tokens） |
-| CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90000-180000 | env var，与autoCompactWindow对齐 |
-| API_TIMEOUT_MS | 600000 | 300000-1200000 | CC→proxy HTTP总超时 |
-
-### LiteLLM router_settings (41001 ms_uni41001, 140 dep = 70 glm5.2 + 70 dsv4p)
-
-| 参数 | 当前值 | 说明 |
-|------|--------|------|
-| num_retries | 0 | proxy处理所有error cycling，LiteLLM纯转发 |
-| cooldown_time | 10 | RPM 1-min窗口 |
-| routing_strategy | simple-shuffle | proxy精确指定model，LiteLLM只转发 |
-| RateLimitErrorAllowedFails | 0 | 429 cycling由proxy处理 |
-| TimeoutErrorAllowedFails | 0 | timeout cycling由proxy处理 |
-| InternalServerErrorAllowedFails | 0 | 500 cycling由proxy处理 |
-| AuthenticationErrorAllowedFails | 0 | |
-| BadRequestErrorAllowedFails | 0 | |
-
-### Proxy / Docker-compose.yml env (R21新增, R29扩展)
+### CC settings（claude/settings-*.json）
 
 | 参数 | 当前值 | 范围 | 说明 |
 |------|--------|------|------|
-| NUM_VARIANTS_GLM51 | 10 | 5-10 | glm5.2每个key group的variant数 |
-| NUM_VARIANTS_DSV4P | 10 | 5-10 | dsv4p每个key group的variant数 |
-| UPSTREAM_TIMEOUT | 60 | 30-120 | R27: Per-key HTTPConnection超时（秒） |
+| contextWindow | 170000 | 120-190k | CC 上下文容量上限 |
+| autoCompactWindow / CLAUDE_CODE_AUTO_COMPACT_WINDOW | 155000 | 90-180k | auto-compact 触发阈值 |
+| API_TIMEOUT_MS | 600000 | 300-1200k | CC→proxy HTTP 总超时 |
+
+### retry-after（proxy handlers.py，控制 CC 重试节奏）
+
+| 场景 | 值 | CC 行为 |
+|------|-----|---------|
+| transient 429（7key 全 429）| 5 | CC 等 5s 重试，多数 burst 透明恢复 |
+| quota 429（非 transient）| 180 | >60s → CC 直接放弃，报错给用户 |
+
+### LiteLLM router_settings（41001，140 dep）
+
+`num_retries=0` / `cooldown_time=10` / `routing_strategy=simple-shuffle` / 所有 `*AllowedFails=0`（proxy 处理全部 cycling，LiteLLM 纯转发）
 
 ## 项目文件结构
 
 ```
 configs/
-  docker-compose.yml       # Docker编排（5个容器：cc_postgres, ms_uni41001, auth_to_api_40001/40002/40003）
-  .env.template             # 环境变量模板
-  litellm-glm51/config.yaml       # 41001 LiteLLM配置（10v×7k glm5.2 = 70 dep + 10v×7k dsv4p = 70 dep = 140 dep total）
-  postgres/init-db.sh             # PostgreSQL初始化脚本
+  docker-compose.yml          # Docker 编排（cc_postgres, ms_uni41001, auth_to_api_40000/001/002/003/005）
+  .env.template
+  litellm-glm51/config.yaml   # 41001 LiteLLM（70 glm5.2 + 70 dsv4p = 140 dep）
+  postgres/init-db.sh
   proxy/
-    Dockerfile                    # 镜像构建
-    gateway_main.py               # 入口
-    gateway/                      # R23.1 模块化gateway包
-      __init__.py                 # 包导出
-      app.py                      # 入口（ThreadedHTTPServer + main + PROXY_ROLE log）
-      config.py                   # 配置 + AGENT_SUFFIXES + PROXY_ROLE + detect_agent_type() + dsv4p routing
-      handlers.py                 # 请求调度 + PROXY_ROLE endpoint过滤
-      upstream.py                 # 共享v×k cycling + variant fallback + error handling（R29: 无LiteLLM fallback）
-      converters.py               # Anthropic↔OpenAI格式转换 + 文本估算
-      stream.py                   # SSE流转换（Anthropic格式）
-      error_mapping.py            # 错误格式转换（Anthropic convert_error + OpenAI format_* + Responses format_*）
-      codex.py                    # R24: Responses API→Chat Completions 格式转换 + 流转换
-      logger.py                   # 日志（_log, _log_metrics, _log_error_detail）
+    dispatcher/               # 40000 路由（R31.7，按 model 字段 opus→40005 / sonnet→40001）
+    cc-proxy/                 # 40001+40005 共用（R31.5 物理拆分，仅 cc 代码）
+      Dockerfile + gateway/{app,config,handlers,upstream,converters,stream,error_mapping,logger}.py
+    codex-proxy/              # 40002（R31.6 拆分）
+    openai-proxy/             # 40003（R31.6 拆分）
   claude/
-    settings-opc_uname.json        # → opc_uname本机 ~/.claude/settings.json
-    settings-opc2_uname.json       # → opc2_uname远程 ~/.claude/settings.json
-    statusline-command-opc_uname.sh / statusline-command.sh
-  DEPLOY_STATUS.md                 # 当前部署状态
+    settings-opc_uname.json / settings-opc2_uname.json   # → 各机 ~/.claude/settings.json
+  DEPLOY_STATUS.md
 scripts/
-  backup_config.sh / deploy.sh / health_check.sh / restart_claude.sh / rollback.sh / sync_config.sh / ts_keepalive.sh
+  backup_config.sh / deploy.sh / health_check.sh / restart_claude.sh / rollback.sh / sync_config.sh / switch_cc_proxy.sh / ts_keepalive.sh / run_optimization_loop.sh
 ```
 
-## 关键文件路径（opc_uname 本机 / opc2_uname 远程）
+## 持久化自优化 loop（cron `*/30`）
 
-| 文件 | 路径 | 修改后需 |
-|------|------|----------|
+`scripts/run_optimization_loop.sh` 每 30 分钟由 cron 唤起一个 headless agent（`claude -p --dangerously-skip-permissions`），按 `memory/cron-optimization-loop.md` 流程执行一轮（读 `configs/NEXT_ROUND.md` 接力 → 采集日志/quota → 有数据才改 → 写回接力）。wrapper 自带：flock 单实例锁、25 分钟 KILL 超时、proxy 健康前置门、`git pull --rebase`。日志 `logs/optimization_loop.log`。手动触发：`bash scripts/run_optimization_loop.sh`。
+
+## 关键文件路径与重启
+
+| 文件 | 路径 | 修改后 |
+|------|------|--------|
 | LiteLLM 配置 | `/opt/cc-infra/litellm-glm51/config.yaml` | `docker restart ms_uni41001` |
-| 转换代理 | `/opt/cc-infra/proxy/gateway/` | rebuild + recreate ALL proxy容器 |
-| Docker Compose | `/opt/cc-infra/docker-compose.yml` | `docker compose up -d --force-recreate` |
-| 环境变量 | `/opt/cc-infra/.env` | recreate相关容器 |
-| Claude设置 | `~/.claude/settings.json` | 重启claude进程 |
-| Shell env vars | `.bashrc` + `.profile` + `/etc/environment` | 新终端生效 |
-
-## 重启命令
+| cc-proxy 代码 | `/opt/cc-infra/proxy/cc-proxy/gateway/` | `docker compose up -d --build --force-recreate auth_to_api_40005`（或 40001）|
+| dispatcher | `/opt/cc-infra/proxy/dispatcher/` | recreate `auth_to_api_40000` |
+| docker-compose.yml / .env | `/opt/cc-infra/` | recreate 相关容器 |
+| Claude settings | `~/.claude/settings.json` | 重启 claude 进程 |
 
 ```bash
-# LiteLLM 配置变更（ms_uni41001）
-docker restart ms_uni41001
-
-# proxy.py 变更（需要重建镜像，影响所有3个proxy容器）
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002 auth_to_api_40003
-
+# 仅重建 cc-proxy 40005（primary）
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005
 # 全量重建
 cd /opt/cc-infra && docker compose up -d --force-recreate
-
-# Claude Code 重启
-bash ~/cc_ps/cc_recover/restart_claude.sh
 ```
 
 ## 每轮优化协议
 
-1. **拉取** — `git pull`
-2. **分析** — 读metrics/error_detail日志
-3. **计划** — 必须说明WHY，附日志证据
-4. **备份** — `bash scripts/backup_config.sh`
-5. **执行** — 修改配置，重启受影响容器
-6. **测试** — curl验证glm5.2和dsv4p返回200
-7. **验证** — 读新metrics，对比前后
-8. **记录** — 更新DEPLOY_STATUS.md
-9. **Push** — 推送到GitHub
+1. **拉取** `git pull` → 2. **分析** 读 metrics/error_detail 日志（用数据核实，不看表象）→ 3. **计划** 说明 WHY + 日志证据 → 4. **备份** `bash scripts/backup_config.sh` → 5. **执行** 改配置 + rebuild 受影响容器 → 6. **测试** curl 验证 200 → 7. **验证** 读新 metrics 对比 → 8. **记录** DEPLOY_STATUS.md + memory → 9. **Push**
 
 ## 测试请求
 
 ```bash
-# Anthropic格式 — CC (_cc) via 40001
-curl -s -X POST http://127.0.0.1:40001/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: sk-litellm-local" \
-  -H "anthropic-version: 2023-06-01" \
+# CC (_cc) via 40005 (primary) — 当前链路
+curl -s -X POST http://127.0.0.1:40005/v1/messages \
+  -H "x-api-key: sk-litellm-local" -H "anthropic-version: 2023-06-01" \
   -d '{"model":"glm5.2","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# Responses API — Codex (_cx) via 40002
+# Codex (_cx) via 40002
 curl -s -X POST http://127.0.0.1:40002/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-litellm-local" \
-  -d '{"model":"glm5.2_cx","input":"test"}'
+  -H "Authorization: Bearer sk-litellm-local" -d '{"model":"glm5.2_cx","input":"test"}'
 
-# OpenAI格式 — OpenClaw/OpenCode/Hermes (_ol/_oc/_hm) via 40003
+# OpenAI agents via 40003
 curl -s -X POST http://127.0.0.1:40003/v1/chat/completions \
-  -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-litellm-local" \
   -d '{"model":"dsv4p_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
 
-# OpenAI格式 — backward compat (glm5.2_ol still routes to dsv4p)
-curl -s -X POST http://127.0.0.1:40003/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-litellm-local" \
-  -d '{"model":"glm5.2_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
-
-# Verify role isolation — 40001 should reject /v1/chat/completions
-curl -s -X POST http://127.0.0.1:40001/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-litellm-local" \
-  -d '{"model":"test","messages":[{"role":"user","content":"test"}],"max_tokens":50}'
-# Expected: 404 "CC proxy only serves /v1/messages"
+# role isolation — 40005/40001 should reject /v1/chat/completions (404)
 ```
 
 ## 网络代理（opc_uname 本机如需）
 
 ```bash
-systemctl --user start mihomo-sg.service
-# SSH已配置~/.ssh/config自动通过443端口+代理
-git push  # 自动走代理
+systemctl --user start mihomo-sg.service   # SSH/git push 自动走代理
 ```
