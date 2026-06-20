@@ -1,166 +1,146 @@
-# Deploy Status — opc_uname + opc2_uname (R35, 2026-06-21)
+# Deploy Status — opc_uname + opc2_uname (R35.2, 2026-06-21)
 
-## Architecture (R35 — dispatcher + blue-green CC proxy + self-optimization)
+## Architecture (R35.2 — dispatcher + blue-green CC proxy + pure MS mode)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (model-based routing + connection-failure auto-fallback)
-      ├── opus/未知 → :40005 proxy (EXPERIMENT, NV-enabled, MS-NV interleaving)
-      │   └── [40005 连接失败 → 自动 fallback 到 40001]
-      └── sonnet    → :40001 proxy (STABLE, pure MS)
-      │   └── [40001 连接失败 → 自动 fallback 到 40005]
-      → _cc /v1/messages → Anthropic→OpenAI 转换 → MS-NV interleaving
-:40002          codex-proxy    → _cx /v1/responses     → Responses→Chat 转换 → MS glm5.1 v×k cycling
-:40003          openai-proxy   → _ol/_oc/_hm chat/completions → OpenAI passthrough → dsv4p v×k cycling
+      ├── opus/未知 → :40005 proxy (EXPERIMENT, pure MS, interval=1.5s)
+      │   [40005 连接失败 → 自动 fallback 到 40001]
+      └── sonnet    → :40001 proxy (STABLE/MIRROR, pure MS, interval=1.5s)
+      │   [40001 连接失败 → 自动 fallback 到 40005]
+
+:40001/40005  cc-proxy → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled R35.2)
+:40002        codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
+:40003        openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS+NV interleaving
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep + dsv4pv1k1~v10k7 = 70 dep = 140 dep) → ModelScope
-→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (z-ai/glm-5.1, deepseek-ai/deepseek-v4-pro)
+→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (deepseek-v4-pro; glm-5.1 unavailable)
 ```
 
-## R35: Self-Optimization Framework (Blue-Green + Data-Driven)
+## R35.2: Blue-Green Mirror (Both Pure MS)
 
-### Design
+### Why NV was disabled (R35.1→R35.2 evolution)
+- R35.1 initial: NV_NUM_KEYS=2 on 40005, NV_NUM_KEYS=5 on 40001
+- NV glm-5.1 API consistently timing out (20s timeout still fails)
+- NV fallthrough wastes ~40s per request (2 keys × 20s timeout)
+- NV success rate on glm-5.1: only 15% pre-R35.1, 53% post-timeout-fix (but still unreliable)
+- Deepseek-v4-pro works on NV API, but glm-5.1 does not
+- R35.1 conclusion: disable NV for 40005 (NV_NUM_KEYS=0)
+- R35.2: sync 40001 to match (NV_NUM_KEYS=0, MIN_OUTBOUND_INTERVAL_S=1.5) for lossless fallback
+
+### R35.2 Changes
+- **40001**: NV_NUM_KEYS 5→0, MIN_OUTBOUND_INTERVAL_S 2.0→1.5, NV_KEY3-5 removed
+- **40005**: unchanged (already NV_NUM_KEYS=0, interval=1.5 from R35.1)
+- Both containers identical config — fallback is truly lossless
+
+### R35.2 Data (MIN_OUTBOUND_INTERVAL_S=1.5 validated on 40005)
+| Metric | interval=2.0s | interval=1.5s | Change |
+|--------|---------------|---------------|--------|
+| avg TTFB | 10.0s | 5.0s | 2x faster |
+| 429 cycling rate | 49% | 30% | -19% |
+| success rate | 100% | 100% | stable |
+| ABORT count | 0 | 0 | stable |
+| pure MS TTFB (no cycling) | 4.0s | 3.5s | 12% faster |
+| empty output | 0% | 0% | stable |
+
+### Self-Optimization Framework (R35)
 - **40005 (PRIMARY)**: Experiment container — new params/code deploy here first
-- **40001 (FALLBACK)**: Stable baseline — only upgraded after data proves 40005 improvement
-- **Dispatcher auto-fallback**: If model-chosen upstream connection fails, dispatcher automatically tries the other
-- **Version promotion**: When 40005 score > 40001 + 5 for 2+ hours → sync params to 40001
-- **Rollback**: When 40005 score < 40001 - 10 → revert 40005 to 40001 baseline
+- **40001 (MIRROR)**: Identical config — fallback is lossless
+- **Dispatcher auto-fallback**: Connection failure → try other upstream
+- **Version promotion**: When 40005 improvement validated → sync to 40001
+- **Rollback**: When 40005 regresses → revert to baseline
 
-### Key Differences Between 40005 and 40001
-| Aspect | 40005 (Experiment) | 40001 (Stable) |
+### Key Differences Between 40005 and 40001 (R35.2: NONE)
+| Aspect | 40005 (Experiment) | 40001 (Mirror) |
 |--------|---------------------|-----------------|
-| Build context | `./proxy/cc-proxy` | `./proxy/cc-proxy` (R35: unified) |
-| NV interleaving | Enabled (NV_NUM_KEYS=5) | Disabled (NV_NUM_KEYS=0) |
-| Logs dir | `./logs/proxy40005/` | `./logs/proxy40001/` (R35: isolated) |
-| Role | Experiment — new params first | Baseline — only validated changes |
+| Build context | `./proxy/cc-proxy` | `./proxy/cc-proxy` (identical) |
+| NV_NUM_KEYS | 0 | 0 (R35.2: synced) |
+| MIN_OUTBOUND_INTERVAL_S | 1.5 | 1.5 (R35.2: synced) |
+| NV_TIMEOUT | 20 | 20 |
+| Logs dir | `./logs/proxy40005/` | `./logs/proxy40001/` (isolated) |
 | rr_counter.json | Isolated in proxy40005 | Isolated in proxy40001 |
 
 ### Optimization Loop Tools (R35)
-- `scripts/compare_proxies.sh`: Compare 40001 vs 40005 metrics (429 rate, TTFB, NV usage)
+- `scripts/compare_proxies.sh`: Compare 40001 vs 40005 metrics (429 rate, TTFB)
 - `scripts/proxy_health_score.py`: Compute health scores, write PROXY_HEALTH_SCORES.md
 - `scripts/auto_tune.sh`: Apply TUNE_RULES.md parameter adjustments (bounded, safe)
 - `configs/TUNE_RULES.md`: Parameter adjustment rules with safety bounds
 - `configs/NEXT_ROUND.md`: Optimization round relay file
 - `memory/cron-optimization-loop.md`: Detailed optimization loop procedure
 
-## R33.2: cc-proxy Direct NV API + MS-NV Interleaving + Dedicated US Proxy
+## R33.2: cc-proxy Direct NV API (still active on 40003)
 
-### Why NV LiteLLM containers failed (R33.1)
-- LiteLLM v1.87 uses aiohttp transport → ignores HTTPS_PROXY env vars
-- `litellm_params.proxy` → 400 "Unsupported parameter(s)"
-- Prisma DB migration via HTTP_PROXY → postgres connection through proxy → hang
-- **Conclusion**: LiteLLM cannot route per-deployment proxy. Abandoned NV LiteLLM approach entirely.
-
-### R33.2 Architecture
-- **cc-proxy (40005) directly calls NV API** via HTTPS CONNECT tunnel (`http.client.HTTPSConnection.set_tunnel()`)
-- **NV_PROXY_URL=http://host.docker.internal:7894** → mihomo ♻️US-NV url-test group (5 best US nodes, auto-select fastest)
-- **NV calls ONLY use proxy** (no global HTTPS_PROXY → MS traffic unaffected)
-- **MS calls stay on Docker cc-net** (no proxy needed, LiteLLM on same Docker network)
-
-### MS-NV Interleaving (12-slot round-robin)
-- 7 MS keys + 5 NV keys = 12 total slots
-- Slot < 7 → MS (variant×key cycling via LiteLLM → ModelScope)
-- Slot ≥ 7 → NV (nv_key_idx cycling via HTTPS CONNECT tunnel → NVIDIA API)
-- MS all-429 → NV fallback; NV all-fail → MS fallback
-- `_next_variant_key_pair()` returns 4-tuple: `(variant_idx, key_idx, upstream_type, nv_key_idx)`
-- NV has NO RPM limit → 5 NV keys for cycling resilience only
-
-### NV API Performance (tested via US proxy)
-- **glm5.1 via US proxy**: 2-5s (vs 35+ seconds direct from China)
-- **dsv4p via US proxy**: 2-3s
-- **Best US nodes**: 圣何塞01(1.48s), 美国01(3.23s), 圣何塞02(3.55s), 洛杉矶08(4.19s), 美国03(4.89s)
-- **NV API burst sensitivity**: consecutive requests slow down (need ~2-3s interval)
+### NV API Status (R35.2 verification)
+- **glm-5.1 on NV**: UNAVAILABLE (20s curl timeout, NV_TIMEOUT=20s still fails)
+- **deepseek-v4-pro on NV**: AVAILABLE (2-3s latency, works reliably)
+- **40003 (openai-proxy)**: Still NV-enabled (NV_NUM_KEYS=5), uses dsv4p on NV
+- **40001/40005 (cc-proxy)**: NV disabled (NV_NUM_KEYS=0), pure MS only
 
 ### NV API Unsupported Parameters
-- **thinking_budget**: returns 400 "Unsupported parameter(s)" → cc-proxy strips for NV calls
-- **reasoning_effort**: supported but slow (>60s timeout needed) → also stripped
+- **thinking_budget**: returns 400 → proxy strips for NV calls
+- **reasoning_effort**: stripped for NV calls
 - **stream_options, thinking**: stripped for NV calls
 
 ### mihomo Configuration (opc_uname)
-- Port 7894: ♻️US-NV url-test group (5 best US nodes, interval=60s, tolerance=100ms)
-- Port 7880: mixed port (general use, auto-select all nodes)
+- Port 7894: ♻️US-NV url-test group (5 best US nodes, interval=60s)
+- Port 7880: mixed port (general use)
 - Port 7891: 🇸🇬狮城节点, 7892: 🇯🇵日本节点, 7893: ♻️US自动
-- Provider: nv-us-provider (filter "美国|圣何塞|阿什本|洛杉矶", 32 nodes)
-- Provider URL: https://dash.pqjc.site/api/v1/pq/ad4978e7f9844ad86d770a863f61ad4b
 
-## Containers (R35)
+## Containers (R35.2)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | Unified LiteLLM | 70 glm5.1 + 70 dsv4p = 140 dep |
-| cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (litellm_glm51 DB only) |
-| auth_to_api_40000 | :40000 | Dispatcher + Auto-Fallback | Routes opus→40005, sonnet→40001, auto-fallback on connection failure |
-| auth_to_api_40001 | :40001 | Proxy (cc, STABLE baseline) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), ./proxy/cc-proxy build |
-| auth_to_api_40002 | :40002 | Proxy (codex) | PROXY_ROLE=codex, /v1/responses only |
-| auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, /v1/chat/completions only, NV-enabled |
-| auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, NV-enabled, MS-NV interleaving, ./proxy/cc-proxy build |
+| cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine |
+| auth_to_api_40000 | :40000 | Dispatcher + Auto-Fallback | Routes opus→40005, sonnet→40001 |
+| auth_to_api_40001 | :40001 | Proxy (cc, MIRROR) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), interval=1.5s |
+| auth_to_api_40002 | :40002 | Proxy (codex) | PROXY_ROLE=codex |
+| auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, NV-enabled |
+| auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), interval=1.5s |
 
-## Deploy Method (R35+)
+## Deploy Method (R35.2)
 ```bash
-# cc-proxy 40005 rebuild (experiment — new code/params first)
+# cc-proxy 40005 rebuild (experiment)
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005
 
-# cc-proxy 40001 rebuild (stable — only after data validation)
+# cc-proxy 40001 rebuild (mirror — synced config)
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
 
-# dispatcher rebuild (auto-fallback logic)
+# dispatcher rebuild
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000
 
 # All proxy rebuild (full)
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
-
-# Optimization tools
-bash scripts/compare_proxies.sh              # Compare 40001 vs 40005
-python3 scripts/proxy_health_score.py        # Compute health scores
-bash scripts/auto_tune.sh --dry-run          # Preview parameter adjustments
-bash scripts/auto_tune.sh --suggest          # Write suggestions to NEXT_ROUND.md
-
-# mihomo config change → reload via API
-curl -X PUT http://127.0.0.1:9090/configs -H "Authorization: Bearer set-your-secret" \
-  -H "Content-Type: application/json" -d '{"path":"/home/opc_uname/.config/mihomo/config.yaml"}'
-systemctl --user restart mihomo.service
 ```
 
-## R35 Verification (2026-06-21)
-- 7 containers all healthy (pending deployment)
-- Dispatcher auto-fallback: connection failure → try other upstream ✅
-- 40001 unified build context (./proxy/cc-proxy) ✅
-- 40001 pure MS (NV_NUM_KEYS=0) ✅
-- 40005 NV-enabled (NV_NUM_KEYS=5, MS-NV interleaving) ✅
-- Isolated logs: proxy40001 + proxy40005 ✅
-- Self-optimization tools: compare_proxies.sh, proxy_health_score.py, auto_tune.sh ✅
-- NV API via 7894 (US proxy): glm5.1 200 OK, 2-5s latency ✅
-- MS via LiteLLM: glm5.1 200 OK ✅
-- MS-NV interleaving: slot=ms/slot=nv alternating in logs ✅
-- thinking_budget stripped for NV calls ✅
-- CC Anthropic format: 200 OK with thinking+text blocks ✅
+## Current Parameters (R35.2)
 
-## Current Parameters (R33.2)
-
-| Parameter | Value | File | Notes |
-|-----------|-------|------|-------|
+| Parameter | Value | Container | Notes |
+|-----------|-------|-----------|-------|
 | contextWindow | 170000 | settings.json | CC max context tracking |
-| autoCompactWindow | 155000 | settings.json | CC auto-compact trigger threshold |
-| NV_BASEURL | https://integrate.api.nvidia.com/v1 | docker-compose.yml | NVIDIA API endpoint |
-| NV_NUM_KEYS | 5 | docker-compose.yml | 5 NVIDIA API keys |
-| NV_PROXY_URL | http://host.docker.internal:7894 | docker-compose.yml | Dedicated US proxy port for NV |
-| MS_NV_TOTAL_SLOTS | 12 | config.py | 7 MS + 5 NV slots for interleaving |
-| UPSTREAM_TIMEOUT | 60 | docker-compose.yml | Per-key HTTPConnection timeout |
-| MIN_OUTBOUND_INTERVAL_S | 2.0 | docker-compose.yml | Burst throttle interval |
+| autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
+| NV_NUM_KEYS | 0 | 40001/40005 | R35.2: pure MS (NV disabled) |
+| NV_NUM_KEYS | 5 | 40003 | NV still enabled for passthrough |
+| NV_TIMEOUT | 20 | 40001/40005/40003 | R35.1: NV-specific timeout |
+| MIN_OUTBOUND_INTERVAL_S | 1.5 | 40001/40005 | R35.2: validated (429 rate 30%) |
+| MIN_OUTBOUND_INTERVAL_S | 2.0 | 40003 | unchanged |
+| UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
+| NV_PROXY_URL | host.docker.internal:7894 | 40001/40003/40005 | Dedicated US proxy port |
 
-## NVIDIA API Keys (R33.2)
-| Key | ID | Purpose |
-|-----|-----|---------|
-| NV_KEY1 | nv_key1_8257 | NV interleaving slot 8, 13, etc. |
-| NV_KEY2 | nv_key2_2387 | NV interleaving slot 9, 14, etc. |
-| NV_KEY3 | nv_key3_qq | NV interleaving slot 10, etc. |
-| NV_KEY4 | nv_key4_jh | NV interleaving slot 11, etc. |
-| NV_KEY5 | nv_key5_qm | NV interleaving slot 12, etc. |
-
-NV model IDs: `z-ai/glm-5.1` (CC/Codex) | `deepseek-ai/deepseek-v4-pro` (OpenAI agents, if enabled)
+## NVIDIA API Keys (still configured for 40003)
+| Key | ID | Status |
+|-----|-----|--------|
+| NV_KEY1 | nvk1 | Available (dsv4p works, glm-5.1 fails) |
+| NV_KEY2 | nvk2 | Available (dsv4p works, glm-5.1 fails) |
+| NV_KEY3-5 | nvk3-5 | Only on 40003 |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
-- R31: dual CC proxy (40005 primary + 40001 fallback) + dispatcher
+- R31: dual CC proxy + dispatcher
 - R31.4-31.9: context budget, proxy split, 429 truth, throttle
 - R32: glm5.2→5.1 full repo revert
-- R33.1: NV LiteLLM containers (failed — proxy incompatibility)
-- R33.2: cc-proxy direct NV API + MS-NV interleaving + dedicated US proxy ✅
+- R33.1: NV LiteLLM containers (failed)
+- R33.2: cc-proxy direct NV API + MS-NV interleaving + dedicated US proxy
+- R34/R34.1: passthrough-proxy NV direct API tunnel
+- R35: dispatcher auto-fallback + blue-green self-optimization framework
+- R35.1: NV_NUM_KEYS=0 on 40005 (NV disabled), host.docker.internal DNS fix, NV_TIMEOUT=20s
+- R35.2: 40001 synced to 40005 (NV_NUM_KEYS=0, MIN_OUTBOUND_INTERVAL_S=1.5), blue-green mirror

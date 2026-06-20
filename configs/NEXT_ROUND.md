@@ -1,31 +1,42 @@
 # Round R35.2 — 2026-06-21
 
-## ⏱ 数据时间节点
-- ANALYZED_UNTIL: 2026-06-21T03:30  # Round 4 从此之后截取
+## R35.2 Round 2 数据分析总结
 
-## Round 3 改动（R35.2）
-1. **MIN_OUTBOUND_INTERVAL_S: 2.0→1.5** (40005 only, 40001 stays 2.0)
-   - 数据支撑: 0 ABORT, 73% zero cycling, avg TTFB 4.9s (vs 8.5s with 2.0)
-   - 10 burst requests: all 200, TTFB 1.2-2.4s, avg cycling 0.25
-   - 预期吞吐提升约25%（0.5s/request saved）
-   - Risk: more burst 429 — 未观察到，但需持续监控
+### 数据验证结果 (03:20-03:30 CST, MIN_OUTBOUND_INTERVAL_S=1.5生效后)
+- 76个请求，100%成功率，0 ABORT
+- avg TTFB 5.0s（2.0s间隔下10.0s，改善2倍）
+- 429 cycling率 30%（2.0s间隔下49%，下降19%）
+- 92%请求<10s，0%>30s
+- 纯MS无cycling TTFB 3.5s
 
-## 累计优化效果（R35.1 + R35.2）
+### R35.2 Round 2 变更
+1. **40001同步40005配置**: NV_NUM_KEYS 5→0, MIN_OUTBOUND_INTERVAL_S 2.0→1.5
+   - 蓝绿容器现在完全一致，fallback完全无损
+   - 40001之前作为fallback时有NV超时拖慢(avg TTFB 38s→94s for NV-involved)
 
-| 指标 | 原始值(NV=5, throttle=2.0) | R35.1(NV=0) | R35.2(throttle=1.5) | 总改善 |
-|------|---------------------------|-------------|---------------------|--------|
-| NV-involved TTFB | 165s | 0 (纯MS) | 0 | ∞ |
-| MS-only TTFB | 8.8s | 3.1s | 4.9s* | -44% |
-| Zero cycling rate | 53% | 57% | 73% | +38% |
-| 429 rate | 0 | 0 | 0 | 稳定 |
+2. **NV_KEY3-5移除**: 40001只保留NV_KEY1-2（与40005一致）
 
-*MS TTFB波动与ModelScope时段有关，非参数改变导致
+### 不做的变更及原因
+- **MIN_OUTBOUND_INTERVAL_S 1.5→1.0**: 429 cycling率仍有30%，更紧间隔风险高
+- **UPSTREAM_TIMEOUT 60→30**: MS最长14.3s(LiteLLM duration)，30s安全但收益有限（NV有独立NV_TIMEOUT=20s）
+- **NV_TIMEOUT 20→15**: NV成功max=17s有2个>15s(1%)，当前NV已禁用无收益
 
-## Round 4 待办
-- 持续监控 1.5s interval 稳定性（30min+）
-- 如果1.5s稳定，考虑进一步降到1.0s（更高吞吐，更高风险）
-- 或者关注其他优化：output_tokens=0 空响应、choice:null
-- 检查40001(NV=5, throttle=2.0) 作为 baseline 对比
+## 累计优化效果
 
-## 参数现状（40005）
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=7 | transient-retry-after=10
+| 指标 | 原始(NV=5, throttle=2.0) | R35.1(NV=0, throttle=2.0) | R35.2(throttle=1.5, 40001 synced) |
+|------|--------------------------|---------------------------|-----------------------------------|
+| avg TTFB | ~60s(NV拖慢) | 10.0s | 5.0s |
+| 429 cycling率 | N/A | 49% | 30% |
+| success rate | 100% | 100% | 100% |
+| empty output | 12.1% | 0% | 0% |
+| fallback quality | NV拖慢38-94s | 40001仍有NV | 无损(纯MS mirror) |
+
+## Round 3 待办
+- 持续监控1.5s interval稳定性（已验证76请求/30分钟）
+- 如果1.5s持续稳定>2h，可考虑1.0s（429率需降到<20%）
+- 关注NV glm-5.1 API恢复情况（如果恢复可重新启用NV interleaving）
+- 关注MS quota消耗趋势（ms_requests_remaining跟踪）
+- proxy代码优化：cycling内throttle可考虑降低（当前全局共享throttle，cycling内也等1.5s）
+
+## 参数现状 (40001=40005 mirror)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS)
