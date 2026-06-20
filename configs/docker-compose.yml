@@ -137,16 +137,17 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
-      MIN_OUTBOUND_INTERVAL_S: "2.0"
-      # ── R35: 40001 = full mirror of 40005 (NV-enabled, identical capability) ──
-      NV_NUM_KEYS: "5"
+      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      # ── R35.2: 40001 = 40005 mirror — both pure MS (NV_NUM_KEYS=0, interval=1.5s) ──
+      # NV glm-5.1 API unavailable (20s timeout). NV fallthrough wastes ~40s/request.
+      # Both containers pure MS ensures lossless fallback (no NV delay).
+      # MIN_OUTBOUND_INTERVAL_S=1.5 validated on 40005: 429 rate 30% (down from 49% at 2.0s),
+      # avg TTFB 5.0s (down from 10.0s), 100% success rate, 0 ABORTs.
+      NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
-      NV_KEY3: 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
-      NV_KEY4: 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
-      NV_KEY5: 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
       NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
@@ -214,12 +215,12 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
-      MIN_OUTBOUND_INTERVAL_S: "2.0"
-      # ── R35.1: 40005 = EXPERIMENT — pure MS mode (NV_NUM_KEYS=0, NV disabled) ──
-      # NV API completely unavailable (60s no response, 8.7% success, 55.8% timeout).
-      # NV_FALLTHROUGH→MS wastes ~40s per NV-involved request (2 keys × 20s timeout).
-      # Pure MS avg TTFB=6.4s vs NV-involved avg=40.9s — disabling NV saves 34.5s/request.
-      # 40001 stays NV_NUM_KEYS=5 as baseline for blue-green comparison.
+      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      # ── R35.2: 40005 EXPERIMENT — MIN_OUTBOUND_INTERVAL_S reduced 2.0→1.5 ──
+      # R35.1: pure MS mode (NV_NUM_KEYS=0, NV disabled). NV API unavailable, NV_FALLTHROUGH wastes 40s/request.
+      # R35.2: After ~5h stable pure MS operation: 0 ABORT, avg TTFB 8.5s, 62% 0-cycle success, very low 429 rate.
+      # Data supports reducing interval from 2.0→1.5 (25% throughput gain). Risk: more burst 429s.
+      # Monitoring: if ANY 429 increase appears, rollback to 2.0 immediately.
       NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
