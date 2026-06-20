@@ -67,20 +67,6 @@ SYNC_MAP=(
     "configs/proxy/passthrough-proxy/gateway/logger.py:proxy/passthrough-proxy/gateway/logger.py"
     "configs/proxy/passthrough-proxy/gateway/codex.py:proxy/passthrough-proxy/gateway/codex.py"
 
-    # Shared legacy gateway (still used by 40001 fallback)
-    "configs/proxy/gateway/__init__.py:proxy/gateway/__init__.py"
-    "configs/proxy/gateway/app.py:proxy/gateway/app.py"
-    "configs/proxy/gateway/config.py:proxy/gateway/config.py"
-    "configs/proxy/gateway/handlers.py:proxy/gateway/handlers.py"
-    "configs/proxy/gateway/upstream.py:proxy/gateway/upstream.py"
-    "configs/proxy/gateway/converters.py:proxy/gateway/converters.py"
-    "configs/proxy/gateway/stream.py:proxy/gateway/stream.py"
-    "configs/proxy/gateway/error_mapping.py:proxy/gateway/error_mapping.py"
-    "configs/proxy/gateway/logger.py:proxy/gateway/logger.py"
-    "configs/proxy/gateway/codex.py:proxy/gateway/codex.py"
-    "configs/proxy/Dockerfile:proxy/Dockerfile"
-    "configs/proxy/gateway_main.py:proxy/gateway_main.py"
-
     # Postgres
     "configs/postgres/init-db.sh:postgres/init-db.sh"
 )
@@ -150,7 +136,6 @@ fi
 echo ""
 echo "=== Sync complete ==="
 echo "Next steps:"
-echo "  1. cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40005 auth_to_api_40002 auth_to_api_40003"
-echo "  2. docker compose up -d --force-recreate auth_to_api_40001  # 40001 uses shared ./proxy"
-echo "  3. docker restart ms_uni41001  # LiteLLM config (volume-mounted)"
-echo "  4. curl test (see CLAUDE.md)  # Verify all endpoints return 200"
+echo "  1. cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40005 auth_to_api_40002 auth_to_api_40003"
+echo "  2. docker restart ms_uni41001  # LiteLLM config (volume-mounted)"
+echo "  3. curl test (see CLAUDE.md)  # Verify all endpoints return 200"

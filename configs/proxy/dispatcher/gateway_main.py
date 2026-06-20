@@ -1,43 +1,76 @@
-# R31.7: CC model→endpoint dispatcher.
-# CC selects model via /model (claude-opus-4-8 ↔ claude-sonnet-4-6); both go to the
-# same ANTHROPIC_BASE_URL. This dispatcher listens ONE port and routes by request
-# body model field, so /model switching = upstream switching, no CC restart needed.
+# R35: CC dispatcher — pure auto-fallback relay.
 #
-# Routing:
-#   claude-sonnet-*  → 40001 (fallback)
-#   everything else → 40005 (primary, incl opus + unknown + glm5.1_*)
+# CC sends ONE model (claude-opus-4-8 or glm5.1_cc) to ONE base URL (:40000).
+# This dispatcher always tries the PRIMARY (40005) first; on connection failure,
+# automatically falls through to the FALLBACK (40001). CC never knows which
+# backend actually served — zero-configuration, zero manual switching.
 #
-# Pure HTTP relay: no parsing/truncation/format conversion. Uses http.client for
-# raw chunked streaming (urllib blocks on SSE responses with no Content-Length).
+# No model-based routing. No parsing. Pure byte-level relay with one fallback rule.
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
-PRIMARY = os.environ.get("DISPATCH_PRIMARY", "http://127.0.0.1:40005")
-FALLBACK = os.environ.get("DISPATCH_FALLBACK", "http://127.0.0.1:40001")
+PRIMARY = os.environ.get("DISPATCH_PRIMARY", "http://auth_to_api_40005:40005")
+FALLBACK = os.environ.get("DISPATCH_FALLBACK", "http://auth_to_api_40001:40001")
 PORT = int(os.environ.get("LISTEN_PORT", "40000"))
 CONNECT_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "60"))
 
-SONNET_MODELS = {"claude-sonnet-4-6", "claude-sonnet-4-5", "claude-3-7-sonnet"}
-
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
        "te", "trailers", "transfer-encoding", "upgrade", "host",
-       "accept-encoding"}  # keep content-length so the relay can signal body end to the client
+       "accept-encoding"}  # keep content-length so the relay can signal body end
 
 
-def pick_upstream(model: str) -> str:
-    m = (model or "").strip()
-    if m in SONNET_MODELS or "sonnet" in m:
-        return FALLBACK
-    return PRIMARY
-
-
-def parse(url: str):
+def parse(url):
     p = urlsplit(url)
     return p.hostname, p.port or 80
+
+
+def _try_relay(self, upstream_url, role_label, body):
+    """Try to relay request to one upstream.
+    Returns True on success (response fully streamed to client),
+    False on connection failure (no data sent to client, try other upstream).
+    """
+    host, port = parse(upstream_url)
+    conn = HTTPConnection(host, port, timeout=CONNECT_TIMEOUT)
+    try:
+        conn.request(self.command, self.path, body=body, headers=self._hdrs())
+        resp = conn.getresponse()
+    except Exception as e:
+        err_class = type(e).__name__
+        sys.stderr.write(f"[DISPATCH] {role_label}({upstream_url}) connect failed: "
+                         f"{err_class}: {e}\n")
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return False
+
+    # Stream response to client
+    self.send_response(resp.status)
+    for k, v in resp.getheaders():
+        if k.lower() in HOP:
+            continue
+        self.send_header(k, v)
+    self.close_connection = True
+    self.send_header("Connection", "close")
+    self.end_headers()
+
+    try:
+        while not resp.closed:
+            chunk = resp.read(8192)
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+            self.wfile.flush()
+    except Exception as e:
+        sys.stderr.write(f"[DISPATCH] stream relay ended: {e}\n")
+    finally:
+        conn.close()
+    return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,60 +78,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _relay(self):
         body = getattr(self, "_body", b"") or b""
-        model = ""
-        if body:
-            try:
-                obj = json.loads(body)
-                if isinstance(obj, dict):
-                    model = obj.get("model", "") or ""
-            except Exception:
-                pass
 
-        upstream = pick_upstream(model)
-        host, port = parse(upstream)
-
-        conn = HTTPConnection(host, port, timeout=CONNECT_TIMEOUT)
-        try:
-            conn.request(self.command, self.path, body=body, headers=self._hdrs())
-            resp = conn.getresponse()
-        except Exception as e:
-            sys.stderr.write(f"[DISPATCH] upstream connect failed: {upstream} model={model} err={e}\n")
-            self._send_err(502, f"dispatcher: upstream {upstream} unavailable")
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return
-
-        self.send_response(resp.status)
-        for k, v in resp.getheaders():
-            if k.lower() in HOP:
-                continue
-            self.send_header(k, v)
-        # Force close on this connection so the client (CC) can always detect body end,
-        # whether upstream used Content-Length, chunked, or plain close-delimited body.
-        self.close_connection = True
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-        # Stream raw chunks straight through the socket.
-        try:
-            while not resp.closed:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
-        except Exception as e:
-            sys.stderr.write(f"[DISPATCH] stream relay ended: {e}\n")
-        finally:
-            conn.close()
+        # Always try primary first; on failure → fallback
+        success = _try_relay(self, PRIMARY, "primary", body)
+        if not success:
+            sys.stderr.write(f"[DISPATCH] primary failed → auto-fallback to {FALLBACK}\n")
+            success_fb = _try_relay(self, FALLBACK, "fallback", body)
+            if not success_fb:
+                sys.stderr.write(f"[DISPATCH] BOTH upstreams failed\n")
+                self._send_err(502, "dispatcher: both upstreams unavailable")
 
     def _hdrs(self):
         out = {}
         for k, v in self.headers.items():
-            kl = k.lower()
-            if kl in HOP:
+            if k.lower() in HOP:
                 continue
             out[k] = v
         body_len = len(getattr(self, "_body", b"") or b"")
@@ -117,8 +110,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            payload = b'{"status":"ok","role":"dispatcher","primary":"' + PRIMARY.encode() + \
-                      b'","fallback":"' + FALLBACK.encode() + b'"}'
+            payload = json.dumps({
+                "status": "ok",
+                "role": "dispatcher",
+                "primary": PRIMARY,
+                "fallback": FALLBACK,
+                "model": "claude-opus-4-8",
+                "auto_fallback": "enabled",
+            }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -134,12 +133,14 @@ class Handler(BaseHTTPRequestHandler):
         self._relay()
 
     def log_message(self, fmt, *args):
-        sys.stderr.write(f"[DISPATCH] {self.address_string()} {fmt % args}\n")
+        pass  # Suppress default — we log via stderr above
 
 
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    sys.stderr.write(f"[DISPATCH] listening :{PORT} primary={PRIMARY} fallback={FALLBACK}\n")
+    sys.stderr.write(f"[DISPATCH] listening :{PORT} "
+                     f"primary={PRIMARY} fallback={FALLBACK} "
+                     f"auto_fallback=enabled model=claude-opus-4-8\n")
     server.serve_forever()
 
 

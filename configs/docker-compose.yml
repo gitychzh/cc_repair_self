@@ -106,13 +106,14 @@ services:
       - --port
       - "4000"
 
-  # ─── 40001: FALLBACK CC proxy (Anthropic format → glm5.1 v×k) ───
-  # R31: 40001 = manual fallback (sonnet). Keep config STABLE — never modify params here.
-  # Only used when 40005 (primary) has a proxy-level crash. See 40005 notes for caveat
-  # (shared glm5.1 quota means switching here does NOT help with all-429 quota exhaustion).
+  # ─── 40001: FALLBACK CC proxy — identical config to 40005 (R35) ───
+  # R35: 40001 is a full mirror of 40005 (same code, same NV interleaving).
+  #   Dispatcher auto-fallback sends traffic here when 40005 connection fails.
+  #   Both containers serve identical capability — fallback is lossless.
+  #   rr_counter.json isolated in ./logs/proxy40001 (independent from 40005).
   auth_to_api_40001:
     build:
-      context: ./proxy
+      context: ./proxy/cc-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40001
     restart: unless-stopped
@@ -134,10 +135,20 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
+      MIN_OUTBOUND_INTERVAL_S: "2.0"
+      # ── R35: 40001 = full mirror of 40005 (NV-enabled, identical capability) ──
+      NV_NUM_KEYS: "5"
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      NV_KEY1: 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
+      NV_KEY2: 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
+      NV_KEY3: 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
+      NV_KEY4: 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
+      NV_KEY5: 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
+      NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
-      - ./logs/proxy:/app/logs
+      - ./logs/proxy40001:/app/logs
       - /etc/localtime:/etc/localtime:ro
     ports:
       - 40001:40001
@@ -163,19 +174,17 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k, shares 41001) ───
-  # R31: 40005 = default CC endpoint (opus), 40001 = manual fallback (sonnet).
+  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k, MS-NV interleaving) ───
+  # R31: 40005 = default CC endpoint (opus), 40001 = fallback (sonnet).
   # R31.5: builds from ./proxy/cc-proxy (physically isolated cc-role code).
-  #   The shared ./proxy gateway (codex/passthrough/codex logic) is no longer
-  #   in 40005's image — a cc-proxy change cannot affect 40002/40003, and vice versa.
+  # R35: 40005 is the EXPERIMENT container — new params/code deploy here first,
+  #   40001 stays as STABLE baseline. compare_proxies.sh + auto_tune.sh drive the iteration.
   # Both share 41001 LiteLLM + same glm5.1 variants + same MS_KEY → quota is shared
   # per model-id+key, NOT per proxy port. So:
-  #   - 40005 PROXY crash / bad params / counter corruption → switch to 40001 (works, different container)
-  #   - glm5.1 quota exhausted (all 429) → 40001 will ALSO be all-429 (shared quota, switch useless)
-  # Manual failover: change ANTHROPIC_BASE_URL from :40005 to :40001 in
-  # ~/.claude/settings.json + .bashrc + .profile, then restart CC.
-  # rr_counter.json isolated in ./logs/proxy40005 (R30.1 persistence, independent from 40001).
-  # health_check.sh reports 40005 status but does NOT put it in ALL_OK (manual failover only).
+  #   - 40005 PROXY crash / bad params → dispatcher auto-fallback to 40001 (R35)
+  #   - glm5.1 quota exhausted (all 429) → 40001 will ALSO be all-429 (shared quota)
+  # rr_counter.json isolated in ./logs/proxy40005 (R30.1, independent from 40001).
+  # When 40005 experiments succeed → sync validated params to 40001 (version promotion).
   auth_to_api_40005:
     build:
       context: ./proxy/cc-proxy
@@ -190,7 +199,6 @@ services:
       LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40005"
-      # ── CC proxy params (kept identical to 40001 — 40005 is now primary, not an experiment lab) ──
       PROXY_TIMEOUT: "300"
       UPSTREAM_TIMEOUT: "60"
       MAX_TOOL_DESC: "2000"
@@ -201,7 +209,17 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
-      # ── end experiment params ──
+      MIN_OUTBOUND_INTERVAL_S: "2.0"
+      # ── R35: 40005 = EXPERIMENT container (NV-enabled, MS-NV interleaving) ──
+      # New params/code deploy here first. After validation → promote to 40001.
+      NV_NUM_KEYS: "5"
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      NV_KEY1: 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
+      NV_KEY2: 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
+      NV_KEY3: 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
+      NV_KEY4: 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
+      NV_KEY5: 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
+      NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:

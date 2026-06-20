@@ -25,7 +25,7 @@ from .config import (
     PROXY_TIMEOUT, UPSTREAM_TIMEOUT, MODEL_MAP, DEFAULT_MODEL,
     MODEL_UPSTREAMS, MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
     CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS, NV_ENABLED,
-    detect_agent_type, format_model_id,
+    detect_agent_type,
     PROXY_ROLE,
 )
 from .logger import _log, _log_metrics, _log_error_detail
@@ -313,62 +313,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
 
     # ─── Anthropic-format /v1/models endpoints ───
+    # R35: Only expose ONE model (claude-opus-4-8) to CC. No manual model switching.
+    # CC always sends claude-opus-4-8 → dispatcher auto-fallback handles routing.
+    # MODEL_MAP still accepts any model name in requests (backward compat),
+    # but /v1/models listing only shows the single canonical model.
+    CC_FRONTEND_MODEL = "claude-opus-4-8"
+
     def _anthropic_models_list(self):
-        """Return Anthropic-format model list with context_window."""
-        all_models = []
-        seen_ids = set()
-
-        # Include _cc suffix model IDs for each base model
-        for base_model in MODEL_UPSTREAMS:
-            model_id = format_model_id(base_model, "_cc")
-            if model_id not in seen_ids:
-                seen_ids.add(model_id)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(base_model, DEFAULT_CONTEXT_FALLBACK)
-                all_models.append({
-                    "id": model_id,
-                    "type": "model",
-                    "display_name": base_model,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "context_window": safety,
-                })
-
-        # Include ALL model IDs from MODEL_MAP (backward compat)
-        for model_id, mapped in MODEL_MAP.items():
-            if model_id not in seen_ids:
-                seen_ids.add(model_id)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, DEFAULT_CONTEXT_FALLBACK)
-                display = format_model_id(mapped, "_cc") if not model_id.endswith("_cc") else model_id
-                all_models.append({
-                    "id": model_id,
-                    "type": "model",
-                    "display_name": display,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "context_window": safety,
-                })
-
-        # Include base model names if not covered
-        for model_key in MODEL_UPSTREAMS:
-            if model_key not in seen_ids:
-                seen_ids.add(model_key)
-                safety = MODEL_INPUT_TOKEN_SAFETY.get(model_key, DEFAULT_CONTEXT_FALLBACK)
-                all_models.append({
-                    "id": model_key,
-                    "type": "model",
-                    "display_name": model_key,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "context_window": safety,
-                })
-
-        self._send_json(200, {"data": all_models, "has_more": False})
+        """Return Anthropic-format model list — only claude-opus-4-8 (R35)."""
+        mapped = MODEL_MAP.get(self.CC_FRONTEND_MODEL, DEFAULT_MODEL)
+        safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, DEFAULT_CONTEXT_FALLBACK)
+        self._send_json(200, {
+            "data": [{
+                "id": self.CC_FRONTEND_MODEL,
+                "type": "model",
+                "display_name": "Claude Opus 4",
+                "created_at": "2024-01-01T00:00:00Z",
+                "context_window": safety,
+            }],
+            "has_more": False,
+        })
 
     def _anthropic_model_detail(self, model_id):
-        """Return Anthropic-format model detail for a specific model ID."""
+        """Return Anthropic-format model detail — maps any ID to the same underlying model."""
         mapped = MODEL_MAP.get(model_id, DEFAULT_MODEL)
         safety = MODEL_INPUT_TOKEN_SAFETY.get(mapped, DEFAULT_CONTEXT_FALLBACK)
         self._send_json(200, {
             "id": model_id,
             "type": "model",
-            "display_name": mapped,
+            "display_name": "Claude Opus 4",
             "created_at": "2024-01-01T00:00:00Z",
             "context_window": safety,
         })

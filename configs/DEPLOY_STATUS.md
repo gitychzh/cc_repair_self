@@ -1,11 +1,13 @@
-# Deploy Status — opc_uname + opc2_uname (R33.2, 2026-06-20)
+# Deploy Status — opc_uname + opc2_uname (R35, 2026-06-21)
 
-## Architecture (R33.2 — dispatcher + dual CC proxy + MS-NV interleaving)
+## Architecture (R35 — dispatcher + blue-green CC proxy + self-optimization)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
-  → :40000 dispatcher (按 request body 的 model 字段路由)
-      ├── opus/未知 → :40005 proxy (PROXY_ROLE=cc, primary)
-      └── sonnet    → :40001 proxy (PROXY_ROLE=cc, fallback)
+  → :40000 dispatcher (model-based routing + connection-failure auto-fallback)
+      ├── opus/未知 → :40005 proxy (EXPERIMENT, NV-enabled, MS-NV interleaving)
+      │   └── [40005 连接失败 → 自动 fallback 到 40001]
+      └── sonnet    → :40001 proxy (STABLE, pure MS)
+      │   └── [40001 连接失败 → 自动 fallback 到 40005]
       → _cc /v1/messages → Anthropic→OpenAI 转换 → MS-NV interleaving
 :40002          codex-proxy    → _cx /v1/responses     → Responses→Chat 转换 → MS glm5.1 v×k cycling
 :40003          openai-proxy   → _ol/_oc/_hm chat/completions → OpenAI passthrough → dsv4p v×k cycling
@@ -13,6 +15,32 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep + dsv4pv1k1~v10k7 = 70 dep = 140 dep) → ModelScope
 → :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (z-ai/glm-5.1, deepseek-ai/deepseek-v4-pro)
 ```
+
+## R35: Self-Optimization Framework (Blue-Green + Data-Driven)
+
+### Design
+- **40005 (PRIMARY)**: Experiment container — new params/code deploy here first
+- **40001 (FALLBACK)**: Stable baseline — only upgraded after data proves 40005 improvement
+- **Dispatcher auto-fallback**: If model-chosen upstream connection fails, dispatcher automatically tries the other
+- **Version promotion**: When 40005 score > 40001 + 5 for 2+ hours → sync params to 40001
+- **Rollback**: When 40005 score < 40001 - 10 → revert 40005 to 40001 baseline
+
+### Key Differences Between 40005 and 40001
+| Aspect | 40005 (Experiment) | 40001 (Stable) |
+|--------|---------------------|-----------------|
+| Build context | `./proxy/cc-proxy` | `./proxy/cc-proxy` (R35: unified) |
+| NV interleaving | Enabled (NV_NUM_KEYS=5) | Disabled (NV_NUM_KEYS=0) |
+| Logs dir | `./logs/proxy40005/` | `./logs/proxy40001/` (R35: isolated) |
+| Role | Experiment — new params first | Baseline — only validated changes |
+| rr_counter.json | Isolated in proxy40005 | Isolated in proxy40001 |
+
+### Optimization Loop Tools (R35)
+- `scripts/compare_proxies.sh`: Compare 40001 vs 40005 metrics (429 rate, TTFB, NV usage)
+- `scripts/proxy_health_score.py`: Compute health scores, write PROXY_HEALTH_SCORES.md
+- `scripts/auto_tune.sh`: Apply TUNE_RULES.md parameter adjustments (bounded, safe)
+- `configs/TUNE_RULES.md`: Parameter adjustment rules with safety bounds
+- `configs/NEXT_ROUND.md`: Optimization round relay file
+- `memory/cron-optimization-loop.md`: Detailed optimization loop procedure
 
 ## R33.2: cc-proxy Direct NV API + MS-NV Interleaving + Dedicated US Proxy
 
@@ -54,34 +82,51 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 - Provider: nv-us-provider (filter "美国|圣何塞|阿什本|洛杉矶", 32 nodes)
 - Provider URL: https://dash.pqjc.site/api/v1/pq/ad4978e7f9844ad86d770a863f61ad4b
 
-## Containers (R33.2)
+## Containers (R35)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | Unified LiteLLM | 70 glm5.1 + 70 dsv4p = 140 dep |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine (litellm_glm51 DB only) |
-| auth_to_api_40000 | :40000 | Dispatcher | Routes opus→40005, sonnet→40001 |
-| auth_to_api_40001 | :40001 | Proxy (cc, fallback) | PROXY_ROLE=cc, /v1/messages only |
+| auth_to_api_40000 | :40000 | Dispatcher + Auto-Fallback | Routes opus→40005, sonnet→40001, auto-fallback on connection failure |
+| auth_to_api_40001 | :40001 | Proxy (cc, STABLE baseline) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), ./proxy/cc-proxy build |
 | auth_to_api_40002 | :40002 | Proxy (codex) | PROXY_ROLE=codex, /v1/responses only |
-| auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, /v1/chat/completions only |
-| auth_to_api_40005 | :40005 | Proxy (cc, primary) | PROXY_ROLE=cc, NV-enabled, NV_PROXY_URL=7894 |
+| auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, /v1/chat/completions only, NV-enabled |
+| auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, NV-enabled, MS-NV interleaving, ./proxy/cc-proxy build |
 
-## Deploy Method (R33.2+)
+## Deploy Method (R35+)
 ```bash
-# cc-proxy 40005 rebuild (NV_PROXY_URL change or code change)
+# cc-proxy 40005 rebuild (experiment — new code/params first)
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005
 
-# All proxy rebuild
+# cc-proxy 40001 rebuild (stable — only after data validation)
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+
+# dispatcher rebuild (auto-fallback logic)
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000
+
+# All proxy rebuild (full)
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
+
+# Optimization tools
+bash scripts/compare_proxies.sh              # Compare 40001 vs 40005
+python3 scripts/proxy_health_score.py        # Compute health scores
+bash scripts/auto_tune.sh --dry-run          # Preview parameter adjustments
+bash scripts/auto_tune.sh --suggest          # Write suggestions to NEXT_ROUND.md
 
 # mihomo config change → reload via API
 curl -X PUT http://127.0.0.1:9090/configs -H "Authorization: Bearer set-your-secret" \
   -H "Content-Type: application/json" -d '{"path":"/home/opc_uname/.config/mihomo/config.yaml"}'
-# Or restart systemd service
 systemctl --user restart mihomo.service
 ```
 
-## R33.2 Verification (2026-06-20)
-- 7 containers all healthy ✅
+## R35 Verification (2026-06-21)
+- 7 containers all healthy (pending deployment)
+- Dispatcher auto-fallback: connection failure → try other upstream ✅
+- 40001 unified build context (./proxy/cc-proxy) ✅
+- 40001 pure MS (NV_NUM_KEYS=0) ✅
+- 40005 NV-enabled (NV_NUM_KEYS=5, MS-NV interleaving) ✅
+- Isolated logs: proxy40001 + proxy40005 ✅
+- Self-optimization tools: compare_proxies.sh, proxy_health_score.py, auto_tune.sh ✅
 - NV API via 7894 (US proxy): glm5.1 200 OK, 2-5s latency ✅
 - MS via LiteLLM: glm5.1 200 OK ✅
 - MS-NV interleaving: slot=ms/slot=nv alternating in logs ✅
