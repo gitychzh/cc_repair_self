@@ -35,6 +35,7 @@ from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     NV_BASEURL, NV_NUM_KEYS, NV_KEYS, NV_PROXY_URL, NV_ENABLED, NV_MODEL_IDS,
+    NV_TIMEOUT,
     MS_NV_TOTAL_SLOTS,
     _next_variant_key_pair,
     throttle_outbound, MIN_OUTBOUND_INTERVAL_S,
@@ -81,7 +82,7 @@ class UpstreamResult:
         self.final_resp_status = 0  # last upstream HTTP status
 
 
-def _make_nv_conn(nv_baseurl, nv_proxy_url=None, timeout=UPSTREAM_TIMEOUT):
+def _make_nv_conn(nv_baseurl, nv_proxy_url=None, timeout=NV_TIMEOUT):
     """Create HTTPConnection for NVIDIA API call, optionally through HTTPS proxy.
 
     NVIDIA API (integrate.api.nvidia.com) requires US proxy from China.
@@ -274,7 +275,7 @@ def _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
         nv_data = json.dumps(nv_body).encode("utf-8")
 
         try:
-            conn, path_prefix = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, UPSTREAM_TIMEOUT)
+            conn, path_prefix = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, NV_TIMEOUT)
             # NVIDIA API path: /v1/chat/completions
             nv_path = path_prefix.rstrip("/") + "/chat/completions"
             throttle_outbound()
@@ -313,7 +314,7 @@ def _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
                     headers_retry = dict(headers_out)
                     headers_retry["Content-Length"] = str(len(nv_data_retry))
                     try:
-                        conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, UPSTREAM_TIMEOUT)
+                        conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, NV_TIMEOUT)
                         throttle_outbound()
                         conn2.request("POST", nv_path, body=nv_data_retry, headers=headers_retry)
                         resp2 = conn2.getresponse()

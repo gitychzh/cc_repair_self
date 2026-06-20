@@ -1,28 +1,29 @@
-# Round 272 — 2026-06-19 (基线轮)
+# Round R35.1 — 2026-06-21
 
-## ⏱ 数据时间节点（防重复分析）
-- ANALYZED_UNTIL: 2026-06-18T18:51:13Z   # 下轮从此之后截取，之前已分析
-- 下轮命令: `docker logs auth_to_api_40005 --since "2026-06-18T18:51:13Z" -t 2>&1`
+## ⏱ 数据时间节点
+- ANALYZED_UNTIL: 2026-06-21T02:55:39  # Round 2 从此之后截取
+- 下轮命令: `tail -N /opt/cc-infra/logs/proxy40005/proxy.2026-06-21.log`（N=最新行数）
 
-## 本轮基线数据（窗口 06-15T00:11:00Z → 06-18T18:51:13Z，约4天）
-- [REQ] 总请求: 66 | 成功(KEY-CYCLE-SUCCESS): 19 | 成功率 ~29%
-- ABORT-NO-FALLBACK(7key全429): 14 | ALL-KEYS-TRANSIENT: 14 | KEY-CYCLE: 171
-- 502/500/timeout: 0 | variant-fallback: 0 | LiteLLM-fallback: 0
-- rr_counter(glm5.1): 575（自重启处理~97 req）
-- 14次ABORT集中在 18:16-18:42 burst窗口；burst恢复后(18:40+)仍有零散成功
+## Round 1 改动（R35.1）
+1. **NV_NUM_KEYS: 5→2** (40005 only, 40001 stays 5 for baseline)
+   - MS_NV_TOTAL_SLOTS: 12→9 (7MS+2NV=78%MS+22%NV vs 旧 7+5=58%MS+42%NV)
+   - 数据支撑: NV成功率8.7%, 超时55.8%, NV-involved TTFB 165s vs MS 8.8s
+2. **host.docker.internal DNS fix** (extra_hosts for 40001/40005/40003)
+   - Linux Docker 不解析 host.docker.internal → NV 调用全 gaierror
+   - 修复后 NV_FALLTHROUGH→MS 从 ~5s（之前165s）
+   - NV API 当前完全不可用（60s无响应），但 gaierror 快速失败
 
-## 关键发现（本轮新）
-1. **transient ABORT retry-after=10，与CLAUDE.md参数表(=5)不一致** — 历史回归(R31.5拆分引入)。但10比5对burst更保守(CC等更久重试)，保留不改
-2. burst非"所有key同时429"，而是"个别variant的7key陆续429" → KEY-CYCLE-SUCCESS是主要恢复路径(19/66成功都靠它)
-3. burst窗口~15min，retry-after=10s让CC在窗口内重试~多次，形成14连击ABORT
+## 部署后实测
+- MS-only TTFB: 1.3-1.6s (正常)
+- NV FALLTHROUGH→MS: 5.4-5.8s (从165s降到~5s，33倍改善)
+- 无 dispatcher fallback
+- rr_counter 959→1029（测试期间70次请求）
 
-## 本轮改动
-- 无改动（burst是ModelScope RPM固有限制；throttle=2.0s已生效；retry-after方向需更多数据）
+## Round 2 待办
+- 收集更多生产数据验证 R35.1 效果
+- 考虑 MIN_OUTBOUND_INTERVAL_S 2.0→1.5（增加吞吐量）
+- 如果 NV 持续不可用 → 考虑 NV_NUM_KEYS=0（纯MS模式）
+- 对比 40001(NV=5) vs 40005(NV=2) 的 metrics
 
-## 下轮待办（实验设计）
-- 对比实验：若仍高频ABORT，可试 MIN_OUTBOUND_INTERVAL_S 2.0→2.5（更稀疏出站，可能降burst期429，但牺牲QPS；需测净收益）
-- 或 retry-after 10→15（让CC重试更晚，给burst更多恢复）— 注意>60s CC会放弃报错
-- **每轮必做**：`bash scripts/check_quota_balance.sh` 查 7 key 剩余额度（spread ≤ 5 = 循环正确，> 5 = 深挖代码）
-
-## 参数现状
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | COMPACT=155000 | THROTTLE=2.0s | transient-ABORT-retry-after=10
+## 参数现状（40005）
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=2.0s | NV_NUM_KEYS=2 | MS_NV_TOTAL_SLOTS=9 | transient-retry-after=10

@@ -89,6 +89,7 @@ for i in range(1, NV_NUM_KEYS + 1):
     if key:
         NV_KEYS.append(key)
 NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # HTTPS proxy for NVIDIA API
+NV_TIMEOUT = int(os.environ.get("NV_TIMEOUT", "20"))  # R35.1: NV-specific timeout (default 20s, vs UPSTREAM_TIMEOUT=60s)
 NV_ENABLED = bool(NV_BASEURL and NV_KEYS)  # Auto-detect: enabled if keys+URL present
 
 # NV model IDs on NVIDIA API

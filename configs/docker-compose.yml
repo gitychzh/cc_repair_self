@@ -140,6 +140,7 @@ services:
       MIN_OUTBOUND_INTERVAL_S: "2.0"
       # ── R35: 40001 = full mirror of 40005 (NV-enabled, identical capability) ──
       NV_NUM_KEYS: "5"
+      NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
@@ -214,11 +215,13 @@ services:
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "2.0"
-      # ── R35.1: 40005 = EXPERIMENT (NV_NUM_KEYS=2, 7MS+2NV=9slots=78%MS+22%NV) ──
-      # Data: NV success rate 8.7%, timeout 55.8%, NV-involved TTFB 165s vs MS 8.8s.
-      # 2 NV keys sufficient for burst fallback, reducing wasted time on NV timeouts.
-      # 40001 stays NV_NUM_KEYS=5 as baseline for comparison.
-      NV_NUM_KEYS: "2"
+      # ── R35.1: 40005 = EXPERIMENT — pure MS mode (NV_NUM_KEYS=0, NV disabled) ──
+      # NV API completely unavailable (60s no response, 8.7% success, 55.8% timeout).
+      # NV_FALLTHROUGH→MS wastes ~40s per NV-involved request (2 keys × 20s timeout).
+      # Pure MS avg TTFB=6.4s vs NV-involved avg=40.9s — disabling NV saves 34.5s/request.
+      # 40001 stays NV_NUM_KEYS=5 as baseline for blue-green comparison.
+      NV_NUM_KEYS: "0"
+      NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
@@ -387,6 +390,7 @@ services:
       MIN_OUTBOUND_INTERVAL_S: "2.0"
       # ── R34.1: NV (NVIDIA) direct API tunnel — same as cc-proxy R33.2 ──
       NV_NUM_KEYS: "5"
+      NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
