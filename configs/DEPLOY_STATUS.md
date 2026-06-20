@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.2, 2026-06-21)
+# Deploy Status — opc_uname + opc2_uname (R35.4, 2026-06-21)
 
-## Architecture (R35.2 — dispatcher + blue-green CC proxy + pure MS mode)
+## Architecture (R35.4 — dispatcher + blue-green CC proxy + pure MS mode + log rotation)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (model-based routing + connection-failure auto-fallback)
@@ -50,13 +50,14 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 - **Version promotion**: When 40005 improvement validated → sync to 40001
 - **Rollback**: When 40005 regresses → revert to baseline
 
-### Key Differences Between 40005 and 40001 (R35.2: NONE)
+### Key Differences Between 40005 and 40001 (R35.4: NONE)
 | Aspect | 40005 (Experiment) | 40001 (Mirror) |
 |--------|---------------------|-----------------|
 | Build context | `./proxy/cc-proxy` | `./proxy/cc-proxy` (identical) |
 | NV_NUM_KEYS | 0 | 0 (R35.2: synced) |
 | MIN_OUTBOUND_INTERVAL_S | 1.5 | 1.5 (R35.2: synced) |
 | NV_TIMEOUT | 20 | 20 |
+| LOG_RETENTION_DAYS | 7 | 7 (R35.4: new) |
 | Logs dir | `./logs/proxy40005/` | `./logs/proxy40001/` (isolated) |
 | rr_counter.json | Isolated in proxy40005 | Isolated in proxy40001 |
 
@@ -112,7 +113,7 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
 ```
 
-## Current Parameters (R35.2)
+## Current Parameters (R35.4)
 
 | Parameter | Value | Container | Notes |
 |-----------|-------|-----------|-------|
@@ -123,6 +124,7 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 | NV_TIMEOUT | 20 | 40001/40005/40003 | R35.1: NV-specific timeout |
 | MIN_OUTBOUND_INTERVAL_S | 1.5 | 40001/40005 | R35.2: validated (429 rate 30%) |
 | MIN_OUTBOUND_INTERVAL_S | 2.0 | 40003 | unchanged |
+| LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
 | NV_PROXY_URL | host.docker.internal:7894 | 40001/40003/40005 | Dedicated US proxy port |
 
@@ -144,3 +146,5 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 - R35: dispatcher auto-fallback + blue-green self-optimization framework
 - R35.1: NV_NUM_KEYS=0 on 40005 (NV disabled), host.docker.internal DNS fix, NV_TIMEOUT=20s
 - R35.2: 40001 synced to 40005 (NV_NUM_KEYS=0, MIN_OUTBOUND_INTERVAL_S=1.5), blue-green mirror
+- R35.3: (Round 3 data collection, no parameter changes)
+- R35.4: Log rotation (logger.py startup cleanup, LOG_RETENTION_DAYS=7 env), stale log dirs removed

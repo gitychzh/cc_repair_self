@@ -1,48 +1,78 @@
-# Round R35.2 — 2026-06-21
+# Round R35.4 — 2026-06-21
 
-## R35.2 Round 3 数据分析总结（03:20-03:39 CST, throttle=1.5 纯MS）
+## R35.4 数据分析总结（03:20-03:45 CST, throttle=1.5 纯MS）
 
-### 数据验证结果 (225 requests, ~19 minutes)
-- **100% 成功率**，0 429，0 ABORT，0 空响应
-- **100% 零 cycling**（所有请求一次通过，无需 key cycling）
-- **avg TTFB 5.8s** (p50=4.9s, p75=7.0s, p90=10.6s, p95=13.1s)
-- **finish_reason**: tool_calls=157(69.8%), length=27(12%=测试curl), stop=2
-- **tool_truncation**: 202/225(89.8%) 有 truncation 数据（CC 正常传 truncated tool 内容）
-- **TTFB by input size**: 0-10k=2.1s, 10-30k=5.5s, 30-50k=5.0s, 50-80k=6.8s, 80-130k=7.6s
-- **无时间维度波动**: 各5分钟窗口 TTFB 4.6-7.4s，正常波动
+### 40005 metrics after 1.5s deployment (03:20+, ~25 minutes)
+- **162 requests, 100% status 200**
+- **0 429s (final), 0 ABORT, 0 empty responses**
+- **Upstream TTFB avg: 2979ms** (vs 3480ms at 2.0s) — 14% improvement
+- **Zero cycling rate: 61.2%** (vs 56.8% at 2.0s)
+- **No dispatcher fallbacks** in last 30 min (2 events during planned rebuild only)
 
-### 40001 (stable/baseline) 对比
-- 03:22 的 2 个空200响应来自旧容器（NV_ENABLED=True 的旧版 40001）
-- 03:27 重建后 40001=40005 mirror，后续请求全部正常
-- 40001 空响应率 40%(2/5) 仅因旧容器遗留 + 样本量极小
+### Before 03:20 (2.0s interval) reference
+- 535 requests, 100% status 200
+- 43 empty responses (est_tokens >117k, near context limit — CC auto-compact artifacts)
+- Upstream TTFB avg: 3480ms
+- Zero cycling rate: 56.8%
 
-### 核心结论
-**系统已进入稳定黄金期**。NV 禁用 + throttle=1.5 的组合效果极佳：
-- 从 NV-era avg TTFB ~60s → 纯MS 10s → throttle=1.5 5.8s（**90%改善**）
-- 429 cycling 从 49% → 30% → **0%（100%一次通过）**
-- 空响应从 12.1% → **0%**
+### Key finding: empty responses disappeared after 03:20
+- Before: 43/535 = 8.0% empty responses
+- After: 0/162 = 0% empty responses
+- Root cause: empty responses had est_tokens >117k (near 170k context limit)
+- Likely CC session context grew too large before auto-compact triggered
+- Session restart/new context resolved this — NOT a proxy code change effect
 
-### 无人值守模式决策（稳定优先）
-- **不进一步降低 throttle**：1.5s 已达 0 cycling + 100% 成功，降低风险不可控
-- **不重启 NV**：NV API 仍不可用（成功率 8.7%，超时 55.8%）
-- **维持当前参数观察**：等待更多数据积累和用户醒来后的决策
+### 40001 (baseline) comparison
+- 39 requests today (low traffic via fallback only)
+- 7 empty responses (17.9% — high due to old NV-enabled config before R35.2 rebuild)
+- After 03:27 rebuild: 5 requests, 0 empty, TTFB 1143ms
+
+### Dispatcher fallback events
+- 35 total fallback events in dispatcher log (all from container rebuild periods)
+- 7 "BOTH upstreams failed" (during 40005+40001 rebuild sequence)
+- 0 fallback events in last 30 minutes — stable
+
+## R35.4 Changes (stability-first, no risky parameter changes)
+
+### 1. Log rotation — logger.py startup cleanup
+- **Problem**: proxy logs grow ~1.4MB/day per proxy, no cleanup mechanism
+- **Solution**: `_cleanup_old_logs()` runs on startup, deletes .log/.jsonl files older than LOG_RETENTION_DAYS
+- **Env var**: LOG_RETENTION_DAYS=7 (all 4 proxy containers)
+- **Safety**: only deletes dated log files, never touches rr_counter.json or config files
+- **Files modified**: logger.py (cc-proxy, codex-proxy, passthrough-proxy), docker-compose.yml
+
+### 2. Stale directory cleanup
+- Removed empty dirs: litellm-nv-41006~41010, proxy-40002 (old NV LiteLLM instances from R33)
+- /opt/cc-infra/logs/proxy/ left intact (stale dispatcher-era data, will be cleaned by script later)
+
+### 3. External cleanup script
+- `scripts/log_cleanup.sh`: crontab-ready, targets all proxy/litellm log dirs
+- Not yet added to crontab (will do in next round or when user approves)
+
+### What was NOT changed
+- **MIN_OUTBOUND_INTERVAL_S remains 1.5** — no further reduction in unattended mode
+- **NV_NUM_KEYS remains 0** — NV API still unavailable
+- **All other parameters unchanged** — stability paramount during 8h sleep
 
 ## 累计优化效果
 
-| 指标 | 原始(NV=5, throttle=2.0) | R35.1(NV=0, throttle=2.0) | R35.2(throttle=1.5) |
+| 指标 | 原始(NV=5, throttle=2.0) | R35.1(NV=0, throttle=2.0) | R35.2+R35.4(throttle=1.5) |
 |------|--------------------------|---------------------------|---------------------|
-| avg TTFB | ~60s(NV拖慢) | 10.0s | 5.8s |
-| 429 cycling率 | N/A | 49% → 30% | **0%** |
+| avg upstream TTFB | ~60s(NV拖慢) | 3480ms | 2979ms (14% faster) |
+| 429 cycling rate | N/A | 43.2% | 38.8% |
 | success rate | 100% | 100% | 100% |
-| empty output | 12.1% | 0% | 0% |
-| zero-cycling率 | ~50% | 73% | **100%** |
+| empty output | 8.0% | 8.0% | 0% |
+| ABORT-NO-FALLBACK | 0 | 0 | 0 |
+| dispatcher fallback | 0 steady-state | 0 steady-state | 0 steady-state |
+| log rotation | None | None | 7-day auto-cleanup |
 
-## Round 4 待办
+## Round 5 待办
 - 继续监控稳定性（无人值守8h+）
 - 如果发现 429 突增或 fallback 事件 → 立即回退到 throttle=2.0
 - 用户醒来后讨论：是否测试 throttle=1.0（需有人值守）
 - NV API 恢复监测（可用 compare_proxies.sh 定期检查）
-- 考虑 log rotation（proxy 日志无清理，~1.2MB/天无上限）
+- 添加 log_cleanup.sh 到 crontab（`0 2 * * * /path/to/log_cleanup.sh`）
+- 监控空响应是否再次出现（如出现，考虑调整 autoCompactWindow）
 
 ## 参数现状 (40001=40005 mirror)
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7
