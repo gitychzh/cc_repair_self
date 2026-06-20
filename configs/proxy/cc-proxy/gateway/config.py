@@ -8,7 +8,9 @@ container names, port assignments) are documented in CLAUDE.md.
 R21: Added NUM_VARIANTS, VARIANT_IDS, v×k 2D round-robin support.
 R23: Added AGENT_SUFFIXES, agent type detection, suffix-based model IDs.
 R29: Added PROXY_ROLE, dsv4p backend routing, removed LiteLLM fallback.
-Proxy precisely specifies variant+key combo → LiteLLM just forwards.
+R33.2: Added NV (NVIDIA) upstream — cc-proxy directly calls NVIDIA API via US proxy.
+  NV has no RPM limit, no variants — simpler than MS.
+  MS-NV interleaving: 12 slots (7 MS keys + 5 NV keys) in round-robin.
 """
 import os
 import sys
@@ -76,6 +78,35 @@ MODEL_UPSTREAMS = {
     },
 }
 DEFAULT_UPSTREAM_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
+
+# ─── NVIDIA (NV) upstream configuration (R33.2) ──────────────────────────────
+# cc-proxy calls NVIDIA API directly via US proxy (HTTPS_PROXY env).
+# NV has no RPM limit, no variants — simpler upstream than MS.
+# Only enabled for glm5.1 backend (CC proxy, port 40005).
+NV_BASEURL = os.environ.get("NV_BASEURL", "")
+NV_NUM_KEYS = int(os.environ.get("NV_NUM_KEYS", "0"))
+NV_KEYS = []
+for i in range(1, NV_NUM_KEYS + 1):
+    key = os.environ.get(f"NV_KEY{i}", "")
+    if key:
+        NV_KEYS.append(key)
+NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # HTTPS proxy for NVIDIA API
+NV_ENABLED = bool(NV_BASEURL and NV_KEYS)  # Auto-detect: enabled if keys+URL present
+
+# NV model IDs on NVIDIA API
+NV_MODEL_IDS = {
+    "glm5.1": "z-ai/glm-5.1",
+    "dsv4p": "deepseek-ai/deepseek-v4-pro",
+}
+
+# ─── MS-NV interleaving (R33.2) ──────────────────────────────────────────────
+# Total slots = NUM_KEYS (MS) + NV_NUM_KEYS (NV) per glm5.1 round.
+# Interleaving pattern: msk1→nvk1→msk2→nvk2→msk3→nvk3→msk4→nvk4→msk5→nvk5→msk6→nvk1→msk7→nvk2→...
+# slot_idx N → (N % total_slots) → if < NUM_KEYS: MS key slot, else NV key slot
+# For MS slot: variant_idx=(N//total_slots)%NUM_VARIANTS, key_idx=slot_idx
+# For NV slot: nv_key_idx = (slot_idx - NUM_KEYS) % NV_NUM_KEYS
+# This interleaving only applies when NV_ENABLED=True and base_model="glm5.1".
+MS_NV_TOTAL_SLOTS = NUM_KEYS + NV_NUM_KEYS if NV_ENABLED else NUM_KEYS
 
 # ─── Agent type suffixes (R23, R29 update) ────────────────────────────────
 # Suffix determines: 1) Response format (anthropic/openai/responses)  2) Backend model  3) Error format
@@ -371,27 +402,49 @@ def _save_rr_counter() -> None:
 _load_rr_counter()
 
 def _next_variant_key_pair(model: str) -> tuple:
-    """Get next (variant_idx, key_idx) for 2D round-robin.
-    Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
-    Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
+    """Get next (variant_idx, key_idx, upstream_type, nv_key_idx) for 2D round-robin.
 
-    R30: counter is persisted to disk so restarts don't reset it.
-    R31.3: persist EVERY increment (was every 10th) so even power loss loses 0 steps.
+    R33.2: MS-NV interleaving. When NV_ENABLED and model="glm5.1":
+      - total_slots = NUM_KEYS + NV_NUM_KEYS
+      - Counter N → slot = N % total_slots
+      - If slot < NUM_KEYS → MS upstream: variant=(N//total_slots)%NUM_VARIANTS, key=slot
+      - If slot >= NUM_KEYS → NV upstream: nv_key_idx=(slot - NUM_KEYS) % NV_NUM_KEYS
+      - Returns (variant_idx, key_idx, "ms"/"nv", nv_key_idx)
 
-    R31.9 REVERT: went back to row-first (variant=N//NUM_KEYS) after the diagonal
-    experiment (variant=N%NUM_VARIANTS) proved the hypothesis wrong — 41 ABORTs
-    spread evenly across all v1~v10, so the variant ID is NOT the bottleneck.
-    Root cause confirmed as ModelScope RPM burst throttle, addressed by the
-    MIN_OUTBOUND_INTERVAL_S throttle (now 2.0s), not by variant rotation order.
+    For dsv4p or NV_ENABLED=False: pure MS round-robin (unchanged):
+      - Counter N → variant=(N//NUM_KEYS)%NUM_VARIANTS, key=N%NUM_KEYS
+      - Returns (variant_idx, key_idx, "ms", 0)
+
+    R30: counter persisted to disk so restarts don't reset it.
+    R31.3: persist EVERY increment so even power loss loses 0 steps.
     """
     num_variants = NUM_VARIANTS.get(model, 10)
     with _vk_rr_lock:
         counter = _vk_rr_counter.get(model, 0)
-        variant_idx = (counter // NUM_KEYS) % num_variants
-        key_idx = counter % NUM_KEYS
-        _vk_rr_counter[model] = counter + 1
-        _save_rr_counter()  # R31.3: immediate persist — survive power loss / SIGKILL
-        return (variant_idx, key_idx)
+        # R33.2: MS-NV interleaving for glm5.1 (CC proxy, primary)
+        if NV_ENABLED and model == "glm5.1":
+            slot = counter % MS_NV_TOTAL_SLOTS
+            if slot < NUM_KEYS:
+                # MS slot
+                variant_idx = (counter // MS_NV_TOTAL_SLOTS) % num_variants
+                key_idx = slot
+                _vk_rr_counter[model] = counter + 1
+                _save_rr_counter()
+                return (variant_idx, key_idx, "ms", 0)
+            else:
+                # NV slot
+                nv_key_idx = (slot - NUM_KEYS) % NV_NUM_KEYS
+                # variant_idx not relevant for NV, but set to 0 for metrics consistency
+                _vk_rr_counter[model] = counter + 1
+                _save_rr_counter()
+                return (0, 0, "nv", nv_key_idx)
+        else:
+            # Pure MS round-robin (dsv4p or NV disabled)
+            variant_idx = (counter // NUM_KEYS) % num_variants
+            key_idx = counter % NUM_KEYS
+            _vk_rr_counter[model] = counter + 1
+            _save_rr_counter()
+            return (variant_idx, key_idx, "ms", 0)
 
 # R31.3: flush on exit. atexit covers normal interpreter exit; explicit signal
 # handlers cover SIGTERM/SIGINT (which is how `docker stop` and Ctrl-C kill the

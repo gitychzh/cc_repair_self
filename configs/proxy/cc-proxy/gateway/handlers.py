@@ -24,7 +24,7 @@ import urllib.parse
 from .config import (
     PROXY_TIMEOUT, UPSTREAM_TIMEOUT, MODEL_MAP, DEFAULT_MODEL,
     MODEL_UPSTREAMS, MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
-    CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS,
+    CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS, NV_ENABLED,
     detect_agent_type, format_model_id,
     PROXY_ROLE,
 )
@@ -210,24 +210,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # ─── Error handling ───
             if result.all_keys_exhausted:
                 if result.all_429 and not result.all_non_quota_429:
-                    cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+                    cycled_keys = ', '.join([f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts])
                     self._send_json(429, {
                         "type": "error",
                         "error": {
                             "type": "rate_limit_error",
-                            "message": f"All {NUM_KEYS} ModelScope API keys have exhausted their token quota for model {mapped_model}. "
+                            "message": f"All ModelScope/NVIDIA API keys have exhausted their quota for model {mapped_model}. "
                                        f"Please wait for quota recovery (typically 15 minutes) before retrying. "
                                        f"Keys cycled: {cycled_keys}"
                         },
                         "model": request_model,
                     }, extra_headers={"retry-after": "180"})
                 elif result.all_429 and result.all_non_quota_429:
-                    cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+                    cycled_keys = ', '.join([f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts])
                     self._send_json(429, {
                         "type": "error",
                         "error": {
                             "type": "rate_limit_error",
-                            "message": f"All {NUM_KEYS} ModelScope API keys returned transient 429 errors for model {mapped_model}. "
+                            "message": f"All API keys returned transient 429 errors for model {mapped_model}. "
                                        f"This is a temporary rate limit — not quota exhaustion. "
                                        f"Please retry in a few seconds. Keys cycled: {cycled_keys}"
                         },
@@ -235,8 +235,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     }, extra_headers={"retry-after": "10"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
-                    timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
-                    connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+                    timeout_keys = [f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+                    connerr_keys = [f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "NVConnectionRefusedError", "NVConnectionError")]
                     self._send_json(502, {
                         "type": "error",
                         "error": {
