@@ -106,7 +106,7 @@ NV_MODEL_IDS = {
 # For MS slot: variant_idx=(N//total_slots)%NUM_VARIANTS, key_idx=slot_idx
 # For NV slot: nv_key_idx = (slot_idx - NUM_KEYS) % NV_NUM_KEYS
 # This interleaving only applies when NV_ENABLED=True and base_model="glm5.1".
-MS_NV_TOTAL_SLOTS = NUM_KEYS + NV_NUM_KEYS if NV_ENABLED else NUM_KEYS
+MS_NV_TOTAL_SLOTS = None  # Computed after NUM_KEYS is defined (see below)
 
 # ─── Agent type suffixes (R23, R29 update) ────────────────────────────────
 # Suffix determines: 1) Response format (anthropic/openai/responses)  2) Backend model  3) Error format
@@ -283,6 +283,9 @@ NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
 NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
 NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
 NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
+
+# ─── Compute MS-NV interleaving total slots (after NUM_KEYS + NV_NUM_KEYS defined) ───
+MS_NV_TOTAL_SLOTS = NUM_KEYS + NV_NUM_KEYS if NV_ENABLED else NUM_KEYS
 
 # Variant model IDs — proxy uses these to construct precise model names.
 # Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
