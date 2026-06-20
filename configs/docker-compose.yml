@@ -212,7 +212,7 @@ services:
       NV_KEY4: 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
       NV_KEY5: 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
       NV_NUM_KEYS: "5"
-      NV_PROXY_URL: http://host.docker.internal:7880
+      NV_PROXY_URL: http://host.docker.internal:7894
       # ── No global HTTPS_PROXY — cc-proxy uses NV_PROXY_URL explicitly for NV calls only ──
       # MS (LiteLLM) traffic stays on Docker cc-net (no proxy needed)
       # ── end params ──
