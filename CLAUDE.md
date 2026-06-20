@@ -18,11 +18,8 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
       └── sonnet    → :40001 proxy (STABLE, 纯 MS)  → MS-only
       │   [40001 连接失败 → 自动 fallback 到 40005]
 
-:40005  cc-proxy(experiment)  → _cc /v1/messages → Anthropic→OpenAI 转换 → MS-NV 12-slot interleaving
-  ├── MS slots (0-6) → :41001 LiteLLM → ModelScope glm5.1 v×k cycling
-  └── NV slots (7-11) → :7894 mihomo ♻️US-NV → NVIDIA integrate API (HTTPS CONNECT tunnel)
-
-:40001  cc-proxy(stable)     → _cc /v1/messages → Anthropic→OpenAI 转换 → MS glm5.1 v×k cycling
+:40005  cc-proxy(experiment)  → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled R35.2)
+:40001  cc-proxy(stable)     → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled R35.2)
 :40002  codex-proxy         → _cx /v1/responses  → Responses→Chat 转换 → MS glm5.1 v×k cycling
 :40003  openai-proxy        → _ol/_oc/_hm chat/completions → OpenAI passthrough → dsv4p v×k cycling
 
@@ -36,7 +33,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 **R35 蓝绿自优化**：40005 (experiment) 接收所有 opus/默认流量，承载最新参数/代码；40001 (stable) 是基线。`compare_proxies.sh` + `proxy_health_score.py` 对比两者表现；`auto_tune.sh` + `TUNE_RULES.md` 驱动参数调整。40005 表现优 → 版本提升到 40001；40005 表现差 → 回滚到 40001 基线。
 
-**R33.2 MS-NV 交织规则**：12 slot round-robin（7 MS + 5 NV）。slot < 7 → MS variant×key cycling；slot ≥ 7 → NV key cycling（5 NV keys，NV 无 RPM 限制）。MS all-429 → NV fallback；NV all-fail → MS fallback。NV 不支持 thinking_budget/reasoning_effort → proxy 自动 strip。
+**R33.2 MS-NV 交织规则**（R35.2已禁用NV interleaving on 40001/40005 — NV glm-5.1 API unavailable, 20s timeout）：原12 slot round-robin（7 MS + 5 NV），现改为纯MS模式。40003(openai-proxy)仍保留NV interleaving（NV_NUM_KEYS=5）。NV API对deepseek-v4-pro可用，对glm-5.1不可用。
 
 ## Agent Suffix System（R23.1, R29）
 
