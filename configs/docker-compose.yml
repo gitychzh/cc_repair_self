@@ -1,11 +1,12 @@
 # R29: Three-proxy architecture — 3 proxy containers + 1 LiteLLM + 1 postgres
-# 40001 (cc):          CC → Anthropic format → 41001 glm5.1 v×k
+# R34.1: _ol/_oc/_hm → glm5.1 (NV direct API tunnel, same as cc-proxy R33.2)
+# 40001 (cc):          CC → Anthropic format → 41001 glm5.1 v×k + NV direct API
 # 40002 (codex):       Codex → Responses API → 41001 glm5.1 v×k
-# 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 dsv4p v×k
-# 41001: ms_uni41001 LiteLLM (70 glm5.1 + 70 dsv4p = 140 dep)
-# R29: Removed ms_uni41002 (LiteLLM fallback), removed 40002 fallback proxy
+# 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 glm5.1 v×k + NV direct API
+# 41001: ms_uni41001 LiteLLM (70 glm5.1 + 70 dsv4p = 140 dep, dsv4p dead on MS)
+# NV LiteLLM containers REMOVED — proxy directly calls NVIDIA API via HTTPS CONNECT tunnel
 #
-# Port assignments: 41001=LiteLLM, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough)
+# Port assignments: 41001=LiteLLM, 40000=dispatcher, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough)
 # ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep)
 
 services:
@@ -17,7 +18,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51 litellm_nv
       TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
@@ -162,13 +163,11 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k + NV interleaving) ───
+  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k, shares 41001) ───
   # R31: 40005 = default CC endpoint (opus), 40001 = manual fallback (sonnet).
   # R31.5: builds from ./proxy/cc-proxy (physically isolated cc-role code).
-  # R33.2: NV (NVIDIA) upstream interleaving — 7 MS keys + 5 NV keys in 2D round-robin.
-  #   NV calls go directly to NVIDIA API via US proxy (HTTPS_PROXY → host mihomo:7894).
-  #   No NV LiteLLM containers needed — cc-proxy does Anthropic→OpenAI conversion itself.
-  #   NV has no RPM limit, no variants — simpler upstream than MS.
+  #   The shared ./proxy gateway (codex/passthrough/codex logic) is no longer
+  #   in 40005's image — a cc-proxy change cannot affect 40002/40003, and vice versa.
   # Both share 41001 LiteLLM + same glm5.1 variants + same MS_KEY → quota is shared
   # per model-id+key, NOT per proxy port. So:
   #   - 40005 PROXY crash / bad params / counter corruption → switch to 40001 (works, different container)
@@ -183,8 +182,6 @@ services:
       dockerfile: Dockerfile
     container_name: auth_to_api_40005
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
@@ -193,7 +190,7 @@ services:
       LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40005"
-      # ── CC proxy params ──
+      # ── CC proxy params (kept identical to 40001 — 40005 is now primary, not an experiment lab) ──
       PROXY_TIMEOUT: "300"
       UPSTREAM_TIMEOUT: "60"
       MAX_TOOL_DESC: "2000"
@@ -204,18 +201,7 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
-      # ── NV (NVIDIA) upstream params (R33.2) ──
-      NV_BASEURL: https://integrate.api.nvidia.com/v1
-      NV_KEY1: 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
-      NV_KEY2: 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
-      NV_KEY3: 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
-      NV_KEY4: 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
-      NV_KEY5: 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
-      NV_NUM_KEYS: "5"
-      NV_PROXY_URL: http://host.docker.internal:7894
-      # ── No global HTTPS_PROXY — cc-proxy uses NV_PROXY_URL explicitly for NV calls only ──
-      # MS (LiteLLM) traffic stays on Docker cc-net (no proxy needed)
-      # ── end params ──
+      # ── end experiment params ──
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -346,8 +332,10 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── 40003: Passthrough proxy (OpenAI → dsv4p v×k) ───
+  # ─── 40003: Passthrough proxy (OpenAI → glm5.1 v×k + NV interleaving) ───
+  # R34: _ol/_oc/_hm now route to glm5.1 (dsv4p dropped from ModelScope).
   # Handles Hermes/OpenClaw/OpenCode (_hm/_ol/_oc) — nearly-transparent passthrough
+  # R34: NV interleaving — after MS all 429, tries 5 NV containers for burst mitigation.
   # R31.6: physically isolated — builds from configs/proxy/passthrough-proxy/ (own image).
   auth_to_api_40003:
     build:
@@ -373,6 +361,16 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
+      MIN_OUTBOUND_INTERVAL_S: "2.0"
+      # ── R34.1: NV (NVIDIA) direct API tunnel — same as cc-proxy R33.2 ──
+      NV_NUM_KEYS: "5"
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      NV_KEY1: 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
+      NV_KEY2: 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
+      NV_KEY3: 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
+      NV_KEY4: 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
+      NV_KEY5: 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
+      NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
       TZ: Asia/Shanghai
     volumes:
@@ -401,7 +399,6 @@ services:
       retries: 3
       start_period: 15s
     logging: *id001
-
 
 networks:
   cc-net:

@@ -33,6 +33,7 @@ from .config import (
     CHARS_PER_TOKEN_ESTIMATE, NUM_KEYS,
     AGENT_SUFFIXES, DEFAULT_AGENT_SUFFIX, detect_agent_type, format_model_id,
     PROXY_ROLE, ROLE_DEFAULT_UPSTREAM,
+    THINKING_SUPPORT,
     _is_routing_name,
 )
 from .logger import _log, _log_metrics, _log_error_detail
@@ -365,14 +366,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_openai_with_cycling(self):
         """Handle OpenAI-format requests from OpenClaw/OpenCode/Hermes.
 
-        R29: These agents now route to dsv4p backend via passthrough proxy (40003).
-        The proxy does nearly-transparent passthrough with v×k cycling.
+        R34: These agents now route to glm5.1 backend (dsv4p dropped from ModelScope).
+        The proxy does nearly-transparent passthrough with v×k cycling + NV interleaving.
+        NV (NVIDIA) containers are used as fallback when MS is all-429.
 
         Flow:
           1. Parse OpenAI request body
           2. Detect agent type from model name (suffix required for OpenAI agents)
           3. Map model name to backend (strip suffix → get base model)
-          4. Call upstream.execute_request() with v×k cycling
+          4. Call upstream.execute_request() with v×k cycling + NV interleaving
           5. On success: pass through OpenAI response (no format conversion)
           6. On error: format OpenAI error response
         """
@@ -437,13 +439,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if is_stream and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
-        # R29: Remove thinking_budget for dsv4p backend (DSv4P doesn't support it)
-        if mapped_model == "dsv4p":
-            # Strip thinking-related params that dsv4p doesn't support
-            for param in ["reasoning_effort", "thinking_budget"]:
-                if param in body:
-                    _log("DSV4P-STRIP", f"removing unsupported param '{param}' from dsv4p request")
-                    del body[param]
+        # R34: glm5.1 backend supports thinking_budget (MS), but NV does not.
+        # NV stripping is handled in upstream.py's NV interleaving section.
+        # No need to strip here — glm5.1 MS accepts thinking_budget.
 
         result = execute_request(self, body, mapped_model, request_id, metrics, t_start)
 

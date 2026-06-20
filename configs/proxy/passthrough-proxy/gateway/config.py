@@ -7,12 +7,14 @@ container names, port assignments) are documented in CLAUDE.md.
 
 R21: Added NUM_VARIANTS, VARIANT_IDS, v×k 2D round-robin support.
 R23: Added AGENT_SUFFIXES, agent type detection, suffix-based model IDs.
-R29: Added PROXY_ROLE, dsv4p backend routing, removed LiteLLM fallback.
-Proxy precisely specifies variant+key combo → LiteLLM just forwards.
+R34: _ol/_oc/_hm now route to glm5.1 backend (dsv4p dropped from ModelScope).
+R34.1: NV (NVIDIA) direct API tunnel — same as cc-proxy R33.2.
+Proxy directly calls NVIDIA API via HTTPS CONNECT tunnel through mihomo.
 """
 import os
 import sys
 import json
+import time
 import threading
 
 # ─── Network ──────────────────────────────────────────────────────────────
@@ -26,18 +28,18 @@ UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))  # R27: Per-key
 # Each proxy container serves a specific role:
 #   "cc"          → only /v1/messages (Anthropic format, CC), upstream=glm5.1
 #   "codex"       → only /v1/responses (Responses API, Codex), upstream=glm5.1
-#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm), upstream=dsv4p
+#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm), upstream=glm5.1
 # This determines which endpoints to serve and which backend model to default to.
 PROXY_ROLE = os.environ.get("PROXY_ROLE", "cc")
 
 # ─── Role-based defaults ──────────────────────────────────────────────────
 # Default upstream model based on role:
 #   cc/codex → glm5.1 (CC and Codex need Anthropic/Responses format conversion)
-#   passthrough → dsv4p (OpenAI agents get nearly-transparent passthrough)
+#   passthrough → glm5.1 (R34: OpenAI agents now also use glm5.1 — dsv4p dropped from ModelScope)
 ROLE_DEFAULT_UPSTREAM = {
     "cc": "glm5.1",
     "codex": "glm5.1",
-    "passthrough": "dsv4p",
+    "passthrough": "glm5.1",
 }
 
 # ─── Truncation limits ───────────────────────────────────────────────────
@@ -61,9 +63,9 @@ def _ensure_url_path(url: str, path: str) -> str:
     return stripped + path
 
 # ─── Per-model upstream routing ──────────────────────────────────────────
-# R29: Two backend models (glm5.1 and dsv4p), both routed through ms_uni41001.
-# LiteLLM fallback removed — single LiteLLM container only.
-# Each proxy container uses its PROXY_ROLE to determine which backend to use.
+# R34: Two backend models (glm5.1 and dsv4p), both routed through ms_uni41001.
+# R34: dsv4p backend is kept for backward compat (MODEL_MAP redirects to glm5.1).
+# NV (NVIDIA) LiteLLM containers provide interleaving for 429 burst mitigation.
 MODEL_UPSTREAMS = {
     "glm5.1": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
@@ -74,19 +76,48 @@ MODEL_UPSTREAMS = {
         "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
 }
+
+# ─── NV (NVIDIA) direct API tunnel (R34.1, same as cc-proxy R33.2) ──────────
+# Proxy directly calls NVIDIA API via HTTPS CONNECT tunnel through mihomo proxy.
+# No NV LiteLLM containers needed — direct API is faster and more reliable.
+# NV has no RPM limit, no variants — simpler than MS.
+NV_BASEURL = os.environ.get("NV_BASEURL", "")
+NV_NUM_KEYS = int(os.environ.get("NV_NUM_KEYS", "0"))
+NV_KEYS = []
+for i in range(1, NV_NUM_KEYS + 1):
+    key = os.environ.get(f"NV_KEY{i}", "")
+    if key:
+        NV_KEYS.append(key)
+NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # HTTPS proxy for NVIDIA API
+NV_ENABLED = bool(NV_BASEURL and NV_KEYS)  # Auto-detect: enabled if keys+URL present
+
+# NV model IDs on NVIDIA API
+NV_MODEL_IDS = {
+    "glm5.1": "z-ai/glm-5.1",
+    "dsv4p": "deepseek-ai/deepseek-v4-pro",
+}
+
+# ─── MS-NV interleaving (R34.1) ──────────────────────────────────────────────
+# Total slots = NUM_KEYS (MS) + NV_NUM_KEYS (NV) per glm5.1 round.
+# Interleaving pattern: msk1→nvk1→msk2→nvk2→msk3→nvk3→msk4→nvk4→msk5→nvk5→msk6→nvk1→msk7→nvk2→...
+# slot_idx N → (N % total_slots) → if < NUM_KEYS: MS key slot, else NV key slot
+# For MS slot: variant_idx=(N//total_slots)%NUM_VARIANTS, key_idx=slot_idx
+# For NV slot: nv_key_idx = (slot_idx - NUM_KEYS) % NV_NUM_KEYS
+# This interleaving only applies when NV_ENABLED=True and base_model="glm5.1".
+# MS_NV_TOTAL_SLOTS is defined after NUM_KEYS (see below).
 DEFAULT_UPSTREAM_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 
-# ─── Agent type suffixes (R23, R29 update) ────────────────────────────────
+# ─── Agent type suffixes (R23, R29 update, R34: glm5.1 backend) ────────────
 # Suffix determines: 1) Response format (anthropic/openai/responses)  2) Backend model  3) Error format
-# R29: _ol/_oc/_hm now route to dsv4p backend (separate proxy 40003)
+# R34: _ol/_oc/_hm now route to glm5.1 backend (dsv4p dropped from ModelScope)
 # "_cc" → Anthropic format, backend=glm5.1 (CC only, proxy 40001)
 # "_cx" → Responses API format, backend=glm5.1 (Codex only, proxy 40002)
-# "_ol/_oc/_hm" → OpenAI format, backend=dsv4p (OpenAI agents, proxy 40003)
+# "_ol/_oc/_hm" → OpenAI format, backend=glm5.1 (OpenAI agents, proxy 40003)
 AGENT_SUFFIXES = {
     "_cc": {"name": "Claude Code", "format": "anthropic", "backend": "glm5.1"},
-    "_ol": {"name": "OpenClaw",    "format": "openai",    "backend": "dsv4p"},
-    "_oc": {"name": "OpenCode",    "format": "openai",    "backend": "dsv4p"},
-    "_hm": {"name": "Hermes",      "format": "openai",    "backend": "dsv4p"},
+    "_ol": {"name": "OpenClaw",    "format": "openai",    "backend": "glm5.1"},
+    "_oc": {"name": "OpenCode",    "format": "openai",    "backend": "glm5.1"},
+    "_hm": {"name": "Hermes",      "format": "openai",    "backend": "glm5.1"},
     "_cx": {"name": "Codex",       "format": "responses", "backend": "glm5.1"},
 }
 DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
@@ -145,29 +176,33 @@ def format_model_id(base_model, agent_suffix):
 
 # ─── Model name → LiteLLM model_name mapping ────────────────────────────
 # NEVER change the variant model IDs — each has independent 200/id/day quota.
-# R29: _ol/_oc/_hm route to dsv4p backend, _cc/_cx route to glm5.1 backend.
+# R34: _ol/_oc/_hm route to glm5.1 backend (dsv4p dropped from ModelScope).
+# dsv4p* names are backward compat aliases → redirect to glm5.1 backend.
 MODEL_MAP = {
-    # ─── glm5.1 backend (_cc Anthropic, _cx Responses) ───
+    # ─── glm5.1 backend (ALL agent suffixes, R34: unified) ───
     # Claude Code (_cc) — Anthropic format, backend=glm5.1
     "glm5.1_cc": "glm5.1",
     # Codex (_cx) — Responses API format, backend=glm5.1
     "glm5.1_cx": "glm5.1",
+    # OpenClaw (_ol) — OpenAI format, backend=glm5.1 (R34: changed from dsv4p)
+    "glm5.1_ol": "glm5.1",
+    # OpenCode (_oc) — OpenAI format, backend=glm5.1 (R34: changed from dsv4p)
+    "glm5.1_oc": "glm5.1",
+    # Hermes (_hm) — OpenAI format, backend=glm5.1 (R34: changed from dsv4p)
+    "glm5.1_hm": "glm5.1",
 
-    # ─── dsv4p backend (_ol/_oc/_hm OpenAI) ───
-    # OpenClaw (_ol) — OpenAI format, backend=dsv4p
-    "dsv4p_ol": "dsv4p",
-    # OpenCode (_oc) — OpenAI format, backend=dsv4p
-    "dsv4p_oc": "dsv4p",
-    # Hermes (_hm) — OpenAI format, backend=dsv4p
-    "dsv4p_hm": "dsv4p",
-    # Backward compat: old suffix with glm5.1 base → still routes to dsv4p
-    "glm5.1_ol": "dsv4p",
-    "glm5.1_oc": "dsv4p",
-    "glm5.1_hm": "dsv4p",
+    # ─── dsv4p name backward compat → redirect to glm5.1 (R34) ───
+    # Old dsv4p names still accepted but now route to glm5.1 backend
+    "dsv4p_ol": "glm5.1",
+    "dsv4p_oc": "glm5.1",
+    "dsv4p_hm": "glm5.1",
+    "dsv4p": "glm5.1",
+    "deepseek-v4-pro": "glm5.1",
 
     # ─── Backward compat: no suffix = CC (Anthropic format) ───
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",
-    "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p",
+    # R34: glm5.2 → glm5.1 (ModelScope dropped GLM-5.2, redirect to 5.1)
+    "glm5.2": "glm5.1", "glm-5.2": "glm5.1", "ZHIPUAI/GLM-5.2": "glm5.1",
 
     # Claude Code names → glm5.1 (CC, implicitly _cc / Anthropic format)
     "claude-opus-4-8": "glm5.1",
@@ -185,15 +220,15 @@ MODEL_MAP = {
     "claude-3-5-haiku-20241022": "glm5.1",
     "claude-3-opus-20240229": "glm5.1",
 
-    # OpenAI-style alias names → dsv4p (for passthrough proxy, OpenAI format)
-    "gpt-4o": "dsv4p",
-    "gpt-4o-mini": "dsv4p",
-    "o3": "dsv4p",
-    "o3-mini": "dsv4p",
-    "o4-mini": "dsv4p",
-    "gpt-4.1": "dsv4p",
-    "gpt-4.1-mini": "dsv4p",
-    "gpt-4.1-nano": "dsv4p",
+    # OpenAI-style alias names → glm5.1 (R34: changed from dsv4p)
+    "gpt-4o": "glm5.1",
+    "gpt-4o-mini": "glm5.1",
+    "o3": "glm5.1",
+    "o3-mini": "glm5.1",
+    "o4-mini": "glm5.1",
+    "gpt-4.1": "glm5.1",
+    "gpt-4.1-mini": "glm5.1",
+    "gpt-4.1-nano": "glm5.1",
     # Codex CLI alias → glm5.1 (Codex专用, Responses API format)
     "codex-mini-latest": "glm5.1",
 }
@@ -201,6 +236,7 @@ MODEL_MAP = {
 # Thinking support per backend model
 # glm5.1 supports reasoning_effort + thinking_budget (ModelScope GLM-5.1 feature)
 # dsv4p does NOT support thinking_budget (DSv4P没有thinking参数)
+# R34: NV (NVIDIA) glm5.1 supports reasoning_effort but NOT thinking_budget
 THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}
 DEFAULT_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 
@@ -251,6 +287,9 @@ NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
 NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
 NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
 
+# ─── MS-NV total slots (must be after NUM_KEYS definition) ────
+MS_NV_TOTAL_SLOTS = NUM_KEYS + NV_NUM_KEYS if NV_ENABLED else NUM_KEYS
+
 # Variant model IDs — proxy uses these to construct precise model names.
 # Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
 GLM51_VARIANT_IDS = [
@@ -282,6 +321,37 @@ VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
 
 _vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0, "dsv4p": 0}
 _vk_rr_lock = threading.Lock()
+
+# ─── R31.9: Outbound request rate limiter (burst throttle mitigation) ────
+# Forces a minimum interval between consecutive outbound requests to LiteLLM
+# (ModelScope). Hypothesis: ModelScope's per-account/per-model RPM token-bucket
+# is bursting because requests arrive too densely; spacing them by MIN_OUTBOUND_INTERVAL_S
+# smooths the burst and reduces 429 throttling.
+# Applies to EVERY outbound request regardless of outcome (success or 429/500/etc).
+# Set to 0 to disable.
+MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "2.0"))
+_outbound_last_sent = 0.0  # monotonic timestamp of last send
+_outbound_throttle_lock = threading.Lock()
+
+
+def throttle_outbound():
+    """Enforce MIN_OUTBOUND_INTERVAL_S between consecutive outbound requests.
+    Call this immediately before every conn.request("POST", ...).
+    Blocks the calling thread (not the whole process — each request runs in its
+    own handler thread) until the minimum interval has elapsed since the last
+    send. No-op if MIN_OUTBOUND_INTERVAL_S <= 0.
+    """
+    if MIN_OUTBOUND_INTERVAL_S <= 0:
+        return
+    global _outbound_last_sent
+    with _outbound_throttle_lock:
+        now = time.monotonic()
+        elapsed = now - _outbound_last_sent
+        wait = MIN_OUTBOUND_INTERVAL_S - elapsed
+        if wait > 0:
+            time.sleep(wait)
+            now = time.monotonic()
+        _outbound_last_sent = now
 
 # R30/R31.3: Persist counter to disk so container restarts do NOT reset to v1k1.
 # Without this, every --force-recreate (e.g. monitor.sh) dumps all fresh
@@ -337,20 +407,51 @@ def _save_rr_counter() -> None:
 _load_rr_counter()
 
 def _next_variant_key_pair(model: str) -> tuple:
-    """Get next (variant_idx, key_idx) for 2D round-robin.
-    Returns 0-based indices. variant_idx in [0, NUM_VARIANTS-1], key_idx in [0, NUM_KEYS-1].
-    Counter N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
-    R30: counter is persisted to disk so restarts don't reset it.
-    R31.3: persist EVERY increment (was every 10th) so even power loss loses 0 steps.
+    """Get next (variant_idx, key_idx, upstream_type, nv_key_idx) for 2D round-robin.
+
+    R34.1 MS-NV interleaving: When NV_ENABLED and model="glm5.1",
+    total_slots = NUM_KEYS + NV_NUM_KEYS (e.g. 7+5=12).
+    Counter N → slot = N % total_slots
+    - slot < NUM_KEYS → MS: variant_idx=(N//total_slots)%num_variants, key_idx=slot, upstream_type="ms"
+    - slot >= NUM_KEYS → NV: nv_key_idx=(slot - NUM_KEYS) % NV_NUM_KEYS, upstream_type="nv"
+
+    When NV not enabled or model != "glm5.1", classic 2D round-robin:
+    Counter N → variant_idx=(N//NUM_KEYS)%num_variants, key_idx=N%NUM_KEYS
+
+    Returns: (variant_idx, key_idx, upstream_type, nv_key_idx)
+    - upstream_type: "ms" or "nv"
+    - nv_key_idx: 0..NV_NUM_KEYS-1 (only meaningful when upstream_type="nv")
     """
     num_variants = NUM_VARIANTS.get(model, 10)
     with _vk_rr_lock:
         counter = _vk_rr_counter.get(model, 0)
-        variant_idx = (counter // NUM_KEYS) % num_variants
-        key_idx = counter % NUM_KEYS
+
+        if NV_ENABLED and model == "glm5.1":
+            # MS-NV interleaving
+            total_slots = MS_NV_TOTAL_SLOTS
+            slot = counter % total_slots
+            if slot < NUM_KEYS:
+                # MS slot
+                variant_idx = (counter // total_slots) % num_variants
+                key_idx = slot
+                nv_key_idx = 0
+                upstream_type = "ms"
+            else:
+                # NV slot
+                variant_idx = 0  # not used for NV
+                key_idx = 0      # not used for NV
+                nv_key_idx = (slot - NUM_KEYS) % NV_NUM_KEYS
+                upstream_type = "nv"
+        else:
+            # Classic 2D round-robin (no NV interleaving)
+            variant_idx = (counter // NUM_KEYS) % num_variants
+            key_idx = counter % NUM_KEYS
+            nv_key_idx = 0
+            upstream_type = "ms"
+
         _vk_rr_counter[model] = counter + 1
         _save_rr_counter()  # R31.3: immediate persist — survive power loss / SIGKILL
-        return (variant_idx, key_idx)
+        return (variant_idx, key_idx, upstream_type, nv_key_idx)
 
 # R31.3: flush on exit. atexit covers normal interpreter exit; explicit signal
 # handlers cover SIGTERM/SIGINT (which is how `docker stop` and Ctrl-C kill the
@@ -366,6 +467,23 @@ def _flush_and_exit(signum, _frame):
 atexit.register(_save_rr_counter)
 _signal.signal(_signal.SIGTERM, _flush_and_exit)
 _signal.signal(_signal.SIGINT, _flush_and_exit)
+
+# ─── NV round-robin (for MS all-429 fallback to NV) ──────────────
+# R34.1: When MS interleaving slot is MS but all keys 429, fall through to NV keys.
+# _next_nv_key cycles through NV keys independently.
+_nv_rr_lock = threading.Lock()
+
+def _next_nv_key() -> int:
+    """Get next NV key index (0-based, 0..NV_NUM_KEYS-1) for round-robin.
+    Used when MS all-key 429 triggers NV fallback cycling.
+    Persists to the same rr_counter.json file under "nv" key.
+    """
+    with _nv_rr_lock:
+        counter = _vk_rr_counter.get("nv", 0)
+        key_idx = counter % NV_NUM_KEYS
+        _vk_rr_counter["nv"] = counter + 1
+        _save_rr_counter()
+        return key_idx
 
 def _is_routing_name(name: str) -> bool:
     """Check if a model name is an internal variant×key routing name.
