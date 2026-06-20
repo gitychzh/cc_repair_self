@@ -1,0 +1,100 @@
+# NV LiteLLM Config — NVIDIA API (integrate.api.nvidia.com)
+# Each NV container has exactly 2 deployments (1 glm5.1 + 1 dsv4p), 1 key.
+# Container name: nv_uni41006 (key1), nv_uni41007 (key2), ... nv_uni41010 (key5)
+#
+# NVIDIA model IDs:
+#   glm5.1: z-ai/glm-5.1
+#   dsv4p:  deepseek-ai/deepseek-v4-pro
+#
+# Key differences from MS LiteLLM:
+#   - NVIDIA does NOT support thinking_budget → must strip in proxy before sending
+#   - NVIDIA supports reasoning_effort
+#   - NVIDIA has no RPM limit per key → rpm=100 (high value to prevent LiteLLM throttling)
+#   - NVIDIA API requires US proxy (per-deployment proxy URL in litellm_params)
+#   - No variants needed (NVIDIA has exactly one model ID per model)
+#
+# model_name format: nvglm5.1k{X} / nvdsv4pk{X} where X=1..5
+# Proxy precisely specifies model_name → LiteLLM just forwards.
+# num_retries=0, cooldown_time=0 — all cycling/retry is done at proxy level.
+#
+# R33.1: Per-deployment proxy (not global HTTP_PROXY env) — global proxy breaks
+# Prisma DB migration. Each deployment has proxy: os.environ/NV_PROXY_URL
+# pointing to host.docker.internal:7894~7898 (US proxy per container).
+
+model_list:
+  # ─── glm5.1 via NVIDIA key1 ───
+  - model_name: nvglm5.1k2
+    litellm_params:
+      model: openai/z-ai/glm-5.1
+      api_base: os.environ/NV_BASEURL
+      api_key: os.environ/NV_KEY2
+      proxy: os.environ/NV_PROXY_URL
+      rpm: 100
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - reasoning_effort
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+  # ─── dsv4p via NVIDIA key1 ───
+  - model_name: nvdsv4pk2
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-pro
+      api_base: os.environ/NV_BASEURL
+      api_key: os.environ/NV_KEY2
+      proxy: os.environ/NV_PROXY_URL
+      rpm: 100
+      timeout: 300
+      allowed_openai_params:
+        - max_tokens
+        - max_completion_tokens
+        - temperature
+        - top_p
+        - stream
+        - stop
+        - tools
+        - tool_choice
+        - frequency_penalty
+        - presence_penalty
+        - n
+        - user
+        - response_format
+        - seed
+    model_info:
+      mode: chat
+      max_tokens: 131072
+
+litellm_settings:
+  drop_params: true
+  json_logs: true
+  request_timeout: 300
+  store_prompts_in_spend_logs: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+router_settings:
+  num_retries: 0
+  cooldown_time: 0
+  routing_strategy: simple-shuffle
+  enable_pre_call_checks: false
+  model_group_alias: null
+  allowed_fails: 0
+  bitmask_allowed_fails: 0
+  bitmask_allowed_fails_gc_time: 0
