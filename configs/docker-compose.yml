@@ -390,6 +390,8 @@ services:
   # ─── R33: NVIDIA LiteLLM containers (5 × 2 dep = 10 dep) ───
   # Each NV container hosts 1 glm5.1 + 1 dsv4p deployment, 1 NVIDIA API key.
   # NV API (integrate.api.nvidia.com) is accessed via US proxy (host.docker.internal:7894~7898).
+  # Global HTTPS_PROXY routes NV API calls through US proxy; NO_PROXY excludes
+  # internal postgres/Docker network so Prisma migration & DB connections stay local.
   # NV containers share cc_postgres with litellm_nv database (separate from MS litellm_glm51).
   # NV has no RPM limit, no variants — proxy precisely specifies model_name → LiteLLM just forwards.
   # model_name: nvglm5.1k{1-5} / nvdsv4pk{1-5}
@@ -404,7 +406,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
-      NV_PROXY_URL: http://host.docker.internal:7894
+      HTTPS_PROXY: http://host.docker.internal:7894
+      NO_PROXY: cc_postgres,localhost,127.0.0.1,host.docker.internal,172.18.0.0/16
       TZ: Asia/Shanghai
     volumes:
       - ./litellm-nv/config-k1.yaml:/app/config.yaml:ro
@@ -451,7 +454,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY2: 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
-      NV_PROXY_URL: http://host.docker.internal:7895
+      HTTPS_PROXY: http://host.docker.internal:7895
+      NO_PROXY: cc_postgres,localhost,127.0.0.1,host.docker.internal,172.18.0.0/16
       TZ: Asia/Shanghai
     volumes:
       - ./litellm-nv/config-k2.yaml:/app/config.yaml:ro
@@ -498,7 +502,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY3: 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
-      NV_PROXY_URL: http://host.docker.internal:7896
+      HTTPS_PROXY: http://host.docker.internal:7896
+      NO_PROXY: cc_postgres,localhost,127.0.0.1,host.docker.internal,172.18.0.0/16
       TZ: Asia/Shanghai
     volumes:
       - ./litellm-nv/config-k3.yaml:/app/config.yaml:ro
@@ -545,7 +550,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY4: 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
-      NV_PROXY_URL: http://host.docker.internal:7897
+      HTTPS_PROXY: http://host.docker.internal:7897
+      NO_PROXY: cc_postgres,localhost,127.0.0.1,host.docker.internal,172.18.0.0/16
       TZ: Asia/Shanghai
     volumes:
       - ./litellm-nv/config-k4.yaml:/app/config.yaml:ro
@@ -592,7 +598,8 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY5: 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
-      NV_PROXY_URL: http://host.docker.internal:7898
+      HTTPS_PROXY: http://host.docker.internal:7898
+      NO_PROXY: cc_postgres,localhost,127.0.0.1,host.docker.internal,172.18.0.0/16
       TZ: Asia/Shanghai
     volumes:
       - ./litellm-nv/config-k5.yaml:/app/config.yaml:ro
