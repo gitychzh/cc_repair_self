@@ -150,6 +150,7 @@ services:
       NV_KEY2: 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
       NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy40001:/app/logs
@@ -228,6 +229,7 @@ services:
       NV_KEY2: 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
       NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy40005:/app/logs
@@ -329,6 +331,7 @@ services:
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy40002:/app/logs
@@ -400,6 +403,7 @@ services:
       NV_KEY5: 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
       NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
     volumes:
       - ./logs/proxy40003:/app/logs
