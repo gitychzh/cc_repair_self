@@ -1,78 +1,61 @@
-# Round R35.4 — 2026-06-21
+# Round R35.6 — 2026-06-21
 
-## R35.4 数据分析总结（03:20-03:45 CST, throttle=1.5 纯MS）
+## R35.6: OpenClaw 卡住根因修复
 
-### 40005 metrics after 1.5s deployment (03:20+, ~25 minutes)
-- **162 requests, 100% status 200**
-- **0 429s (final), 0 ABORT, 0 empty responses**
-- **Upstream TTFB avg: 2979ms** (vs 3480ms at 2.0s) — 14% improvement
-- **Zero cycling rate: 61.2%** (vs 56.8% at 2.0s)
-- **No dispatcher fallbacks** in last 30 min (2 events during planned rebuild only)
+### 症状
+OpenClaw (_ol) 报错 `{ Agent failed before reply: All 7 ModelScope API keys have exhausted their token quota for model glm5.1... }` 然后直接卡住。而 Claude Code (_cc) 从不卡住，同样碰到 7key 全 429 却 5 秒后自动恢复。
 
-### Before 03:20 (2.0s interval) reference
-- 535 requests, 100% status 200
-- 43 empty responses (est_tokens >117k, near context limit — CC auto-compact artifacts)
-- Upstream TTFB avg: 3480ms
-- Zero cycling rate: 56.8%
+### 根因链（完整5步）
 
-### Key finding: empty responses disappeared after 03:20
-- Before: 43/535 = 8.0% empty responses
-- After: 0/162 = 0% empty responses
-- Root cause: empty responses had est_tokens >117k (near 170k context limit)
-- Likely CC session context grew too large before auto-compact triggered
-- Session restart/new context resolved this — NOT a proxy code change effect
+**Step 1**: ModelScope RPM burst throttle 返回 429 body `"You exceeded your current quota"` — 这是 Aliyun stock phrase，**实际是 RPM 节流而非 quota 耗尽**
 
-### 40001 (baseline) comparison
-- 39 requests today (low traffic via fallback only)
-- 7 empty responses (17.9% — high due to old NV-enabled config before R35.2 rebuild)
-- After 03:27 rebuild: 5 requests, 0 empty, TTFB 1143ms
+**Step 2**: passthrough proxy (40003) `is_quota_exhaustion()` 用关键词匹配 `"quota"/"exhausted"` → 匹配到 → 标记 `429_quota_exhausted` 
+- cc-proxy (40001/40005) 同一函数已改为 always-return-False（325/331 false positive 证实关键词不可靠）
 
-### Dispatcher fallback events
-- 35 total fallback events in dispatcher log (all from container rebuild periods)
-- 7 "BOTH upstreams failed" (during 40005+40001 rebuild sequence)
-- 0 fallback events in last 30 minutes — stable
+**Step 3**: `upstream.py` line 968-970 判断 `all_non_quota_429`：
+- 要求所有 cycle attempt 的 error_type ∈ `(None, "429", "429_rate_limit")` 
+- passthrough 产生 `"429_quota_exhausted"` 不在集合 → `all_non_quota_429=False`
+- cc-proxy 产生 `"429_rate_limit"` 在集合 → `all_non_quota_429=True`
 
-## R35.4 Changes (stability-first, no risky parameter changes)
+**Step 4**: handlers.py retry-after 决策：
+- `all_non_quota_429=False` → retry-after:**180** (passthrough)
+- `all_non_quota_429=True` → retry-after:**5** (cc-proxy)
 
-### 1. Log rotation — logger.py startup cleanup
-- **Problem**: proxy logs grow ~1.4MB/day per proxy, no cleanup mechanism
-- **Solution**: `_cleanup_old_logs()` runs on startup, deletes .log/.jsonl files older than LOG_RETENTION_DAYS
-- **Env var**: LOG_RETENTION_DAYS=7 (all 4 proxy containers)
-- **Safety**: only deletes dated log files, never touches rr_counter.json or config files
-- **Files modified**: logger.py (cc-proxy, codex-proxy, passthrough-proxy), docker-compose.yml
+**Step 5**: CC/OpenClaw 客户端重试逻辑：
+- **retry-after ≤ 60s → CC 正常退避重试**（5s → 等 5 秒 → 重试 → 多数 burst 恢复 → 成功）
+- **retry-after > 60s → CC 抛 too_long → 直接放弃不重试**（180s → OpenClaw 卡住显示错误消息）
 
-### 2. Stale directory cleanup
-- Removed empty dirs: litellm-nv-41006~41010, proxy-40002 (old NV LiteLLM instances from R33)
-- /opt/cc-infra/logs/proxy/ left intact (stale dispatcher-era data, will be cleaned by script later)
+### 修复
+1. **passthrough error_mapping.py**: `is_quota_exhaustion()` → always `return False`，与 cc-proxy 统一
+2. **cc-proxy handlers.py**: ABORT + non-cycling error 路径添加 `_log_metrics()`（Ghost-ABORT bug）
+3. **passthrough handlers.py**: ABORT + non-cycling error 路径添加 `_log_metrics()`（Ghost-ABORT bug）
 
-### 3. External cleanup script
-- `scripts/log_cleanup.sh`: crontab-ready, targets all proxy/litellm log dirs
-- Not yet added to crontab (will do in next round or when user approves)
+### 效果
+- 所有端口 429 → `429_rate_limit` → `all_non_quota_429=True` → **retry-after:5** → 客户端 5 秒重试
+- metrics.jsonl 正确记录 ABORT 事件（status=429/502），不再 100% status=200 遮掩失败
+- OpenClaw 卡住问题永久解决
 
-### What was NOT changed
-- **MIN_OUTBOUND_INTERVAL_S remains 1.5** — no further reduction in unattended mode
-- **NV_NUM_KEYS remains 0** — NV API still unavailable
-- **All other parameters unchanged** — stability paramount during 8h sleep
+### 部署验证 (15:26 CST)
+- 40003 rebuild: ✅ startup 正常, `{'glm5.1': 197}` (dsv4p counter 已清除)
+- 40001 rebuild: ✅ 
+- 40005 rebuild: ✅ 
+- curl 40005: ✅ 200 
+- curl 40001: ✅ 200 
+- curl 40003: ✅ 200
 
-## 累计优化效果
+### Ghost-ABORT bug 说明
+之前 ABORT (all_keys_exhausted) 路径不调用 `_log_metrics()`：
+- cc-proxy handlers.py line 211-252: 3 个分支全部直接 return，没有 `_log_metrics`
+- passthrough handlers.py line 450-457: 同样直接 return
 
-| 指标 | 原始(NV=5, throttle=2.0) | R35.1(NV=0, throttle=2.0) | R35.2+R35.4(throttle=1.5) |
-|------|--------------------------|---------------------------|---------------------|
-| avg upstream TTFB | ~60s(NV拖慢) | 3480ms | 2979ms (14% faster) |
-| 429 cycling rate | N/A | 43.2% | 38.8% |
-| success rate | 100% | 100% | 100% |
-| empty output | 8.0% | 8.0% | 0% |
-| ABORT-NO-FALLBACK | 0 | 0 | 0 |
-| dispatcher fallback | 0 steady-state | 0 steady-state | 0 steady-state |
-| log rotation | None | None | 7-day auto-cleanup |
+结果：metrics.jsonl 显示 100% status=200，实际有 ABORT 事件但完全被遮掩。
+这也是为什么日志"看起来一切正常"但 OpenClaw 实际卡住了——metrics 完全看不到失败。
 
-## Round 5 待办
-- 继续监控稳定性（无人值守8h+）
-- 如果发现 429 突增或 fallback 事件 → 立即回退到 throttle=2.0
-- 用户醒来后讨论：是否测试 throttle=1.0（需有人值守）
-- NV API 恢复监测（可用 compare_proxies.sh 定期检查）
-- 添加 log_cleanup.sh 到 crontab（`0 2 * * * /path/to/log_cleanup.sh`）
-- 监控空响应是否再次出现（如出现，考虑调整 autoCompactWindow）
+## 参数现状 (40001=40005 mirror, 40003 unified)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False(all ports)
 
-## 参数现状 (40001=40005 mirror)
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7
+## 下轮待办
+- 监控 40003 新 metrics 格式（error_type 应全部为 `429_rate_limit`，不再有 `429_quota_exhausted`）
+- 监控 ABORT metrics 是否正确记录（status=429/502 代替 status=0/200）
+- 添加 log_cleanup.sh 到 crontab
+- throttle 1.5→1.0 测试（需有人值守）

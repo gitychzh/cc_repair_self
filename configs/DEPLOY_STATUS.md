@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname + opc2_uname (R35.5, 2026-06-21)
+# Deploy Status — opc_uname + opc2_uname (R35.6, 2026-06-21)
 
 ## Architecture (R35.5 — dispatcher + blue-green CC proxy + pure MS mode + dsv4p removed)
 ```
@@ -32,6 +32,22 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 - **docker-compose.yml**: LITELLM_URL_DSV4P, NUM_VARIANTS_DSV4P, MODEL_INPUT_TOKEN_SAFETY_DSV4P env vars removed
 - **Agent configs**: hermes/openclaw/opencode all changed dsv4p_hm/ol/oc→glm5.1_hm/ol/oc
 - **CLAUDE.md**: Architecture diagram, constraints table, agent suffix, parameters table all updated
+
+## R35.6: OpenClaw Stuck Bug Fix (is_quota_exhaustion asymmetry + Ghost-ABORT metrics)
+
+### Root cause: Why OpenClaw froze but Claude Code never froze
+- **passthrough proxy (40003)** `is_quota_exhaustion()` used keyword matching ("quota"/"exhausted"/"insufficient"/"balance"/"limit reached")
+- **cc-proxy (40001/40005)** `is_quota_exhaustion()` was already changed to `always return False` (325/331 false positives proved keywords unreliable)
+- ModelScope's 429 body says "You exceeded your current quota" for RPM burst throttle — NOT actual quota exhaustion
+- **Keyword match → mislabeled as `429_quota_exhausted` → `all_non_quota_429=False` → retry-after:180 → OpenClaw sees 180s → CC logic: >60s retry-after = too_long → gives up → STUCK**
+- **cc-proxy → correctly `429_rate_limit` → `all_non_quota_429=True` → retry-after:5 → CC waits 5s → retries → succeeds**
+
+### R35.6 Changes
+1. **passthrough-proxy error_mapping.py**: `is_quota_exhaustion()` → always `return False` (same as cc-proxy, with R35.6 docstring explaining OpenClaw stuck root cause)
+2. **cc-proxy handlers.py**: Added `_log_metrics(metrics)` to ALL error paths (ABORT, input overflow, non-cycling upstream error) — Ghost-ABORT bug fixed
+3. **passthrough-proxy handlers.py**: Added `_log_metrics(metrics)` to ALL error paths (ABORT, non-cycling upstream error) — Ghost-ABORT bug fixed
+4. **Effect**: All 429 errors now → `429_rate_limit` → `all_non_quota_429=True` → retry-after:5 → OpenClaw retries in 5s (was giving up at 180s)
+5. **Effect**: metrics.jsonl will now correctly show ABORT events (status=429/502) instead of 100% status=200
 
 ## R35.2: Blue-Green Mirror (Both Pure MS)
 
