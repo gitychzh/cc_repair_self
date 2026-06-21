@@ -146,15 +146,29 @@ def json_to_str_lower(error_json):
 
 
 def is_quota_exhaustion(error_json):
-    """Detect if a 429 error is quota exhaustion vs RPM throttle."""
-    err_msg_lower = json.dumps(error_json).lower()
-    return (
-        "quota" in err_msg_lower
-        or "exhausted" in err_msg_lower
-        or "insufficient" in err_msg_lower
-        or "balance" in err_msg_lower
-        or "limit reached" in err_msg_lower
-    )
+    """R31.8/R35.6: Disabled — never classify 429 as quota exhaustion.
+
+    Previously matched keywords like 'quota/exhausted' in the error body. But
+    ModelScope's 429 body uses Aliyun's stock 'exceeded your current quota'
+    phrase for BOTH token-burst AND rpm-burst throttling (type=throttling_error
+    either way), so the keyword test mislabels every burst 429 as 'quota
+    exhausted' (325/331 false positives in a day's logs). LiteLLM does not
+    forward ModelScope's ratelimit-*-remaining headers on 429, so the proxy
+    cannot read remaining=0 either. Actual daily quota is always ample (verified
+    against ModelScope backend). Returning False uniformly means all 429s are
+    treated as rate_limit bursts → uniform cycling + fallback behavior, and
+    logs stop falsely claiming exhaustion.
+
+    R35.6: This was previously only fixed in cc-proxy (40001/40005). The
+    passthrough proxy (40003) still used keyword matching, which caused:
+    ModelScope RPM burst 429 → keyword match "quota"/"exhausted" → classified
+    as quota_exhausted → all_non_quota_429=False → retry-after:180 → OpenClaw
+    client sees 180s retry-after → too_long (>60s) → client gives up → STUCK.
+    cc-proxy correctly returns False → all_non_quota_429=True → retry-after:5
+    → CC waits 5s → retries → succeeds. This asymmetry was the root cause of
+    OpenClaw freezing while CC never froze.
+    """
+    return False
 
 
 # ─── OpenAI-format error conversion ────────────────────────────────────────

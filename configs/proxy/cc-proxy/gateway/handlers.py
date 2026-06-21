@@ -209,6 +209,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling ───
             if result.all_keys_exhausted:
+                # R35.6: Log metrics for ABORT path (previously Ghost-ABORT — metrics.jsonl
+                # showed 100% status=200 while actual ABORTs happened, masking failures).
+                metrics["status"] = 429 if result.all_429 else 502
+                metrics["error_type"] = result.error_subcategory or "all_keys_exhausted"
+                metrics["duration_ms"] = result.elapsed_ms
+                metrics["key_cycle_attempts"] = len(result.key_cycle_attempts)
+                metrics["key_cycle_details"] = result.key_cycle_attempts
+                _log_metrics(metrics)
+
                 if result.all_429 and not result.all_non_quota_429:
                     cycled_keys = ', '.join([f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts])
                     self._send_json(429, {
@@ -264,6 +273,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                          "model": request_model})
                     metrics["status"] = 400
                     metrics["error_type"] = "InputExceedsInvalidRequest"
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
                     return
 
                 client_status = get_upstream_status_for_client(resp_status)
@@ -277,6 +288,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 elif client_status == 529:
                     extra_hdrs = {"retry-after": "5"}
                     _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
+                # R35.6: Log metrics for non-cycling error path
+                metrics["status"] = client_status
+                metrics["error_type"] = "upstream_error"
+                metrics["error_message"] = str(error_json)[:200]
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 

@@ -448,6 +448,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling for OpenAI format ───
             if result.all_keys_exhausted:
+                # R35.6: Log metrics for ABORT path (previously Ghost-ABORT — metrics.jsonl
+                # showed 100% status=200 while actual ABORTs happened, masking failures).
+                metrics["status"] = 429 if result.all_429 else 502
+                metrics["error_type"] = result.error_subcategory or "all_keys_exhausted"
+                metrics["duration_ms"] = result.elapsed_ms
+                metrics["key_cycle_attempts"] = len(result.key_cycle_attempts)
+                metrics["key_cycle_details"] = result.key_cycle_attempts
+                _log_metrics(metrics)
+
                 error_payload, client_status = format_openai_error_all_keys_exhausted(result, mapped_model, request_model)
                 extra_hdrs = None
                 if client_status == 429:
@@ -462,9 +471,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 error_payload, client_status = format_openai_error_upstream(error_json, request_model, resp_status)
                 extra_hdrs = None
                 if client_status == 429:
+                    # R35.6: is_quota_exhaustion now always returns False (same as cc-proxy)
+                    # → retry_seconds always 5, never 30. Prevents OpenClaw stuck on 30s wait.
                     quota_exhaust = is_quota_exhaustion(error_json)
                     retry_seconds = 30 if quota_exhaust else 5
                     extra_hdrs = {"retry-after": str(retry_seconds)}
+                # R35.6: Log metrics for non-cycling error path
+                metrics["status"] = client_status
+                metrics["error_type"] = "upstream_error"
+                metrics["error_message"] = str(error_json)[:200]
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 
