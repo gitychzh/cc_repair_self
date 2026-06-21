@@ -1,4 +1,4 @@
-# Round R35.6 — 2026-06-21
+# Round R35.6+ — 2026-06-21
 
 ## R35.6: OpenClaw 卡住根因修复
 
@@ -57,5 +57,38 @@ PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5
 ## 下轮待办
 - 监控 40003 新 metrics 格式（error_type 应全部为 `429_rate_limit`，不再有 `429_quota_exhausted`）
 - 监控 ABORT metrics 是否正确记录（status=429/502 代替 status=0/200）
-- 添加 log_cleanup.sh 到 crontab
+- 监控 Ghost-Stream/Ghost-Collect 修复效果（stream error → status=502 代替 200）
 - throttle 1.5→1.0 测试（需有人值守）
+
+## R35.6+ 追加修复
+
+### codex-proxy (40002) is_quota_exhaustion 统一
+- codex-proxy 的 `is_quota_exhaustion()` 也用了旧版关键词匹配（"quota"/"exhausted"等）
+- 修复：改为 always return False，与 cc-proxy/passthrough-proxy 统一
+- 效果：Codex CLI 不会再碰到 retry-after:30 的错误（与 OpenClaw 相同的不对称 bug）
+
+### Ghost-Stream (E1b) 修复 — 所有 3 proxy 的 stream.py
+- `_emit_graceful_end()` 之前无条件设置 `metrics["status"]=200`
+- 即使 stream timeout/disconnect 发生（error_type="StreamSocketTimeout"），metrics 仍记 200
+- 修复：error_type 已设置 → status=502；无 error_type → status=200
+- 仅诊断性修复：CC 客户端行为不变（已收到 HTTP 200 SSE），但 metrics.jsonl 真实记录
+
+### Ghost-Collect (E1c) 修复 — 所有 3 proxy 的 stream.py
+- `collect_stream_to_anth()` 之前无条件设置 `metrics["status"]=200`（line 479）
+- 即使 collect timeout 发生（error_type="CollectStreamSocketTimeout"），metrics 仍记 200
+- 修复：同 Ghost-Stream — error_type 已设置 → status=502；无 error_type → status=200
+
+### _stream_openai_passthrough Ghost-Stream 修复 — passthrough + codex handlers.py
+- `_stream_openai_passthrough()` 的 exception handler 不设 error_type
+- 导致 unconditional `metrics["status"]=200`
+- 修复：exception handler 现在设 `metrics["error_type"]=f"OpenAIStream_{error_class}"`
+- metrics status 根据 error_type 判断：有 → 502；无 → 200
+
+### codex-proxy handlers.py Ghost-ABORT 修复
+- 与 R35.6 cc-proxy/passthrough-proxy 修复相同
+- ABORT (all_keys_exhausted) 路径 + non-cycling error 路径 现在调用 `_log_metrics()`
+
+### log_cleanup.sh crontab
+- 已添加到 opc_uname crontab：`0 3 * * *`（每天凌晨 3 点）
+- 清理 7 天前的外部日志文件（logger.py startup cleanup 覆盖容器内日志）
+
