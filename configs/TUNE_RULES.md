@@ -44,7 +44,7 @@
 | Parameter | Reason |
 |-----------|--------|
 | NUM_KEYS | Tied to physical MS API keys |
-| NUM_VARIANTS_GLM51 / NUM_VARIANTS_DSV4P | Each variant has independent quota |
+| NUM_VARIANTS_GLM51 | Each variant has independent quota |
 | MODEL_INPUT_TOKEN_SAFETY_* | Tied to context window, affects CC behavior |
 | NV_BASEURL / NV_KEY* | Fixed API credentials |
 | NV_PROXY_URL | Tied to mihomo config |

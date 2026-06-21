@@ -7,7 +7,8 @@ container names, port assignments) are documented in CLAUDE.md.
 
 R21: Added NUM_VARIANTS, VARIANT_IDS, v×k 2D round-robin support.
 R23: Added AGENT_SUFFIXES, agent type detection, suffix-based model IDs.
-R29: Added PROXY_ROLE, dsv4p backend routing, removed LiteLLM fallback.
+R29: Added PROXY_ROLE, agent suffix-based routing, removed LiteLLM fallback.
+R35.5: Removed dsv4p/deepseek-v4-pro (ModelScope delisted). All backends route to glm5.1 only.
 R33.2: Added NV (NVIDIA) upstream — cc-proxy directly calls NVIDIA API via US proxy.
   NV has no RPM limit, no variants — simpler than MS.
   MS-NV interleaving: 12 slots (7 MS keys + 5 NV keys) in round-robin.
@@ -29,18 +30,18 @@ UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))  # R27: Per-key
 # Each proxy container serves a specific role:
 #   "cc"          → only /v1/messages (Anthropic format, CC), upstream=glm5.1
 #   "codex"       → only /v1/responses (Responses API, Codex), upstream=glm5.1
-#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm), upstream=dsv4p
+#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm), upstream=glm5.1
 # This determines which endpoints to serve and which backend model to default to.
 PROXY_ROLE = os.environ.get("PROXY_ROLE", "cc")
 
 # ─── Role-based defaults ──────────────────────────────────────────────────
 # Default upstream model based on role:
 #   cc/codex → glm5.1 (CC and Codex need Anthropic/Responses format conversion)
-#   passthrough → dsv4p (OpenAI agents get nearly-transparent passthrough)
+#   passthrough → glm5.1 (OpenAI agents get nearly-transparent passthrough)
 ROLE_DEFAULT_UPSTREAM = {
     "cc": "glm5.1",
     "codex": "glm5.1",
-    "passthrough": "dsv4p",
+    "passthrough": "glm5.1",
 }
 
 # ─── Truncation limits ───────────────────────────────────────────────────
@@ -64,17 +65,12 @@ def _ensure_url_path(url: str, path: str) -> str:
     return stripped + path
 
 # ─── Per-model upstream routing ──────────────────────────────────────────
-# R29: Two backend models (glm5.1 and dsv4p), both routed through ms_uni41001.
-# LiteLLM fallback removed — single LiteLLM container only.
-# Each proxy container uses its PROXY_ROLE to determine which backend to use.
+# R35.5: Only glm5.1 backend remains (dsv4p delisted from ModelScope).
+# All roles route through ms_uni41001 for glm5.1.
 MODEL_UPSTREAMS = {
     "glm5.1": {
         "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_GLM51", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
         "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_GLM51", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
-    },
-    "dsv4p": {
-        "chat_url": _ensure_url_path(os.environ.get("LITELLM_URL_DSV4P", "http://ms_uni41001:4000/v1/chat/completions"), "/v1/chat/completions"),
-        "models_url": _ensure_url_path(os.environ.get("LITELLM_MODELS_URL_DSV4P", "http://ms_uni41001:4000/v1/models"), "/v1/models"),
     },
 }
 DEFAULT_UPSTREAM_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
@@ -97,7 +93,6 @@ NV_ENABLED = bool(NV_BASEURL and NV_KEYS)  # Auto-detect: enabled if keys+URL pr
 # NV model IDs on NVIDIA API
 NV_MODEL_IDS = {
     "glm5.1": "z-ai/glm-5.1",
-    "dsv4p": "deepseek-ai/deepseek-v4-pro",
 }
 
 # ─── MS-NV interleaving (R33.2) ──────────────────────────────────────────────
@@ -109,39 +104,39 @@ NV_MODEL_IDS = {
 # This interleaving only applies when NV_ENABLED=True and base_model="glm5.1".
 MS_NV_TOTAL_SLOTS = None  # Computed after NUM_KEYS is defined (see below)
 
-# ─── Agent type suffixes (R23, R29 update) ────────────────────────────────
+# ─── Agent type suffixes (R23, R29 update, R35.5 dsv4p removed) ───────────
 # Suffix determines: 1) Response format (anthropic/openai/responses)  2) Backend model  3) Error format
-# R29: _ol/_oc/_hm now route to dsv4p backend (separate proxy 40003)
+# R35.5: All suffixes now route to glm5.1 backend (dsv4p delisted from ModelScope).
 # "_cc" → Anthropic format, backend=glm5.1 (CC only, proxy 40001)
 # "_cx" → Responses API format, backend=glm5.1 (Codex only, proxy 40002)
-# "_ol/_oc/_hm" → OpenAI format, backend=dsv4p (OpenAI agents, proxy 40003)
+# "_ol/_oc/_hm" → OpenAI format, backend=glm5.1 (OpenAI agents, proxy 40003)
 AGENT_SUFFIXES = {
     "_cc": {"name": "Claude Code", "format": "anthropic", "backend": "glm5.1"},
-    "_ol": {"name": "OpenClaw",    "format": "openai",    "backend": "dsv4p"},
-    "_oc": {"name": "OpenCode",    "format": "openai",    "backend": "dsv4p"},
-    "_hm": {"name": "Hermes",      "format": "openai",    "backend": "dsv4p"},
+    "_ol": {"name": "OpenClaw",    "format": "openai",    "backend": "glm5.1"},
+    "_oc": {"name": "OpenCode",    "format": "openai",    "backend": "glm5.1"},
+    "_hm": {"name": "Hermes",      "format": "openai",    "backend": "glm5.1"},
     "_cx": {"name": "Codex",       "format": "responses", "backend": "glm5.1"},
 }
 DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
 
 # Base model names (backend routing targets)
-BASE_MODELS = ["glm5.1", "dsv4p"]
+BASE_MODELS = ["glm5.1"]
 
 def detect_agent_type(model_id):
     """Detect agent type from model ID suffix.
 
     Args:
-        model_id: model name, e.g. "glm5.1_cc", "dsv4p_ol", "glm5.1", "claude-opus-4-8"
+        model_id: model name, e.g. "glm5.1_cc", "glm5.1_ol", "glm5.1", "claude-opus-4-8"
 
     Returns:
         (base_model, agent_suffix, response_format)
-        base_model: backend model name ("glm5.1" or "dsv4p")
+        base_model: backend model name ("glm5.1")
         agent_suffix: "_cc", "_ol", "_oc", "_hm" or DEFAULT_AGENT_SUFFIX
         response_format: "anthropic", "openai" or "responses"
 
     Examples:
         "glm5.1_cc" → ("glm5.1", "_cc", "anthropic")
-        "dsv4p_ol"  → ("dsv4p", "_ol", "openai")
+        "glm5.1_ol" → ("glm5.1", "_ol", "openai")
         "glm5.1"    → ("glm5.1", "_cc", "anthropic")  # backward compat
         "claude-opus-4-8" → ("glm5.1", "_cc", "anthropic")  # MODEL_MAP lookup
     """
@@ -172,35 +167,26 @@ def detect_agent_type(model_id):
 
 def format_model_id(base_model, agent_suffix):
     """Construct frontend model ID from base model + agent suffix.
-    e.g. ("glm5.1", "_cc") → "glm5.1_cc", ("dsv4p", "_ol") → "dsv4p_ol"
+    e.g. ("glm5.1", "_cc") → "glm5.1_cc", ("glm5.1", "_ol") → "glm5.1_ol"
     """
     return f"{base_model}{agent_suffix}"
 
 # ─── Model name → LiteLLM model_name mapping ────────────────────────────
 # NEVER change the variant model IDs — each has independent 200/id/day quota.
-# R29: _ol/_oc/_hm route to dsv4p backend, _cc/_cx route to glm5.1 backend.
+# R35.5: All entries route to glm5.1 backend only (dsv4p delisted from ModelScope).
 MODEL_MAP = {
-    # ─── glm5.1 backend (_cc Anthropic, _cx Responses) ───
-    # Claude Code (_cc) — Anthropic format, backend=glm5.1
+    # ─── glm5.1 backend (all agent types) ───
+    # Claude Code (_cc) — Anthropic format
     "glm5.1_cc": "glm5.1",
-    # Codex (_cx) — Responses API format, backend=glm5.1
+    # Codex (_cx) — Responses API format
     "glm5.1_cx": "glm5.1",
-
-    # ─── dsv4p backend (_ol/_oc/_hm OpenAI) ───
-    # OpenClaw (_ol) — OpenAI format, backend=dsv4p
-    "dsv4p_ol": "dsv4p",
-    # OpenCode (_oc) — OpenAI format, backend=dsv4p
-    "dsv4p_oc": "dsv4p",
-    # Hermes (_hm) — OpenAI format, backend=dsv4p
-    "dsv4p_hm": "dsv4p",
-    # Backward compat: old suffix with glm5.1 base → still routes to dsv4p
-    "glm5.1_ol": "dsv4p",
-    "glm5.1_oc": "dsv4p",
-    "glm5.1_hm": "dsv4p",
+    # OpenClaw/OpenCode/Hermes (_ol/_oc/_hm) — OpenAI format
+    "glm5.1_ol": "glm5.1",
+    "glm5.1_oc": "glm5.1",
+    "glm5.1_hm": "glm5.1",
 
     # ─── Backward compat: no suffix = CC (Anthropic format) ───
     "glm5.1": "glm5.1", "glm-5.2": "glm5.1", "zhipuai/glm-5.2": "glm5.1",
-    "dsv4p": "dsv4p", "deepseek-v4-pro": "dsv4p",
 
     # Claude Code names → glm5.1 (CC, implicitly _cc / Anthropic format)
     "claude-opus-4-8": "glm5.1",
@@ -218,23 +204,22 @@ MODEL_MAP = {
     "claude-3-5-haiku-20241022": "glm5.1",
     "claude-3-opus-20240229": "glm5.1",
 
-    # OpenAI-style alias names → dsv4p (for passthrough proxy, OpenAI format)
-    "gpt-4o": "dsv4p",
-    "gpt-4o-mini": "dsv4p",
-    "o3": "dsv4p",
-    "o3-mini": "dsv4p",
-    "o4-mini": "dsv4p",
-    "gpt-4.1": "dsv4p",
-    "gpt-4.1-mini": "dsv4p",
-    "gpt-4.1-nano": "dsv4p",
+    # OpenAI-style alias names → glm5.1 (for passthrough proxy, OpenAI format)
+    "gpt-4o": "glm5.1",
+    "gpt-4o-mini": "glm5.1",
+    "o3": "glm5.1",
+    "o3-mini": "glm5.1",
+    "o4-mini": "glm5.1",
+    "gpt-4.1": "glm5.1",
+    "gpt-4.1-mini": "glm5.1",
+    "gpt-4.1-nano": "glm5.1",
     # Codex CLI alias → glm5.1 (Codex专用, Responses API format)
     "codex-mini-latest": "glm5.1",
 }
 
 # Thinking support per backend model
 # glm5.1 supports reasoning_effort + thinking_budget (ModelScope GLM-5.1 feature)
-# dsv4p does NOT support thinking_budget (DSv4P没有thinking参数)
-THINKING_SUPPORT = {"glm5.1": True, "dsv4p": False}
+THINKING_SUPPORT = {"glm5.1": True}
 DEFAULT_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 
 # ─── Context-window budget system (R31.4) ────────────────────────────────
@@ -264,26 +249,23 @@ DEFAULT_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 DEFAULT_CONTEXT_FALLBACK = 131072  # generic fallback when a model isn't listed
 MODEL_MAX_INPUT_TOKENS = {
     "glm5.1": 202745,
-    "dsv4p": 128000,
 }
 MODEL_INPUT_TOKEN_SAFETY = {
     "glm5.1": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_GLM51", "170000")),
-    "dsv4p": int(os.environ.get("MODEL_INPUT_TOKEN_SAFETY_DSV4P", "128000")),
 }
 
 # ─── Thinking config ─────────────────────────────────────────────────────
 OUTPUT_TOKEN_MARGIN = 8192  # Room for output after thinking_budget
 THINKING_SIGNATURE_DEFAULT = "ErUB3WY0k2GCM2h+4O0S3Y3W3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f3Y3f"
 
-# ─── Variant×Key 2D round-robin (R21, R29: added dsv4p) ──────────────────
+# ─── Variant×Key 2D round-robin (R21, R35.5: only glm5.1) ──────────────────
 # 2D round-robin: request N → variant_idx=(N//NUM_KEYS)%NUM_VARIANTS, key_idx=N%NUM_KEYS
 # R31.9: reverted from diagonal to row-first (diagonal experiment disproved variant-bottleneck hypothesis).
-# → model name: "glm5.1v{V}k{K}" or "dsv4pv{V}k{K}"
+# → model name: "glm5.1v{V}k{K}"
 # On 429: same variant, cycle to next key (k→k+1). All 7 keys 429 → variant fallback (R23)
 NUM_KEYS = int(os.environ.get("NUM_KEYS", "7"))
 NUM_VARIANTS_GLM51 = int(os.environ.get("NUM_VARIANTS_GLM51", "10"))
-NUM_VARIANTS_DSV4P = int(os.environ.get("NUM_VARIANTS_DSV4P", "10"))
-NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51, "dsv4p": NUM_VARIANTS_DSV4P}
+NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51}
 
 # ─── Compute MS-NV interleaving total slots (after NUM_KEYS + NV_NUM_KEYS defined) ───
 MS_NV_TOTAL_SLOTS = NUM_KEYS + NV_NUM_KEYS if NV_ENABLED else NUM_KEYS
@@ -302,22 +284,9 @@ GLM51_VARIANT_IDS = [
     "ZHIPUAi/GLM-5.1",      # v9
     "ZHIPUAi/GLm-5.1",      # v10
 ]
-# R29: Restored dsv4p variant IDs (10 variants, independent 200/id/day quota each)
-DSV4P_VARIANT_IDS = [
-    "deepseek-ai/deepseek-v4-pro",      # v1
-    "deepseek-ai/Deepseek-V4-Pro",      # v2
-    "deepseek-ai/DeepSeek-v4-pro",      # v3
-    "deepseek-ai/DeepSeek-v4-Pro",      # v4
-    "deepseek-ai/DeepSeek-V4-PrO",      # v5
-    "deepseek-ai/DeepSeek-V4-PRo",      # v6
-    "deepseek-ai/DeepSeeK-V4-Pro",      # v7
-    "deepseek-ai/DeepSeEk-V4-Pro",      # v8
-    "deepseek-ai/DeepSEek-V4-Pro",      # v9
-    "deepseek-ai/DeePSeek-V4-Pro",      # v10
-]
-VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS, "dsv4p": DSV4P_VARIANT_IDS}
+VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS}
 
-_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0, "dsv4p": 0}
+_vk_rr_counter = {}  # model → int counter (0..∞), e.g. {"glm5.1": 0}
 _vk_rr_lock = threading.Lock()
 
 # ─── R31.9: Outbound request rate limiter (burst throttle mitigation) ────
@@ -415,7 +384,7 @@ def _next_variant_key_pair(model: str) -> tuple:
       - If slot >= NUM_KEYS → NV upstream: nv_key_idx=(slot - NUM_KEYS) % NV_NUM_KEYS
       - Returns (variant_idx, key_idx, "ms"/"nv", nv_key_idx)
 
-    For dsv4p or NV_ENABLED=False: pure MS round-robin (unchanged):
+    When NV_ENABLED=False: pure MS round-robin (unchanged):
       - Counter N → variant=(N//NUM_KEYS)%NUM_VARIANTS, key=N%NUM_KEYS
       - Returns (variant_idx, key_idx, "ms", 0)
 
@@ -443,7 +412,7 @@ def _next_variant_key_pair(model: str) -> tuple:
                 _save_rr_counter()
                 return (0, 0, "nv", nv_key_idx)
         else:
-            # Pure MS round-robin (dsv4p or NV disabled)
+            # Pure MS round-robin (NV disabled)
             variant_idx = (counter // NUM_KEYS) % num_variants
             key_idx = counter % NUM_KEYS
             _vk_rr_counter[model] = counter + 1
@@ -468,7 +437,7 @@ _signal.signal(_signal.SIGINT, _flush_and_exit)
 def _is_routing_name(name: str) -> bool:
     """Check if a model name is an internal variant×key routing name.
     R21: Routing names use v+k format. These are proxy→LiteLLM routing, NOT meant for agents.
-    Checks for both glm5.1 and dsv4p routing names."""
+    Checks for glm5.1 routing names only."""
     for base in MODEL_UPSTREAMS:
         num_variants = NUM_VARIANTS.get(base, 10)
         for vi in range(num_variants):

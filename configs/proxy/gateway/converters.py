@@ -324,7 +324,7 @@ def anth_to_openai(body, target_model=None):
     # ModelScope GLM-5.1 requires: max_completion_tokens > thinking_budget
     # Claude Code sends thinking.budget_tokens=32768 (default) with max_tokens=8192
     # We must ensure max_completion_tokens > thinking_budget
-    # NOTE: DSv4P does NOT support reasoning_effort — only set it for models with thinking support
+    # NOTE: reasoning_effort only supported on glm5.1 backend
     # Use THINKING_SUPPORT dict for multi-agent compatibility (not hardcoded "glm5.1")
     if body.get("thinking") and THINKING_SUPPORT.get(target_model, False):
         thinking_cfg = body["thinking"]
@@ -338,7 +338,7 @@ def anth_to_openai(body, target_model=None):
             output_tokens = required_min
             oai_body["max_tokens"] = output_tokens
             oai_body["max_completion_tokens"] = output_tokens
-        # Set reasoning_effort for GLM-5.1 only — DSv4P doesn't support it
+        # Set reasoning_effort for GLM-5.1 only
         if target_model == "glm5.1":
             if budget >= 10000:
                 oai_body["reasoning_effort"] = "high"

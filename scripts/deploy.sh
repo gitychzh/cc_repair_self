@@ -4,7 +4,7 @@
 #   No args: full redeploy (all services)
 #   service: only restart specified container (e.g. ms_uni41001)
 # Must be run on opc_uname (or opc2_uname) with /opt/cc-infra/ deployed
-# R29: Three-proxy (40001=cc, 40002=codex, 40003=passthrough) + dsv4p backend + no fallback
+# R29: Three-proxy (40001=cc, 40002=codex, 40003=passthrough) + glm5.1 backend
 
 set -euo pipefail
 
@@ -67,13 +67,13 @@ CX_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://
     -d '{"model":"glm5.1_cx","input":"test"}')
 echo "  glm5.1_cx via 40002 HTTP status: ${CX_RESULT}"
 
-# Test dsv4p via proxy 40003 (OpenAI passthrough, OpenClaw/OpenCode/Hermes)
-echo "  Testing dsv4p via 40003 (Passthrough proxy)..."
-DSV4P_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40003/v1/chat/completions \
+# Test glm5.1_ol via proxy 40003 (OpenAI passthrough, OpenClaw/OpenCode/Hermes)
+echo "  Testing glm5.1_ol via 40003 (Passthrough proxy)..."
+OL_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -X POST http://127.0.0.1:40003/v1/chat/completions \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer sk-litellm-local" \
-    -d '{"model":"dsv4p_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
-echo "  dsv4p via 40003 HTTP status: ${DSV4P_RESULT}"
+    -d '{"model":"glm5.1_ol","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
+echo "  glm5.1_ol via 40003 HTTP status: ${OL_RESULT}"
 
 # Test LiteLLM 41001 health (direct)
 echo "  Testing LiteLLM 41001 health..."
@@ -99,10 +99,10 @@ if [[ "${CX_RESULT}" == "200" ]]; then
 else
     echo "=== WARNING — glm5.1_cx via 40002 returned ${CX_RESULT}, check logs ==="
 fi
-if [[ "${DSV4P_RESULT}" == "200" ]]; then
-    echo "=== Passthrough proxy (40003) OK — dsv4p working ==="
+if [[ "${OL_RESULT}" == "200" ]]; then
+    echo "=== Passthrough proxy (40003) OK — glm5.1_ol working ==="
 else
-    echo "=== WARNING — dsv4p via 40003 returned ${DSV4P_RESULT}, check logs ==="
+    echo "=== WARNING — glm5.1_ol via 40003 returned ${OL_RESULT}, check logs ==="
 fi
 if [[ "${ISOLATION_RESULT}" == "404" ]]; then
     echo "=== Role isolation OK — 40001 correctly rejects /v1/chat/completions ==="

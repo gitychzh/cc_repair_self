@@ -4,7 +4,7 @@
 R29: Three proxy containers, each with PROXY_ROLE determining behavior:
   cc          → /v1/messages (Anthropic) → glm5.1 v×k
   codex       → /v1/responses (Responses API) → glm5.1 v×k
-  passthrough → /v1/chat/completions (OpenAI passthrough) → dsv4p v×k
+  passthrough → /v1/chat/completions (OpenAI passthrough) → glm5.1 v×k
 
 Modular structure (R23→R29):
   config.py       — Constants, env vars, MODEL_MAP, AGENT_SUFFIXES, PROXY_ROLE, round-robin

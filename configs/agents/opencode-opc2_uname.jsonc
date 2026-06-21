@@ -1,13 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "_comment": "OpenCode (opc2_uname) 配置 — 通过 passthrough proxy gateway (40003) 路由",
-  "_key_changes": "R29: 1) baseURL 从 40001→40003; 2) model 从 glm5.2_oc→dsv4p_oc; 3) fallback 去掉",
-  "model": "proxy-gateway/dsv4p_oc",
-  "small_model": "proxy-gateway/dsv4p_oc",
+  "_key_changes": "R35.5: model changed from dsv4p_oc→glm5.1_oc (dsv4p delisted from ModelScope)",
+  "model": "proxy-gateway/glm5.1_oc",
+  "small_model": "proxy-gateway/glm5.1_oc",
   "provider": {
     "proxy-gateway": {
       "id": "proxy-gateway",
-      "name": "Proxy Gateway 40003 (OpenCode → dsv4p)",
+      "name": "Proxy Gateway 40003 (OpenCode → glm5.1)",
       "npm": "@ai-sdk/openai-compatible",
       "api": "http://127.0.0.1:40003/v1",
       "options": {
@@ -15,10 +15,10 @@
         "baseURL": "http://127.0.0.1:40003/v1"
       },
       "models": {
-        "dsv4p_oc": {
-          "id": "dsv4p_oc",
-          "name": "DSv4P (OpenCode)",
-          "family": "deepseek",
+        "glm5.1_oc": {
+          "id": "glm5.1_oc",
+          "name": "GLM-5.1 (OpenCode)",
+          "family": "glm",
           "tool_call": true,
           "reasoning": true,
           "temperature": true,

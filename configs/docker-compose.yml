@@ -3,11 +3,11 @@
 # 40001 (cc):          CC → Anthropic format → 41001 glm5.1 v×k + NV direct API
 # 40002 (codex):       Codex → Responses API → 41001 glm5.1 v×k
 # 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 glm5.1 v×k + NV direct API
-# 41001: ms_uni41001 LiteLLM (70 glm5.1 + 70 dsv4p = 140 dep, dsv4p dead on MS)
+# 41001: ms_uni41001 LiteLLM (70 glm5.1 dep, dsv4p removed from ModelScope)
 # NV LiteLLM containers REMOVED — proxy directly calls NVIDIA API via HTTPS CONNECT tunnel
 #
 # Port assignments: 41001=LiteLLM, 40000=dispatcher, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough)
-# ulimit nofile: 41001 uses 2048 soft / 65536 hard (140 dep)
+# ulimit nofile: 41001 uses 2048 soft / 65536 hard (70 dep)
 
 services:
   cc_postgres:
@@ -51,7 +51,7 @@ services:
         max-file: '5'
         tag: container/{{.Name}}
 
-  # ─── R29: Unified LiteLLM container (140 dep = 70 glm5.1 + 70 dsv4p) ───
+  # ─── LiteLLM container (70 glm5.1 dep) ───
   ms_uni41001:
     image: litellm/litellm:v1.87.0
     container_name: ms_uni41001
@@ -123,8 +123,6 @@ services:
       PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40001"
       PROXY_TIMEOUT: "300"
@@ -133,10 +131,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # ── R35.3: 40001 = 40005 mirror — both pure MS (NV_NUM_KEYS=0) ──
       # NV glm-5.1 API unavailable (0% success). NV fallthrough wastes ~40s.
@@ -200,8 +196,6 @@ services:
       PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40005"
       PROXY_TIMEOUT: "300"
@@ -210,10 +204,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # ── R35.3: 40005 pure MS (NV_NUM_KEYS=0) — same as 40001 ──
       # NV glm-5.1 API unavailable (0% success). Pure MS only.
@@ -311,8 +303,6 @@ services:
       PROXY_ROLE: codex
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40002"
       PROXY_TIMEOUT: "300"
@@ -321,10 +311,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
@@ -373,8 +361,6 @@ services:
       PROXY_ROLE: passthrough
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
       LITELLM_MODELS_URL_GLM51: http://ms_uni41001:4000/v1/models
-      LITELLM_URL_DSV4P: http://ms_uni41001:4000/v1/chat/completions
-      LITELLM_MODELS_URL_DSV4P: http://ms_uni41001:4000/v1/models
       LITELLM_KEY: sk-litellm-local
       LISTEN_PORT: "40003"
       PROXY_TIMEOUT: "300"
@@ -383,10 +369,8 @@ services:
       MAX_SCHEMA_DESC: "600"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
-      MODEL_INPUT_TOKEN_SAFETY_DSV4P: "128000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "2.0"
       # ── R35.3: NV disabled on 40003 — same as 40001/40005 ──
       # NV glm-5.1 API unavailable (0% success, all timeout/DNS error).

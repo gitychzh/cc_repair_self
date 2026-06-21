@@ -15,7 +15,7 @@ R29: PROXY_ROLE determines which endpoints this proxy serves:
 Three proxy containers each serve their own role:
   40001 (cc):          CC → Anthropic format → glm5.1 v×k cycling
   40002 (codex):       Codex → Responses API → glm5.1 v×k cycling
-  40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → dsv4p v×k cycling
+  40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → glm5.1 v×k cycling
 """
 import http.server
 import json
@@ -365,7 +365,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_openai_with_cycling(self):
         """Handle OpenAI-format requests from OpenClaw/OpenCode/Hermes.
 
-        R29: These agents now route to dsv4p backend via passthrough proxy (40003).
+        R29: These agents now route to glm5.1 backend via passthrough proxy (40003).
         The proxy does nearly-transparent passthrough with v×k cycling.
 
         Flow:
@@ -437,13 +437,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if is_stream and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
-        # R29: Remove thinking_budget for dsv4p backend (DSv4P doesn't support it)
-        if mapped_model == "dsv4p":
-            # Strip thinking-related params that dsv4p doesn't support
-            for param in ["reasoning_effort", "thinking_budget"]:
-                if param in body:
-                    _log("DSV4P-STRIP", f"removing unsupported param '{param}' from dsv4p request")
-                    del body[param]
 
         result = execute_request(self, body, mapped_model, request_id, metrics, t_start)
 
@@ -656,7 +649,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         R29: Shows models appropriate for this proxy's role:
           cc: glm5.1_cc + backward compat aliases
           codex: glm5.1_cx + backward compat aliases
-          passthrough: dsv4p_ol/dsv4p_oc/dsv4p_hm + backward compat aliases
+          passthrough: glm5.1_ol/glm5.1_oc/glm5.1_hm
         """
         all_models = []
         seen_ids = set()

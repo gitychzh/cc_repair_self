@@ -328,8 +328,8 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
 
 def collect_stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_start):
     """Collect a streaming SSE response from upstream and synthesize a non-stream
-    Anthropic-format response. Used for DSv4P non-stream requests because ModelScope
-    DSv4P non-stream responses include a 'delta' field that crashes LiteLLM's parser.
+    Anthropic-format response. Used for MS non-stream requests because ModelScope
+    MS non-stream responses include a 'delta' field that crashes LiteLLM's parser.
 
     handler: ProxyHandler instance (needed for _send_json)
     """

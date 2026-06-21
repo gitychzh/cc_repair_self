@@ -1,20 +1,20 @@
 # Hermes (opc2_uname) 配置模板 — 通过 passthrough proxy gateway (40003) 路由
-# R29: _ol/_oc/_hm now route to dsv4p backend via 40003 (passthrough proxy)
-# _key_changes: 1) base_url 从 40001→40003; 2) default 从 glm5.1_hm→dsv4p_hm; 3) context_length 保持 170000
+# R35.5: All agents route to glm5.1 backend (dsv4p delisted from ModelScope)
+# _key_changes: 1) base_url 从 40001→40003; 2) default 从 glm5.1_hm→glm5.1_hm (stays glm5.1); 3) context_length 保持 170000
 # 所有 OpenAI agent 必须通过 passthrough proxy gateway (40003)，不能直连 LiteLLM
-# 原因: LiteLLM 的 model_list 只有 v×k 路由名(dsv4pv1k1~v10k7)，没有 dsv4p 别名
-# Proxy gateway 做: model name映射(dsv4p_hm→dsv4p→v×k routing) + error cycling + variant fallback
+# 原因: LiteLLM 的 model_list 只有 v×k 路由名(glm5.1v1k1~v10k7)，没有 glm5.1 别名
+# Proxy gateway 做: model name映射(glm5.1_hm→glm5.1→v×k routing) + error cycling + variant fallback
 # Fallback功能暂时去掉
 
 model:
   base_url: http://127.0.0.1:40003/v1
-  default: dsv4p_hm
+  default: glm5.1_hm
   provider: proxy-gateway
   context_length: 170000
 providers:
   proxy-gateway:
     api_key: sk-litellm-local
     base_url: http://127.0.0.1:40003/v1
-    default_model: dsv4p_hm
-    name: Proxy Gateway 40003 (Hermes → dsv4p)
+    default_model: glm5.1_hm
+    name: Proxy Gateway 40003 (Hermes → glm5.1)
     transport: openai_chat

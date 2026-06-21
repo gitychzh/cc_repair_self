@@ -49,7 +49,7 @@ def responses_to_chat_body(cx_body, target_model):
 
     Args:
         cx_body: dict — Responses API request body
-        target_model: str — backend model name ("glm5.1" or "dsv4p")
+        target_model: str — backend model name ("glm5.1")
 
     Returns:
         dict — Chat Completions format request body ready for upstream.py

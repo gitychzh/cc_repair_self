@@ -1,6 +1,6 @@
 {
   "_comment": "OpenClaw (opc2_uname) 配置模板 — 通过 passthrough proxy gateway (40003) 路由",
-  "_key_changes": "R29: 1) baseUrl 从 40001→40003; 2) model 从 glm5.1_ol→dsv4p_ol; 3) fallback 去掉",
+  "_key_changes": "R35.5: model changed from dsv4p_ol→glm5.1_ol (dsv4p delisted from ModelScope)",
   "gateway": {
     "mode": "local",
     "auth": {
@@ -17,8 +17,8 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "dsv4p_ol",
-            "name": "DSv4P (OpenClaw)",
+            "id": "glm5.1_ol",
+            "name": "GLM-5.1 (OpenClaw)",
             "contextWindow": 170000
           }
         ]
@@ -30,11 +30,11 @@
     "defaults": {
       "verboseDefault": "on",
       "model": {
-        "primary": "proxy-gateway/dsv4p_ol"
+        "primary": "proxy-gateway/glm5.1_ol"
       },
       "models": {
-        "proxy-gateway/dsv4p_ol": {
-          "alias": "DSv4P (OpenClaw)"
+        "proxy-gateway/glm5.1_ol": {
+          "alias": "GLM-5.1 (OpenClaw)"
         }
       }
     }

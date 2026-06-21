@@ -61,7 +61,7 @@ class UpstreamResult:
         # Success fields
         self.resp = None  # http.client.HTTPResponse
         self.conn = None  # http.client.HTTPConnection
-        self.litellm_model = ""  # e.g. "glm5.1v3k5" or "nvk1" or "dsv4pv3k5"
+        self.litellm_model = ""  # e.g. "glm5.1v3k5" or "nvk1"
         self.variant_idx = 0  # 0-based variant index
         self.key_idx = 0  # 0-based key index
         self.is_stream = False  # whether upstream was asked for streaming
@@ -158,7 +158,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     Args:
         handler: ProxyHandler instance (needed for _make_upstream_conn)
         oai_body: dict — OpenAI-format request body
-        mapped_model: str — backend model name ("glm5.1" or "dsv4p")
+        mapped_model: str — backend model name ("glm5.1")
         request_id: str — unique request ID for logging
         metrics: dict — metrics dict to update
         t_start: float — request start timestamp
@@ -192,7 +192,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     # ─── Determine primary and fallback upstream types ───
     # R33.2: If initial slot is NV, try NV first then MS as fallback.
     # If initial slot is MS, try MS first then NV as fallback.
-    # For dsv4p or NV disabled: pure MS (unchanged behavior).
+    # For NV disabled: pure MS (unchanged behavior).
     if NV_ENABLED and mapped_model == "glm5.1":
         primary_type = start_upstream_type  # "ms" or "nv" from round-robin
         _log("MS-NV", f"slot={start_upstream_type} variant=v{start_variant_idx+1 if start_upstream_type=='ms' else 0} "
