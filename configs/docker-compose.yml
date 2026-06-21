@@ -138,11 +138,9 @@ services:
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # ── R35.2: 40001 = 40005 mirror — both pure MS (NV_NUM_KEYS=0, interval=1.5s) ──
-      # NV glm-5.1 API unavailable (20s timeout). NV fallthrough wastes ~40s/request.
-      # Both containers pure MS ensures lossless fallback (no NV delay).
-      # MIN_OUTBOUND_INTERVAL_S=1.5 validated on 40005: 429 rate 30% (down from 49% at 2.0s),
-      # avg TTFB 5.0s (down from 10.0s), 100% success rate, 0 ABORTs.
+      # ── R35.3: 40001 = 40005 mirror — both pure MS (NV_NUM_KEYS=0) ──
+      # NV glm-5.1 API unavailable (0% success). NV fallthrough wastes ~40s.
+      # Pure MS ensures lossless fallback (no NV delay).
       NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
@@ -217,11 +215,8 @@ services:
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # ── R35.2: 40005 EXPERIMENT — MIN_OUTBOUND_INTERVAL_S reduced 2.0→1.5 ──
-      # R35.1: pure MS mode (NV_NUM_KEYS=0, NV disabled). NV API unavailable, NV_FALLTHROUGH wastes 40s/request.
-      # R35.2: After ~5h stable pure MS operation: 0 ABORT, avg TTFB 8.5s, 62% 0-cycle success, very low 429 rate.
-      # Data supports reducing interval from 2.0→1.5 (25% throughput gain). Risk: more burst 429s.
-      # Monitoring: if ANY 429 increase appears, rollback to 2.0 immediately.
+      # ── R35.3: 40005 pure MS (NV_NUM_KEYS=0) — same as 40001 ──
+      # NV glm-5.1 API unavailable (0% success). Pure MS only.
       NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
@@ -360,11 +355,12 @@ services:
       start_period: 15s
     logging: *id001
 
-  # ─── 40003: Passthrough proxy (OpenAI → glm5.1 v×k + NV interleaving) ───
-  # R34: _ol/_oc/_hm now route to glm5.1 (dsv4p dropped from ModelScope).
-  # Handles Hermes/OpenClaw/OpenCode (_hm/_ol/_oc) — nearly-transparent passthrough
-  # R34: NV interleaving — after MS all 429, tries 5 NV containers for burst mitigation.
-  # R31.6: physically isolated — builds from configs/proxy/passthrough-proxy/ (own image).
+  # ─── 40003: Passthrough proxy (OpenAI → pure MS v×k, NV disabled R35.3) ───
+  # R34: _ol/_oc/_hm → nearly-transparent passthrough
+  # R35.3: NV_NUM_KEYS set to 0 — NV glm-5.1 API unavailable (0% success, 30~100s fallthrough waste).
+  #   40003 had NV_NUM_KEYS=5 but every NV attempt failed: DNS errors + 20s timeouts.
+  #   NV_FALLTHROUGH wasted 30~100s before MS fallback. Pure MS = instant response.
+  #   Same rationale as 40001/40005 (R35.2). All 3 CC/passthrough proxies now pure MS.
   auth_to_api_40003:
     build:
       context: ./proxy/passthrough-proxy
@@ -392,15 +388,14 @@ services:
       NUM_VARIANTS_GLM51: "10"
       NUM_VARIANTS_DSV4P: "10"
       MIN_OUTBOUND_INTERVAL_S: "2.0"
-      # ── R34.1: NV (NVIDIA) direct API tunnel — same as cc-proxy R33.2 ──
-      NV_NUM_KEYS: "5"
+      # ── R35.3: NV disabled on 40003 — same as 40001/40005 ──
+      # NV glm-5.1 API unavailable (0% success, all timeout/DNS error).
+      # NV_FALLTHROUGH wastes 30~100s. Pure MS = instant.
+      NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
-      NV_KEY3: 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
-      NV_KEY4: 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
-      NV_KEY5: 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
       NV_PROXY_URL: http://host.docker.internal:7894
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
