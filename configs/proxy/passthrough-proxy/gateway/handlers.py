@@ -592,12 +592,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "elapsed_since_request_start_ms": elapsed_ms,
                 "error_message": str(e)[:300],
             })
+            # R35.6: Set error_type so metrics status reflects actual outcome (not always 200)
+            metrics["error_type"] = f"OpenAIStream_{error_class}"
         except Exception as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
             error_class = type(e).__name__
             _log("ERR", f"OpenAI stream unexpected {error_class} after {elapsed_ms}ms: {e}")
+            # R35.6: Set error_type for unexpected stream errors
+            metrics["error_type"] = f"OpenAIStream_{error_class}"
 
-        metrics["status"] = 200
+        # R35.6: metrics status now reflects actual outcome, not always 200.
+        # Ghost-Stream bug: stream error → status=200 masked failures in metrics.
+        if metrics.get("error_type"):
+            metrics["status"] = 502  # Stream error — client received incomplete response
+        else:
+            metrics["status"] = 200  # Clean completion
         metrics["duration_ms"] = int((time.time() - t_start) * 1000)
         if streaming_input_tokens > 0:
             metrics["input_tokens"] = streaming_input_tokens

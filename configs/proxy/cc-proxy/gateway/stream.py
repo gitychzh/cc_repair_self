@@ -70,6 +70,11 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
         Uses streaming_input_tokens/streaming_output_tokens collected from
         the usage chunk (which arrives after finish_reason in OpenAI streaming).
         If those are 0, falls back to provided output_tokens/input_tokens_real.
+
+        R35.6: metrics status now reflects actual outcome — 200 for clean completion,
+        502 for stream errors (timeout/disconnect). Previously always set 200 (Ghost-Stream
+        bug) which masked real failures in metrics aggregation. The CC client still
+        receives HTTP 200 (SSE already started), but metrics.jsonl records the truth.
         """
         nonlocal message_start_sent, message_delta_sent, active_block_type, pending_stop_reason
         # R31.8: detect empty stream — no content block was ever opened means the
@@ -116,7 +121,12 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
             })
             message_delta_sent = True
         handler._send_sse("message_stop", {"type": "message_stop"})
-        metrics["status"] = 200
+        # R35.6: Use metrics["status"] to reflect actual outcome, not always 200.
+        # If error_type is set (stream error), use 502. Otherwise 200 (clean completion).
+        if metrics.get("error_type") and metrics["error_type"] not in (None, "empty_stream_response"):
+            metrics["status"] = 502  # Stream error — CC received incomplete response
+        else:
+            metrics["status"] = 200  # Clean completion
         metrics["duration_ms"] = int((time.time() - t_start) * 1000)
         _log_metrics(metrics)
         try:
@@ -476,7 +486,14 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
     elif finish_reason == "tool_calls":
         stop_reason = "tool_use"
 
-    metrics["status"] = 200
+    # R35.6: Use metrics["status"] to reflect actual outcome, not always 200.
+    # If error_type is set (collect stream error), use 502. Otherwise 200 (clean completion).
+    # Previously this was unconditional 200 (Ghost-Collect bug), masking stream timeout/disconnect
+    # errors that produced incomplete responses.
+    if metrics.get("error_type") and metrics["error_type"] not in (None, "empty_stream_response"):
+        metrics["status"] = 502  # Collect stream error — incomplete response
+    else:
+        metrics["status"] = 200  # Clean completion
     metrics["duration_ms"] = int((time.time() - t_start) * 1000)
     metrics["input_tokens"] = total_input_tokens
     metrics["output_tokens"] = total_output_tokens

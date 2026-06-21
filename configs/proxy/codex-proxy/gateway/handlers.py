@@ -258,6 +258,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling ───
             if result.all_keys_exhausted:
+                # R35.6: Log metrics for ABORT path (previously Ghost-ABORT — metrics.jsonl
+                # showed 100% status=200 while actual ABORTs happened, masking failures).
+                metrics["status"] = 429 if result.all_429 else 502
+                metrics["error_type"] = result.error_subcategory or "all_keys_exhausted"
+                metrics["duration_ms"] = result.elapsed_ms
+                metrics["key_cycle_attempts"] = len(result.key_cycle_attempts)
+                metrics["key_cycle_details"] = result.key_cycle_attempts
+                _log_metrics(metrics)
+
                 if result.all_429 and not result.all_non_quota_429:
                     cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
                     self._send_json(429, {
@@ -313,12 +322,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                          "model": request_model})
                     metrics["status"] = 400
                     metrics["error_type"] = "InputExceedsInvalidRequest"
+                    metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                    _log_metrics(metrics)
                     return
 
                 client_status = get_upstream_status_for_client(resp_status)
                 error_payload = convert_error(error_json, request_model)
                 extra_hdrs = None
                 if client_status == 429:
+                    # R35.6: is_quota_exhaustion now always returns False (same as cc-proxy)
                     quota_exhaust = is_quota_exhaustion(error_json)
                     retry_seconds = 30 if quota_exhaust else 5
                     extra_hdrs = {"retry-after": str(retry_seconds)}
@@ -326,6 +338,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 elif client_status == 529:
                     extra_hdrs = {"retry-after": "5"}
                     _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
+                # R35.6: Log metrics for non-cycling error path
+                metrics["status"] = client_status
+                metrics["error_type"] = "upstream_error"
+                metrics["error_message"] = str(error_json)[:200]
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 
@@ -443,6 +461,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not result.success:
             # ─── Error handling for OpenAI format ───
             if result.all_keys_exhausted:
+                # R35.6: Log metrics for ABORT path (Ghost-ABORT fix)
+                metrics["status"] = 429 if result.all_429 else 502
+                metrics["error_type"] = result.error_subcategory or "all_keys_exhausted"
+                metrics["duration_ms"] = result.elapsed_ms
+                metrics["key_cycle_attempts"] = len(result.key_cycle_attempts)
+                metrics["key_cycle_details"] = result.key_cycle_attempts
+                _log_metrics(metrics)
+
                 error_payload, client_status = format_openai_error_all_keys_exhausted(result, mapped_model, request_model)
                 extra_hdrs = None
                 if client_status == 429:
@@ -457,9 +483,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 error_payload, client_status = format_openai_error_upstream(error_json, request_model, resp_status)
                 extra_hdrs = None
                 if client_status == 429:
+                    # R35.6: is_quota_exhaustion now always returns False (same as cc-proxy)
                     quota_exhaust = is_quota_exhaustion(error_json)
                     retry_seconds = 30 if quota_exhaust else 5
                     extra_hdrs = {"retry-after": str(retry_seconds)}
+                # R35.6: Log metrics for non-cycling error path
+                metrics["status"] = client_status
+                metrics["error_type"] = "upstream_error"
+                metrics["error_message"] = str(error_json)[:200]
+                metrics["duration_ms"] = int((time.time() - t_start) * 1000)
+                _log_metrics(metrics)
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
 
@@ -570,12 +603,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "elapsed_since_request_start_ms": elapsed_ms,
                 "error_message": str(e)[:300],
             })
+            # R35.6: Set error_type so metrics status reflects actual outcome (not always 200)
+            metrics["error_type"] = f"OpenAIStream_{error_class}"
         except Exception as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
             error_class = type(e).__name__
             _log("ERR", f"OpenAI stream unexpected {error_class} after {elapsed_ms}ms: {e}")
+            # R35.6: Set error_type for unexpected stream errors
+            metrics["error_type"] = f"OpenAIStream_{error_class}"
 
-        metrics["status"] = 200
+        # R35.6: metrics status now reflects actual outcome, not always 200.
+        # Ghost-Stream bug: stream error → status=200 masked failures in metrics.
+        if metrics.get("error_type"):
+            metrics["status"] = 502  # Stream error — client received incomplete response
+        else:
+            metrics["status"] = 200  # Clean completion
         metrics["duration_ms"] = int((time.time() - t_start) * 1000)
         if streaming_input_tokens > 0:
             metrics["input_tokens"] = streaming_input_tokens
