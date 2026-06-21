@@ -100,11 +100,17 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _send_err(self, code, message):
+        # R35.6+: Set close_connection=True and send Connection: close header
+        # to prevent client from reusing a dead connection after error response.
+        # Without this, HTTP/1.1 default keep-alive lets the client send another
+        # request on the same socket — which will also fail, creating error cascades.
+        self.close_connection = True
         err = json.dumps({"type": "error", "error": {"type": "api_error",
                           "message": message}}).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(err)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(err)
 

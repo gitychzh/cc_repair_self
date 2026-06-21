@@ -93,8 +93,9 @@ def convert_error(error_json, request_model):
     # Retrying the same oversized content never works. Previously mapped to
     # overloaded_error → CC auto-compact → catastrophic context loss. Now:
     # invalid_request_error → CC stops → user sees error, starts new conversation.
-    elif ("range of input length" in msg_lower
-          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))):
+    elif (("range of input length" in msg_lower
+          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower)))
+          and "thinking_budget" not in msg_lower):
         err_type = "invalid_request_error"
     # Intentionally NOT mapping other 400 InvalidParameter to invalid_request_error.
     # CC stops on invalid_request_error, but ModelScope InvalidParameter is a
@@ -186,7 +187,7 @@ def format_openai_error_all_keys_exhausted(result, mapped_model, request_model):
       NEVER use code "529" — same disaster as CC overloaded_error for some agents.
     """
     if result.all_429 and not result.all_non_quota_429:
-        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
         return {
             "error": {
                 "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys have exhausted their "
@@ -197,7 +198,7 @@ def format_openai_error_all_keys_exhausted(result, mapped_model, request_model):
             }
         }, 429
     elif result.all_429 and result.all_non_quota_429:
-        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
         return {
             "error": {
                 "message": f"All {len(result.key_cycle_attempts)} ModelScope API keys returned transient 429 errors "
@@ -209,8 +210,8 @@ def format_openai_error_all_keys_exhausted(result, mapped_model, request_model):
         }, 429
     else:
         failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
-        timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
-        connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+        timeout_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+        connerr_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
         return {
             "error": {
                 "message": f"All {len(result.key_cycle_attempts)} key groups failed for model {mapped_model} "
@@ -293,7 +294,7 @@ def format_responses_error_all_keys_exhausted(result, mapped_model, request_mode
       - Has connection error → server_error + code "502"
     """
     if result.all_429 and not result.all_non_quota_429:
-        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
         return {
             "error": {
                 "type": "rate_limit_error",
@@ -304,7 +305,7 @@ def format_responses_error_all_keys_exhausted(result, mapped_model, request_mode
             }
         }, 429
     elif result.all_429 and result.all_non_quota_429:
-        cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+        cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
         return {
             "error": {
                 "type": "rate_limit_error",
@@ -316,8 +317,8 @@ def format_responses_error_all_keys_exhausted(result, mapped_model, request_mode
         }, 429
     else:
         failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
-        timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
-        connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+        timeout_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+        connerr_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
         return {
             "error": {
                 "type": "server_error",

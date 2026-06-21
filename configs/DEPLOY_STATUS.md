@@ -1,12 +1,12 @@
-# Deploy Status — opc_uname + opc2_uname (R35.6, 2026-06-21)
+# Deploy Status — opc_uname + opc2_uname (R35.7, 2026-06-21)
 
-## Architecture (R35.5 — dispatcher + blue-green CC proxy + pure MS mode + dsv4p removed)
+## Architecture (R35.7 — dispatcher + blue-green CC proxy + pure MS mode + dsv4p removed + code bug fixes)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
-  → :40000 dispatcher (model-based routing + connection-failure auto-fallback)
-      ├── opus/未知 → :40005 proxy (EXPERIMENT, pure MS, interval=1.5s)
+  → :40000 dispatcher (auto-fallback relay + close_connection on error)
+      ├── PRIMARY  → :40005 proxy (EXPERIMENT, pure MS, interval=1.5s)
       │   [40005 连接失败 → 自动 fallback 到 40001]
-      └── sonnet    → :40001 proxy (STABLE/MIRROR, pure MS, interval=1.5s)
+      └── FALLBACK → :40001 proxy (MIRROR, pure MS, interval=1.5s)
       │   [40001 连接失败 → 自动 fallback 到 40005]
 
 :40001/40005  cc-proxy → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled R35.2)
@@ -48,6 +48,26 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 3. **passthrough-proxy handlers.py**: Added `_log_metrics(metrics)` to ALL error paths (ABORT, non-cycling upstream error) — Ghost-ABORT bug fixed
 4. **Effect**: All 429 errors now → `429_rate_limit` → `all_non_quota_429=True` → retry-after:5 → OpenClaw retries in 5s (was giving up at 180s)
 5. **Effect**: metrics.jsonl will now correctly show ABORT events (status=429/502) instead of 100% status=200
+
+## R35.7: Stale Container Fix + Code Bug Fixes
+
+### Stale Container Deployment (Critical)
+- **Problem**: R35.5/R35.6/R35.6+ code changes were committed to git but containers were NEVER rebuilt
+- **40003 passthrough-proxy**: `is_quota_exhaustion()` still using keyword matching → 140 `429_quota_exhausted` in logs → retry-after:180 still sent to OpenClaw → **R35.6 root cause still active!**
+- **40002 codex-proxy**: same keyword matching bug → retry-after:30
+- **All containers**: `MODEL_UPSTREAMS` still contained `dsv4p` gateway, Ghost-ABORT/Ghost-Stream fixes not deployed
+- **Fix**: `sync_config.sh` + rebuild all 5 containers with `--build --force-recreate`
+- **Lesson**: code commit ≠ deployment. Always sync + rebuild + smoke test after code changes.
+
+### R35.7 Code Bug Fixes (5 bugs)
+1. **PROXY_TIMEOUT NameError** (HIGH): stream.py referenced `PROXY_TIMEOUT` but didn't import it → NameError crash on stream timeout. Fixed: added `PROXY_TIMEOUT` to import in all 3 proxy stream.py files.
+2. **Operator precedence** (MEDIUM): `convert_error()` / `format_openai_error_upstream()` `thinking_budget` guard only covered `invalidparameter` branch, not `range of input length` branch. Fixed: re-parenthesized to guard both branches.
+3. **key_idx KeyError** (HIGH-preventive): passthrough/codex error_mapping.py + handlers.py used `a['key_idx']` directly → KeyError for NV entries. Fixed: `a.get('key_idx', a.get('nv_key_idx', 0))`.
+4. **NV error type classification** (MEDIUM-preventive): `all_429`/`all_non_quota_429`/`has_conn_err` in all 3 upstream.py files missing NV error types. Fixed: added `429_nv_rate_limit`/`NVConnectionRefusedError`/`NVConnectionError`.
+5. **Dispatcher close_connection** (HIGH): `_send_err()` didn't set `close_connection=True` → client reusing dead connection. Fixed: added `self.close_connection = True` + `Connection: close` header.
+
+### 40003 Stale rr_counter Cleanup
+- `{"dsv4p": 6, "glm5.1": 301}` → cleaned to `{"glm5.1": 301}` (dsv4p variant counter no longer relevant)
 
 ## R35.2: Blue-Green Mirror (Both Pure MS)
 
@@ -128,18 +148,17 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, pure MS (NV_NUM_KEYS=0 R35.5) |
 | auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), interval=1.5s |
 
-## Deploy Method (R35.5)
+## Deploy Method (R35.7)
 ```bash
-# cc-proxy 40005 rebuild (experiment)
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005
+# IMPORTANT: Code changes require sync + rebuild (R35.7 lesson: code commit ≠ deployment)
+# Step 1: sync configs from git repo to /opt/cc-infra
+bash ~/cc_ps/cc_repair_self/scripts/sync_config.sh
 
-# cc-proxy 40001 rebuild (mirror — synced config)
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40001
+# Step 2: rebuild containers (must use --build --force-recreate)
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
 
-# dispatcher rebuild
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000
-
-# All proxy rebuild (full — needed after R35.5 dsv4p removal)
+# Step 3: verify
+curl -sf http://127.0.0.1:40000/health && curl -sf http://127.0.0.1:40005/health
 cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
 
 # LiteLLM rebuild (70 dep — dsv4p removed)
@@ -152,13 +171,17 @@ cd /opt/cc-infra && docker restart ms_uni41001
 |-----------|-------|-----------|-------|
 | contextWindow | 170000 | settings.json | CC max context tracking |
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
-| NV_NUM_KEYS | 0 | ALL proxies | R35.5: pure MS everywhere (NV disabled) |
+| NV_NUM_KEYS | 0 | ALL proxies | R35.7: pure MS everywhere (NV disabled) |
 | NV_TIMEOUT | 20 | all proxies | R35.1: NV-specific timeout |
 | MIN_OUTBOUND_INTERVAL_S | 1.5 | 40001/40005 | R35.2: validated (429 rate 30%) |
 | MIN_OUTBOUND_INTERVAL_S | 2.0 | 40003 | unchanged |
 | LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
+| PROXY_TIMEOUT | 300 | all proxies | Overall request timeout (now imported in stream.py) |
 | NV_PROXY_URL | host.docker.internal:7894 | 40001/40003/40005 | Dedicated US proxy port |
+| is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers |
+| PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
+| dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -174,3 +197,5 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.3: (Round 3 data collection, no parameter changes)
 - R35.4: Log rotation (logger.py startup cleanup, LOG_RETENTION_DAYS=7 env), stale log dirs removed
 - R35.5: Complete dsv4p/deepseek-v4-pro removal (ModelScope delisted), all agents route to glm5.1 only
+- R35.6: OpenClaw stuck bug fix (is_quota_exhaustion asymmetry + Ghost-ABORT metrics)
+- R35.7: Stale container deployment fix + 5 code bug fixes (PROXY_TIMEOUT NameError, operator precedence, key_idx KeyError, NV classification, dispatcher close_connection)

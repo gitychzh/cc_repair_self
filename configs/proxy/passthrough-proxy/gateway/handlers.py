@@ -260,7 +260,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             # ─── Error handling ───
             if result.all_keys_exhausted:
                 if result.all_429 and not result.all_non_quota_429:
-                    cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+                    cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
                     self._send_json(429, {
                         "type": "error",
                         "error": {
@@ -272,7 +272,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         "model": request_model,
                     }, extra_headers={"retry-after": "180"})
                 elif result.all_429 and result.all_non_quota_429:
-                    cycled_keys = ', '.join(['k' + str(a['key_idx']+1) for a in result.key_cycle_attempts])
+                    cycled_keys = ', '.join(['k' + str(a.get('key_idx', a.get('nv_key_idx', 0))+1) for a in result.key_cycle_attempts])
                     self._send_json(429, {
                         "type": "error",
                         "error": {
@@ -285,8 +285,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     }, extra_headers={"retry-after": "5"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
-                    timeout_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
-                    connerr_keys = [f"k{a['key_idx']+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
+                    timeout_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
+                    connerr_keys = [f"k{a.get('key_idx', a.get('nv_key_idx', 0))+1}" for a in result.key_cycle_attempts if a.get("error_type") in ("ConnectionRefusedError", "ConnectionError")]
                     self._send_json(502, {
                         "type": "error",
                         "error": {

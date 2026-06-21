@@ -1,94 +1,80 @@
-# Round R35.6+ — 2026-06-21
+# Round R35.7 — 2026-06-21
 
-## R35.6: OpenClaw 卡住根因修复
+## R35.7: Stale Container Deployment Fix + Code Bug Fixes
 
-### 症状
-OpenClaw (_ol) 报错 `{ Agent failed before reply: All 7 ModelScope API keys have exhausted their token quota for model glm5.1... }` 然后直接卡住。而 Claude Code (_cc) 从不卡住，同样碰到 7key 全 429 却 5 秒后自动恢复。
+### 发现：所有 4 个 proxy 容器运行旧版代码
 
-### 根因链（完整5步）
+R35.5/R35.6/R35.6+ 声称在源码中修复了多个问题，但 **容器从未 rebuild**，导致：
 
-**Step 1**: ModelScope RPM burst throttle 返回 429 body `"You exceeded your current quota"` — 这是 Aliyun stock phrase，**实际是 RPM 节流而非 quota 耗尽**
+1. **40003 passthrough-proxy**: `is_quota_exhaustion()` 仍用旧版关键词匹配 → 140 次 `429_quota_exhausted`（应为 `429_rate_limit`）→ `all_non_quota_429=False` → **retry-after:180 发给 OpenClaw** → OpenClaw 卡住（R35.6 根因仍在生效！）
+2. **40002 codex-proxy**: 同样用旧版关键词匹配 → retry-after:30 → Codex CLI 同样的不对称 bug
+3. **40001/40005 cc-proxy**: `is_quota_exhaustion()` 已更新为 `return False`，但 `MODEL_UPSTREAMS` 仍包含 `dsv4p` gateway（R35.5 删除）
+4. **所有容器**: Ghost-ABORT/Ghost-Stream/Ghost-Collect 修复未生效，metrics 仍显示 `status=200` 遮掩失败
 
-**Step 2**: passthrough proxy (40003) `is_quota_exhaustion()` 用关键词匹配 `"quota"/"exhausted"` → 匹配到 → 标记 `429_quota_exhausted` 
-- cc-proxy (40001/40005) 同一函数已改为 always-return-False（325/331 false positive 证实关键词不可靠）
+**根因**：代码 commit 到 git 但未执行 `sync_config.sh` + `docker compose up -d --build --force-recreate`。源码变了 ≠ 容器变了。
 
-**Step 3**: `upstream.py` line 968-970 判断 `all_non_quota_429`：
-- 要求所有 cycle attempt 的 error_type ∈ `(None, "429", "429_rate_limit")` 
-- passthrough 产生 `"429_quota_exhausted"` 不在集合 → `all_non_quota_429=False`
-- cc-proxy 产生 `"429_rate_limit"` 在集合 → `all_non_quota_429=True`
+### 修复 Action 1: Rebuild all containers (两次)
 
-**Step 4**: handlers.py retry-after 决策：
-- `all_non_quota_429=False` → retry-after:**180** (passthrough)
-- `all_non_quota_429=True` → retry-after:**5** (cc-proxy)
+1. 第一次 rebuild：`sync_config.sh` → rebuild 40001/40002/40003/40005 — 修复 is_quota_exhaustion + dsv4p removal + Ghost-ABORT
+2. 清理 40003 stale dsv4p rr_counter: `{"dsv4p": 6, "glm5.1": 301}` → `{"glm5.1": 301}`
+3. 第二次 rebuild：代码 bug 修复后 rebuild 全部 5 个容器（含 dispatcher）
 
-**Step 5**: CC/OpenClaw 客户端重试逻辑：
-- **retry-after ≤ 60s → CC 正常退避重试**（5s → 等 5 秒 → 重试 → 多数 burst 恢复 → 成功）
-- **retry-after > 60s → CC 抛 too_long → 直接放弃不重试**（180s → OpenClaw 卡住显示错误消息）
+### 修复 Action 2: Code Bug Fixes (5 个 bug)
 
-### 修复
-1. **passthrough error_mapping.py**: `is_quota_exhaustion()` → always `return False`，与 cc-proxy 统一
-2. **cc-proxy handlers.py**: ABORT + non-cycling error 路径添加 `_log_metrics()`（Ghost-ABORT bug）
-3. **passthrough handlers.py**: ABORT + non-cycling error 路径添加 `_log_metrics()`（Ghost-ABORT bug）
+#### BUG 11 (高): PROXY_TIMEOUT NameError in stream.py — 所有 3 个 proxy
+- **问题**: stream.py line 300/437 引用 `PROXY_TIMEOUT` 但 import 中未包含 → stream timeout 时 NameError crash
+- **影响**: 如果 stream 阶段发生 timeout，proxy 会 crash（无响应返回给 CC → CC ConnectionRefused 卡死）
+- **修复**: 在 cc-proxy/passthrough-proxy/codex-proxy 的 stream.py import 行添加 `PROXY_TIMEOUT`
+- **数据支撑**: 代码审查发现，NameError 在 Python 中是确定性 crash
 
-### 效果
-- 所有端口 429 → `429_rate_limit` → `all_non_quota_429=True` → **retry-after:5** → 客户端 5 秒重试
-- metrics.jsonl 正确记录 ABORT 事件（status=429/502），不再 100% status=200 遮掩失败
-- OpenClaw 卡住问题永久解决
+#### BUG 7 (中): operator precedence — thinking_budget + input overflow 误分类
+- **问题**: `convert_error()` 中 `"range of input length" or ("invalidparameter"... ) and "thinking_budget" not in msg_lower` → `thinking_budget` guard 只覆盖 `invalidparameter` 分支，不覆盖 `range of input length` 分支
+- **影响**: 如果 ModelScope 返回同时含 `range of input length` + `thinking_budget` 的错误，会被分类为 `invalid_request_error`（CC 停止）而非 `api_error`（CC 重试）
+- **修复**: 重新括号化：`(("range of input length"... ) or ("invalidparameter"... )) and "thinking_budget" not in msg_lower`
+- **数据支撑**: `is_input_overflow()` 函数已有正确 guard（覆盖两分支），但 `convert_error()`/`format_openai_error_upstream()` 不一致
 
-### 部署验证 (15:26 CST)
-- 40003 rebuild: ✅ startup 正常, `{'glm5.1': 197}` (dsv4p counter 已清除)
-- 40001 rebuild: ✅ 
-- 40005 rebuild: ✅ 
-- curl 40005: ✅ 200 
-- curl 40001: ✅ 200 
+#### BUG 1/13 (高-预防性): KeyError on key_idx for NV entries
+- **问题**: passthrough/codex error_mapping.py + handlers.py 用 `a['key_idx']` 直接访问，NV entries 有 `nv_key_idx` 而非 `key_idx` → KeyError crash
+- **影响**: 当前 NV_NUM_KEYS=0 不会触发，但未来 NV 重启时立即 crash
+- **修复**: 改为 `a.get('key_idx', a.get('nv_key_idx', 0))` 模式（cc-proxy 已有此模式）
+- **数据支撑**: 预防性修复，基于代码逻辑审查
+
+#### BUG 2/3/4 (中-预防性): upstream.py classification checks 缺少 NV error types
+- **问题**: `all_429`/`all_non_quota_429`/`has_conn_err` 不包含 NV error types → NV 重启后分类错误
+- **修复**: 添加 `429_nv_rate_limit`/`NVConnectionRefusedError`/`NVConnectionError` 到所有 3 个 proxy 的 upstream.py
+- **数据支撑**: 预防性修复，保持 MS/NV 分类逻辑一致
+
+#### Dispatcher BUG 1 (高): _send_err missing close_connection
+- **问题**: dispatcher `_send_err()` 不设 `close_connection=True` → HTTP/1.1 keep-alive → client 复用 dead connection → 第二请求也失败
+- **修复**: 在 `_send_err()` 中添加 `self.close_connection = True` + `Connection: close` header
+- **数据支撑**: HTTP/1.1 规范：keep-alive 是默认行为，错误后应主动关闭连接
+
+### 部署验证 (17:40 CST)
+- 40005 health: ✅ `{"status":"ok","proxy_role":"cc","gateways":{"glm5.1":...},"port":40005}`（dsv4p gateway 已移除）
+- 40001 health: ✅ 同上
+- 40003 health: ✅ `{"status":"ok","proxy_role":"passthrough","gateways":{"glm5.1":...},"port":40003}`（dsv4p gateway 已移除）
+- 40002 health: ✅ 同上
+- 40000 health: ✅ dispatcher 正常
+- curl 40005: ✅ 200
 - curl 40003: ✅ 200
+- PROXY_TIMEOUT import: ✅ 所有 3 proxy 已添加
+- dispatcher close_connection: ✅ 已添加
 
-### Ghost-ABORT bug 说明
-之前 ABORT (all_keys_exhausted) 路径不调用 `_log_metrics()`：
-- cc-proxy handlers.py line 211-252: 3 个分支全部直接 return，没有 `_log_metrics`
-- passthrough handlers.py line 450-457: 同样直接 return
+### 关键教训（长期知识）
 
-结果：metrics.jsonl 显示 100% status=200，实际有 ABORT 事件但完全被遮掩。
-这也是为什么日志"看起来一切正常"但 OpenClaw 实际卡住了——metrics 完全看不到失败。
+**代码变更 ≠ 部署变更**。每次代码 commit 后必须：
+1. `bash scripts/sync_config.sh`（同步源码到 /opt/cc-infra）
+2. `cd /opt/cc-infra && docker compose up -d --build --force-recreate <containers>`
+3. curl smoke test 验证
+
+否则 git 上的"修复"只是纸面修复，容器仍运行旧版代码。
 
 ## 参数现状 (40001=40005 mirror, 40003 unified)
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False(all ports)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False(all ports, now actually deployed) | PROXY_TIMEOUT import in stream.py(fixed) | dispatcher close_connection(fixed)
 
 ## 下轮待办
 - 监控 40003 新 metrics 格式（error_type 应全部为 `429_rate_limit`，不再有 `429_quota_exhausted`）
 - 监控 ABORT metrics 是否正确记录（status=429/502 代替 status=0/200）
 - 监控 Ghost-Stream/Ghost-Collect 修复效果（stream error → status=502 代替 200）
+- 监控 PROXY_TIMEOUT import 是否消除 stream.py NameError（如有 stream timeout 事件）
 - throttle 1.5→1.0 测试（需有人值守）
-
-## R35.6+ 追加修复
-
-### codex-proxy (40002) is_quota_exhaustion 统一
-- codex-proxy 的 `is_quota_exhaustion()` 也用了旧版关键词匹配（"quota"/"exhausted"等）
-- 修复：改为 always return False，与 cc-proxy/passthrough-proxy 统一
-- 效果：Codex CLI 不会再碰到 retry-after:30 的错误（与 OpenClaw 相同的不对称 bug）
-
-### Ghost-Stream (E1b) 修复 — 所有 3 proxy 的 stream.py
-- `_emit_graceful_end()` 之前无条件设置 `metrics["status"]=200`
-- 即使 stream timeout/disconnect 发生（error_type="StreamSocketTimeout"），metrics 仍记 200
-- 修复：error_type 已设置 → status=502；无 error_type → status=200
-- 仅诊断性修复：CC 客户端行为不变（已收到 HTTP 200 SSE），但 metrics.jsonl 真实记录
-
-### Ghost-Collect (E1c) 修复 — 所有 3 proxy 的 stream.py
-- `collect_stream_to_anth()` 之前无条件设置 `metrics["status"]=200`（line 479）
-- 即使 collect timeout 发生（error_type="CollectStreamSocketTimeout"），metrics 仍记 200
-- 修复：同 Ghost-Stream — error_type 已设置 → status=502；无 error_type → status=200
-
-### _stream_openai_passthrough Ghost-Stream 修复 — passthrough + codex handlers.py
-- `_stream_openai_passthrough()` 的 exception handler 不设 error_type
-- 导致 unconditional `metrics["status"]=200`
-- 修复：exception handler 现在设 `metrics["error_type"]=f"OpenAIStream_{error_class}"`
-- metrics status 根据 error_type 判断：有 → 502；无 → 200
-
-### codex-proxy handlers.py Ghost-ABORT 修复
-- 与 R35.6 cc-proxy/passthrough-proxy 修复相同
-- ABORT (all_keys_exhausted) 路径 + non-cycling error 路径 现在调用 `_log_metrics()`
-
-### log_cleanup.sh crontab
-- 已添加到 opc_uname crontab：`0 3 * * *`（每天凌晨 3 点）
-- 清理 7 天前的外部日志文件（logger.py startup cleanup 覆盖容器内日志）
-

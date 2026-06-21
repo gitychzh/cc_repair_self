@@ -14,7 +14,7 @@ import datetime
 import http.client
 import socket
 
-from .config import THINKING_SIGNATURE_DEFAULT, UPSTREAM_TIMEOUT
+from .config import THINKING_SIGNATURE_DEFAULT, UPSTREAM_TIMEOUT, PROXY_TIMEOUT
 from .logger import _log, _log_metrics, _log_error_detail
 
 

@@ -93,8 +93,9 @@ def convert_error(error_json, request_model):
     # Retrying the same oversized content never works. Previously mapped to
     # overloaded_error → CC auto-compact → catastrophic context loss. Now:
     # invalid_request_error → CC stops → user sees error, starts new conversation.
-    elif ("range of input length" in msg_lower
-          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower))):
+    elif (("range of input length" in msg_lower
+          or ("invalidparameter" in msg_lower and ("input length" in msg_lower or "input token" in msg_lower or "exceeds" in msg_lower)))
+          and "thinking_budget" not in msg_lower):
         err_type = "invalid_request_error"
     # Intentionally NOT mapping other 400 InvalidParameter to invalid_request_error.
     # CC stops on invalid_request_error, but ModelScope InvalidParameter is a

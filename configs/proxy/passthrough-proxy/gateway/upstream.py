@@ -752,12 +752,13 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
 
     # ─── All keys exhausted in start variant ───
     # Every key in this variant failed. Classify the failure type.
+    # R35.6+: Added NV error types to all_429/has_conn_err checks for future NV re-enable.
 
-    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted") for a in key_cycle_attempts)
+    all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted", "429_nv_rate_limit") for a in key_cycle_attempts)
     has_500 = any(a.get("error_type") == "500_internal_server_error" for a in key_cycle_attempts)
     has_502 = any(a.get("error_type") == "502_bad_gateway" for a in key_cycle_attempts)
     has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
-    has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError") for a in key_cycle_attempts)
+    has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "NVConnectionRefusedError", "NVConnectionError") for a in key_cycle_attempts)
 
     # ─── Variant Fallback (R23) ───
     # When all 7 keys in the start variant are 429, try 2 fallback variants
@@ -945,11 +946,12 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
 
         # Merge fallback attempts into classification
         all_attempts = key_cycle_attempts + variant_fallback_attempts
-        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted", "429_rate_limit_variant_fallback", "429_quota_exhausted_variant_fallback") for a in all_attempts)
+        # R35.6+: Added NV error types to all_429/has_conn_err checks for future NV re-enable.
+        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted", "429_rate_limit_variant_fallback", "429_quota_exhausted_variant_fallback", "429_nv_rate_limit", "429_nv_rate_limit_variant_fallback") for a in all_attempts)
         has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_variant_fallback_non429") for a in all_attempts)
         has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_variant_fallback_non429") for a in all_attempts)
         has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_variant_fallback") for a in all_attempts)
-        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_variant_fallback", "ConnectionError_variant_fallback") for a in all_attempts)
+        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_variant_fallback", "ConnectionError_variant_fallback", "NVConnectionRefusedError", "NVConnectionError", "NVConnectionRefusedError_variant_fallback", "NVConnectionError_variant_fallback") for a in all_attempts)
     else:
         # Non-429 mixed errors: no variant fallback attempted
         all_attempts = key_cycle_attempts
@@ -965,8 +967,9 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
 
     all_non_quota_429 = False
     if all_429:
+        # R35.6+: Added "429_nv_rate_limit" — NV transient 429 should get retry-after:5, not 180.
         all_non_quota_429 = all(
-            a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback")
+            a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback", "429_nv_rate_limit")
             for a in all_attempts
         )
         if all_non_quota_429:
