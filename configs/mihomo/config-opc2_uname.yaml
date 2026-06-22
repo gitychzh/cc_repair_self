@@ -169,9 +169,10 @@ proxy-groups:
   - nv-us-provider
 proxy-providers:
   nv-us-provider:
-    # R36.3→R36.4: Removed regional filter — latency-based top5 selection by script
-    # needs full US node pool for optimal choice, not just SJ/ASH/LA subset.
-    # filter removed to give nv_proxy_selector.sh access to all 32 US nodes.
+    # R36.4: Must filter to US nodes only — NV inference requires US exit IP.
+    # 日本节点 GET /v1/models works (metadata), but POST inference times out from JP IP.
+    # Filter keeps only US nodes; nv_proxy_selector.sh selects top5 by latency within US pool.
+    filter: 美国
     health-check:
       enable: true
       interval: 300
