@@ -75,10 +75,13 @@ MODEL_UPSTREAMS = {
 }
 DEFAULT_UPSTREAM_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 
-# ─── NVIDIA (NV) upstream configuration (R33.2) ──────────────────────────────
+# ─── NVIDIA (NV) upstream configuration (R33.2 → R36: per-key proxy) ────────
 # cc-proxy calls NVIDIA API directly via US proxy (HTTPS_PROXY env).
 # NV has no RPM limit, no variants — simpler upstream than MS.
 # Only enabled for glm5.1 backend (CC proxy, port 40005).
+# R36: Each NV key uses its own dedicated mihomo proxy port (fault isolation).
+#   NV_PROXY_URL_MAP: JSON map {nv_key_idx → proxy URL}
+#   If NV_PROXY_URL_MAP is not set, all keys share NV_PROXY_URL (backward compat).
 NV_BASEURL = os.environ.get("NV_BASEURL", "")
 NV_NUM_KEYS = int(os.environ.get("NV_NUM_KEYS", "0"))
 NV_KEYS = []
@@ -86,22 +89,56 @@ for i in range(1, NV_NUM_KEYS + 1):
     key = os.environ.get(f"NV_KEY{i}", "")
     if key:
         NV_KEYS.append(key)
-NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # HTTPS proxy for NVIDIA API
-NV_TIMEOUT = int(os.environ.get("NV_TIMEOUT", "20"))  # R35.1: NV-specific timeout (default 20s, vs UPSTREAM_TIMEOUT=60s for MS)
+NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # Default HTTPS proxy (fallback)
+NV_TIMEOUT = int(os.environ.get("NV_TIMEOUT", "60"))  # R36: 60s timeout (stability first)
 NV_ENABLED = bool(NV_BASEURL and NV_KEYS)  # Auto-detect: enabled if keys+URL present
+
+# NV proxy URL per key — each NV key uses its own dedicated mihomo proxy port
+# R36: NV_PROXY_URL_MAP env var is a JSON string mapping nv_key_idx (str) → proxy URL
+# Example: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895",...}'
+NV_PROXY_URL_MAP = {}  # nv_key_idx (str) → proxy URL string
+_nv_proxy_url_map_raw = os.environ.get("NV_PROXY_URL_MAP", "")
+if _nv_proxy_url_map_raw:
+    try:
+        NV_PROXY_URL_MAP = json.loads(_nv_proxy_url_map_raw)
+        # Validate: all keys must be strings, all values must be strings
+        for k, v in NV_PROXY_URL_MAP.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                print(f"[NV] WARN: NV_PROXY_URL_MAP invalid entry {k}={v}, skipping", file=sys.stderr, flush=True)
+                NV_PROXY_URL_MAP = {}
+                break
+    except json.JSONDecodeError as e:
+        print(f"[NV] WARN: NV_PROXY_URL_MAP parse error ({e}), falling back to NV_PROXY_URL", file=sys.stderr, flush=True)
+        NV_PROXY_URL_MAP = {}
+if not NV_PROXY_URL_MAP and NV_PROXY_URL:
+    # Fallback: all keys use same NV_PROXY_URL (backward compat with R33-R35)
+    for i in range(NV_NUM_KEYS):
+        NV_PROXY_URL_MAP[str(i)] = NV_PROXY_URL
+    if NV_NUM_KEYS > 0:
+        print(f"[NV] Using single NV_PROXY_URL for all {NV_NUM_KEYS} keys (backward compat)", file=sys.stderr, flush=True)
+
+# Absolute cycle limit: when counter >= NV_MAX_CYCLE → reset to 0
+# Prevents JSON file from growing indefinitely. 1200000 ≈ 12 slots × 100000 cycles
+NV_MAX_CYCLE = int(os.environ.get("NV_MAX_CYCLE", "1200000"))
 
 # NV model IDs on NVIDIA API
 NV_MODEL_IDS = {
     "glm5.1": "z-ai/glm-5.1",
 }
 
-# ─── MS-NV interleaving (R33.2) ──────────────────────────────────────────────
-# Total slots = NUM_KEYS (MS) + NV_NUM_KEYS (NV) per glm5.1 round.
-# Interleaving pattern: msk1→nvk1→msk2→nvk2→msk3→nvk3→msk4→nvk4→msk5→nvk5→msk6→nvk1→msk7→nvk2→...
-# slot_idx N → (N % total_slots) → if < NUM_KEYS: MS key slot, else NV key slot
-# For MS slot: variant_idx=(N//total_slots)%NUM_VARIANTS, key_idx=slot_idx
-# For NV slot: nv_key_idx = (slot_idx - NUM_KEYS) % NV_NUM_KEYS
-# This interleaving only applies when NV_ENABLED=True and base_model="glm5.1".
+# ─── MS-NV interleaving (R33.2 → R36: strict alternating) ───────────────────
+# R36: Strict alternating pattern: ms→nv→ms→nv→ms→nv→...
+# Total slots = NUM_KEYS (MS) + NV_NUM_KEYS (NV) = 7+5 = 12
+# Slot assignment (strict alternating):
+#   Even slots (0,2,4,6,8,10) → MS: key_idx = (slot//2) % NUM_KEYS
+#   Odd slots (1,3,5,7,9,11) → NV: nv_key_idx = (slot//2) % NV_NUM_KEYS
+#   Variant for MS: (counter // total_slots) % NUM_VARIANTS
+#
+# Example (cycle 0, counter 0-11):
+#   0: ms(k1), 1: nv(k1→7894), 2: ms(k2), 3: nv(k2→7895), 4: ms(k3), 5: nv(k3→7896),
+#   6: ms(k4), 7: nv(k4→7897), 8: ms(k5), 9: nv(k5→7899), 10: ms(k6), 11: nv(k1→7894)
+#
+# R33.2 old pattern (7MS then 5NV, no alternating) is replaced by R36 strict alternating.
 MS_NV_TOTAL_SLOTS = None  # Computed after NUM_KEYS is defined (see below)
 
 # ─── Agent type suffixes (R23, R29 update, R35.5 dsv4p removed) ───────────
@@ -375,49 +412,69 @@ def _save_rr_counter() -> None:
 _load_rr_counter()
 
 def _next_variant_key_pair(model: str) -> tuple:
-    """Get next (variant_idx, key_idx, upstream_type, nv_key_idx) for 2D round-robin.
+    """Get next (variant_idx, key_idx, upstream_type, nv_key_idx, nv_proxy_url) for 2D round-robin.
 
-    R33.2: MS-NV interleaving. When NV_ENABLED and model="glm5.1":
-      - total_slots = NUM_KEYS + NV_NUM_KEYS
-      - Counter N → slot = N % total_slots
-      - If slot < NUM_KEYS → MS upstream: variant=(N//total_slots)%NUM_VARIANTS, key=slot
-      - If slot >= NUM_KEYS → NV upstream: nv_key_idx=(slot - NUM_KEYS) % NV_NUM_KEYS
-      - Returns (variant_idx, key_idx, "ms"/"nv", nv_key_idx)
+    R36: Strict MS-NV alternating. When NV_ENABLED and model="glm5.1":
+      - total_slots = NUM_KEYS + NV_NUM_KEYS (7+5=12)
+      - Strict alternating: even slots→MS, odd slots→NV
+      - Even slot (MS): ms_position = slot//2, key_idx = ms_position % NUM_KEYS
+      - Odd slot (NV): nv_position = slot//2, nv_key_idx = nv_position % NV_NUM_KEYS
+      - Each NV key gets its own proxy URL from NV_PROXY_URL_MAP
+      - Returns 5-tuple: (variant_idx, key_idx, "ms"/"nv", nv_key_idx, nv_proxy_url)
 
     When NV_ENABLED=False: pure MS round-robin (unchanged):
       - Counter N → variant=(N//NUM_KEYS)%NUM_VARIANTS, key=N%NUM_KEYS
-      - Returns (variant_idx, key_idx, "ms", 0)
+      - Returns 5-tuple: (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
 
     R30: counter persisted to disk so restarts don't reset it.
     R31.3: persist EVERY increment so even power loss loses 0 steps.
+    R36: absolute cycle — when counter >= NV_MAX_CYCLE → reset to 0 and continue.
     """
     num_variants = NUM_VARIANTS.get(model, 10)
     with _vk_rr_lock:
         counter = _vk_rr_counter.get(model, 0)
-        # R33.2: MS-NV interleaving for glm5.1 (CC proxy, primary)
+
+        # R36: Absolute cycle — reset when counter reaches MAX_CYCLE
+        if counter >= NV_MAX_CYCLE:
+            counter = 0
+            _vk_rr_counter[model] = 0
+            print(f"[RR-COUNTER] {model} counter reset to 0 (reached NV_MAX_CYCLE={NV_MAX_CYCLE})", file=sys.stderr, flush=True)
+            _save_rr_counter()
+
+        # R36: Strict MS-NV alternating for glm5.1
         if NV_ENABLED and model == "glm5.1":
-            slot = counter % MS_NV_TOTAL_SLOTS
-            if slot < NUM_KEYS:
-                # MS slot
-                variant_idx = (counter // MS_NV_TOTAL_SLOTS) % num_variants
-                key_idx = slot
+            slot_in_cycle = counter % MS_NV_TOTAL_SLOTS
+            is_nv_slot = slot_in_cycle % 2 == 1  # Odd slots = NV, Even = MS
+            position = slot_in_cycle // 2  # Position within MS/NV sequence
+
+            if is_nv_slot:
+                # NV slot — strict alternating, each NV key has dedicated proxy
+                nv_key_idx = position % NV_NUM_KEYS
+                nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
+                # Also compute MS fallback variant/key for this cycle position
+                # (used by execute_request when NV fails → MS switch)
+                ms_fallback_variant = (counter // MS_NV_TOTAL_SLOTS) % num_variants
+                ms_fallback_key = counter % NUM_KEYS  # Same formula as MS slot
                 _vk_rr_counter[model] = counter + 1
                 _save_rr_counter()
-                return (variant_idx, key_idx, "ms", 0)
+                return (ms_fallback_variant, ms_fallback_key, "nv", nv_key_idx, nv_proxy_url)
             else:
-                # NV slot
-                nv_key_idx = (slot - NUM_KEYS) % NV_NUM_KEYS
-                # variant_idx not relevant for NV, but set to 0 for metrics consistency
+                # MS slot — variant advances every full cycle of total_slots
+                # R36: MS key uses counter % NUM_KEYS to ensure ALL 7 keys are used
+                # (not just k1-k6 from position-based assignment).
+                # Each 12-slot cycle uses 6/7 keys; over 2 cycles all 7 keys appear.
+                ms_key_idx = counter % NUM_KEYS
+                variant_idx = (counter // MS_NV_TOTAL_SLOTS) % num_variants
                 _vk_rr_counter[model] = counter + 1
                 _save_rr_counter()
-                return (0, 0, "nv", nv_key_idx)
+                return (variant_idx, ms_key_idx, "ms", 0, NV_PROXY_URL)
         else:
             # Pure MS round-robin (NV disabled)
             variant_idx = (counter // NUM_KEYS) % num_variants
             key_idx = counter % NUM_KEYS
             _vk_rr_counter[model] = counter + 1
             _save_rr_counter()
-            return (variant_idx, key_idx, "ms", 0)
+            return (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
 
 # R31.3: flush on exit. atexit covers normal interpreter exit; explicit signal
 # handlers cover SIGTERM/SIGINT (which is how `docker stop` and Ctrl-C kill the

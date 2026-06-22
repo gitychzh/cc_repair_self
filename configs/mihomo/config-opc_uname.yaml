@@ -36,10 +36,31 @@ listeners:
   port: 7893
   proxy: ♻️US自动
   type: mixed
+# ── R36: NV per-key proxy ports (5 keys × 5 dedicated US proxy groups) ──
 - listen: 0.0.0.0
-  name: nv-us-proxy
+  name: nv-us-k1
   port: 7894
-  proxy: ♻️US-NV
+  proxy: ♻️US-NV-K1
+  type: mixed
+- listen: 0.0.0.0
+  name: nv-us-k2
+  port: 7895
+  proxy: ♻️US-NV-K2
+  type: mixed
+- listen: 0.0.0.0
+  name: nv-us-k3
+  port: 7896
+  proxy: ♻️US-NV-K3
+  type: mixed
+- listen: 0.0.0.0
+  name: nv-us-k4
+  port: 7897
+  proxy: ♻️US-NV-K4
+  type: mixed
+- listen: 0.0.0.0
+  name: nv-us-k5
+  port: 7899
+  proxy: ♻️US-NV-K5
   type: mixed
 log-level: info
 mixed-port: 7880
@@ -114,8 +135,43 @@ proxy-groups:
   type: select
   use:
   - pq-provider
+# ── R36: 5 independent NV US proxy groups (per-key fault isolation) ──
+# Each group independently url-tests its best US node from nv-us-provider.
+# If one node fails, only that key's proxy is affected, not all 5 keys.
 - interval: 60
-  name: ♻️US-NV
+  name: ♻️US-NV-K1
+  proxies: []
+  tolerance: 100
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  use:
+  - nv-us-provider
+- interval: 60
+  name: ♻️US-NV-K2
+  proxies: []
+  tolerance: 100
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  use:
+  - nv-us-provider
+- interval: 60
+  name: ♻️US-NV-K3
+  proxies: []
+  tolerance: 100
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  use:
+  - nv-us-provider
+- interval: 60
+  name: ♻️US-NV-K4
+  proxies: []
+  tolerance: 100
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  use:
+  - nv-us-provider
+- interval: 60
+  name: ♻️US-NV-K5
   proxies: []
   tolerance: 100
   type: url-test

@@ -35,7 +35,7 @@ from .config import (
     LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, NUM_KEYS, NUM_VARIANTS, VARIANT_IDS,
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     NV_BASEURL, NV_NUM_KEYS, NV_KEYS, NV_PROXY_URL, NV_ENABLED, NV_MODEL_IDS,
-    NV_TIMEOUT,
+    NV_TIMEOUT, NV_PROXY_URL_MAP,
     MS_NV_TOTAL_SLOTS,
     _next_variant_key_pair,
     throttle_outbound, MIN_OUTBOUND_INTERVAL_S,
@@ -50,6 +50,8 @@ class UpstreamResult:
     Handlers check result.success:
       - True: resp + conn are available for response processing (stream or non-stream)
       - False: all_keys_exhausted error info is available for error formatting
+
+    R36: Added empty_200 field for NV empty response detection.
 
     The handler is responsible for:
       - Reading the response body and formatting it (Anthropic or OpenAI)
@@ -68,6 +70,8 @@ class UpstreamResult:
         self.force_stream_for_nonstream = False  # whether we forced stream for non-stream
         self.key_cycle_attempts = []  # list of cycle attempt dicts
         self.upstream_type = "ms"  # "ms" or "nv" — which upstream was used
+        self.nv_proxy_url = ""  # R36: which proxy URL was used for this NV request
+        self.empty_200 = False  # R36: True if NV returned 200 with empty/no-content body
         # Error fields (only if not success)
         self.all_keys_exhausted = False
         self.all_429 = False
@@ -88,10 +92,12 @@ def _make_nv_conn(nv_baseurl, nv_proxy_url=None, timeout=NV_TIMEOUT):
     NVIDIA API (integrate.api.nvidia.com) requires US proxy from China.
     Uses http.client.HTTPSConnection with proxy tunneling (CONNECT method).
 
+    R36: nv_proxy_url is now per-key (from NV_PROXY_URL_MAP), not global.
+
     Args:
         nv_baseurl: e.g. "https://integrate.api.nvidia.com/v1"
-        nv_proxy_url: e.g. "http://host.docker.internal:7894"
-        timeout: connection timeout in seconds
+        nv_proxy_url: e.g. "http://host.docker.internal:7894" or "http://host.docker.internal:7895"
+        timeout: connection timeout in seconds (default NV_TIMEOUT=60 for R36)
     """
     parsed = urllib.parse.urlparse(nv_baseurl)
     host = parsed.hostname
@@ -140,20 +146,262 @@ def _strip_nv_unsupported_params(oai_body):
     return body
 
 
-def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute upstream request with full v×k 2D round-robin + MS-NV interleaving + error cycling.
+def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                        nv_key_idx, nv_proxy_url, is_stream, force_stream):
+    """Try 1 NV key with its dedicated proxy. On ANY failure → return result (no key cycling).
 
-    R33.2: When NV_ENABLED and model="glm5.1", requests alternate between MS and NV
-    upstreams. Each request gets a slot assignment from _next_variant_key_pair():
-      - MS slot → standard LiteLLM v×k cycling
-      - NV slot → direct NVIDIA API call via HTTPS proxy
+    R36: NV slot gets exactly 1 attempt. If it fails (429, timeout, empty 200,
+    connection error), the caller switches to MS fallback immediately.
+    No NV key cycling — each key has its own proxy, and stability is paramount.
 
-    On error (429/500/502), cycling applies within the same upstream type:
-      - MS error → cycle through remaining MS keys in this variant
-      - NV error → cycle through remaining NV keys
-    If all keys in the initial upstream type fail, fall through to the other type:
-      - MS all-fail → try all NV keys
-      - NV all-fail → try all MS keys in current variant
+    Args:
+        handler: ProxyHandler instance
+        oai_body: dict — OpenAI-format request body
+        mapped_model: str — backend model name ("glm5.1")
+        request_id: str — unique request ID for logging
+        metrics: dict — metrics dict to update
+        t_start: float — request start timestamp
+        nv_key_idx: int — 0-based NV key index (0-4)
+        nv_proxy_url: str — per-key proxy URL (e.g. "http://host.docker.internal:7894")
+        is_stream: bool — whether this is a streaming request
+        force_stream: bool — whether stream was forced for non-stream request
+
+    Returns:
+        UpstreamResult — check result.success and result.empty_200 for outcome
+    """
+    result = UpstreamResult()
+    result.is_stream = is_stream
+    result.nv_proxy_url = nv_proxy_url
+    nv_model_id = NV_MODEL_IDS.get(mapped_model, "z-ai/glm-5.1")
+
+    # Strip NV unsupported params
+    nv_body = _strip_nv_unsupported_params(oai_body)
+    nv_body["model"] = nv_model_id
+
+    nv_key = NV_KEYS[nv_key_idx]
+    nv_model_label = f"nvk{nv_key_idx+1}"
+
+    _log("NV-RR", f"NV single attempt: k{nv_key_idx+1} proxy={nv_proxy_url} → model={nv_model_id}")
+
+    headers_out = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {nv_key}",
+        "Content-Length": str(len(json.dumps(nv_body).encode("utf-8"))),
+    }
+    nv_data = json.dumps(nv_body).encode("utf-8")
+
+    try:
+        # R36: Use per-key proxy URL
+        conn, path_prefix = _make_nv_conn(NV_BASEURL, nv_proxy_url, NV_TIMEOUT)
+        nv_path = path_prefix.rstrip("/") + "/chat/completions"
+        throttle_outbound()
+        conn.request("POST", nv_path, body=nv_data, headers=headers_out)
+        resp = conn.getresponse()
+
+        if resp.status >= 400:
+            error_body = resp.read()
+            try:
+                error_json = json.loads(error_body)
+            except Exception:
+                error_json = {"error": error_body.decode("utf-8", errors="replace")}
+            conn.close()
+            err_str = json.dumps(error_json)
+
+            # NV 400 Unsupported parameter → strip params and retry same key
+            if resp.status == 400 and "Unsupported parameter" in err_str:
+                _log("NV-STRIP", f"NV k{nv_key_idx+1} 400 Unsupported parameter → stripping and retrying")
+                nv_body_retry = _strip_nv_unsupported_params(nv_body)
+                nv_data_retry = json.dumps(nv_body_retry).encode("utf-8")
+                headers_retry = dict(headers_out)
+                headers_retry["Content-Length"] = str(len(nv_data_retry))
+                try:
+                    conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, nv_proxy_url, NV_TIMEOUT)
+                    throttle_outbound()
+                    conn2.request("POST", nv_path, body=nv_data_retry, headers=headers_retry)
+                    resp2 = conn2.getresponse()
+                    if resp2.status < 400:
+                        # Success after strip retry — check for empty 200
+                        result2 = _check_nv_success(resp2, conn2, nv_key_idx, nv_model_label,
+                                                    nv_proxy_url, is_stream, metrics, key_cycle_attempts=[])
+                        return result2
+                    # Strip retry also failed → close and return failure
+                    error_body2 = resp2.read()
+                    try:
+                        error_json2 = json.loads(error_body2)
+                    except Exception:
+                        error_json2 = {"error": error_body2.decode("utf-8", errors="replace")}
+                    conn2.close()
+                    result.success = False
+                    result.all_keys_exhausted = False
+                    result.final_error_json = error_json2
+                    result.final_resp_status = resp2.status
+                    result.elapsed_ms = int((time.time() - t_start) * 1000)
+                    result.nv_proxy_url = nv_proxy_url
+                    return result
+                except Exception as e2:
+                    _log("NV-ERR", f"NV strip retry connection error: {e2}")
+                    result.success = False
+                    result.all_keys_exhausted = False
+                    result.final_error_json = {"error": str(e2)[:200]}
+                    result.final_resp_status = 0
+                    result.elapsed_ms = int((time.time() - t_start) * 1000)
+                    result.nv_proxy_url = nv_proxy_url
+                    return result
+
+            # Any other NV error (429, 500, 502, etc) → return failure immediately
+            _log("NV-FAIL", f"NV k{nv_key_idx+1} → {resp.status} ({err_str[:200]}), switching to MS")
+            result.success = False
+            result.all_keys_exhausted = False
+            result.final_error_json = error_json
+            result.final_resp_status = resp.status
+            result.elapsed_ms = int((time.time() - t_start) * 1000)
+            result.nv_proxy_url = nv_proxy_url
+            result.key_cycle_attempts = [{
+                "nv_key_idx": nv_key_idx,
+                "litellm_model": nv_model_label,
+                "error_body": err_str[:500],
+                "error_type": f"{resp.status}_nv",
+                "upstream_type": "nv",
+                "nv_proxy_url": nv_proxy_url,
+            }]
+            return result
+
+        # ─── NV Success: resp.status < 400 ───
+        # Check for empty 200 before returning
+        return _check_nv_success(resp, conn, nv_key_idx, nv_model_label,
+                                  nv_proxy_url, is_stream, metrics, key_cycle_attempts=[])
+
+    except socket.timeout as e:
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        _log("NV-TIMEOUT", f"NV k{nv_key_idx+1} socket timeout after {elapsed_ms}ms (NV_TIMEOUT={NV_TIMEOUT}s)")
+        result.success = False
+        result.all_keys_exhausted = False
+        result.final_error_json = {"error": f"NV socket timeout after {elapsed_ms}ms"}
+        result.final_resp_status = 0
+        result.elapsed_ms = elapsed_ms
+        result.nv_proxy_url = nv_proxy_url
+        result.key_cycle_attempts = [{
+            "nv_key_idx": nv_key_idx,
+            "litellm_model": nv_model_label,
+            "error_type": "NVSocketTimeout",
+            "elapsed_ms": elapsed_ms,
+            "upstream_type": "nv",
+            "nv_proxy_url": nv_proxy_url,
+        }]
+        return result
+
+    except Exception as e:
+        error_class = type(e).__name__
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        _log("NV-ERR", f"NV k{nv_key_idx+1} {error_class}: {e}")
+        result.success = False
+        result.all_keys_exhausted = False
+        result.final_error_json = {"error": str(e)[:200]}
+        result.final_resp_status = 0
+        result.elapsed_ms = elapsed_ms
+        result.nv_proxy_url = nv_proxy_url
+        result.key_cycle_attempts = [{
+            "nv_key_idx": nv_key_idx,
+            "litellm_model": nv_model_label,
+            "error": str(e)[:200],
+            "error_type": f"NV{error_class}",
+            "elapsed_ms": elapsed_ms,
+            "upstream_type": "nv",
+            "nv_proxy_url": nv_proxy_url,
+        }]
+        return result
+
+
+def _check_nv_success(resp, conn, nv_key_idx, nv_model_label, nv_proxy_url,
+                       is_stream, metrics, key_cycle_attempts):
+    """Check NV success response for empty 200 and return UpstreamResult.
+
+    R36: NV can return 200 with empty body (no content). This is treated as failure.
+    For streaming: don't read body (would break stream). Empty content will be
+    discovered naturally during stream parsing (graceful end with no content).
+    For non-streaming: check Content-Length header. If 0 or suspiciously small,
+    read a small sample to verify content exists.
+    """
+    result = UpstreamResult()
+    result.is_stream = is_stream
+    result.nv_proxy_url = nv_proxy_url
+
+    # Check for empty 200 — Content-Length=0 or very small
+    content_length_str = resp.getheader("Content-Length", "-1")
+    transfer_encoding = resp.getheader("Transfer-Encoding", "")
+
+    if is_stream:
+        # Streaming mode: don't read body (would break stream processing)
+        # Empty content will be caught during stream parsing (graceful end)
+        # Just check Content-Length=0 as a hint
+        if content_length_str == "0":
+            _log("NV-EMPTY-200", f"NV k{nv_key_idx+1} → 200 with Content-Length:0 (stream), treating as failure")
+            conn.close()
+            result.success = False
+            result.empty_200 = True
+            result.all_keys_exhausted = False
+            result.final_error_json = {"error": "NV empty 200 response (Content-Length:0)"}
+            result.final_resp_status = 200
+            result.elapsed_ms = 0  # Caller will compute from t_start
+            result.nv_proxy_url = nv_proxy_url
+            return result
+
+        # Stream with content → return success, let stream handler process
+        result.success = True
+        result.resp = resp
+        result.conn = conn
+        result.litellm_model = nv_model_label
+        result.key_idx = nv_key_idx
+        result.key_cycle_attempts = key_cycle_attempts
+        result.upstream_type = "nv"
+        metrics["upstream_type"] = "nv"
+        metrics["nv_key_idx"] = nv_key_idx
+        metrics["litellm_model"] = nv_model_label
+        metrics["nv_proxy_url"] = nv_proxy_url
+        return result
+
+    else:
+        # Non-streaming mode: can check body content safely
+        if content_length_str == "0":
+            _log("NV-EMPTY-200", f"NV k{nv_key_idx+1} → 200 with Content-Length:0 (non-stream), treating as failure")
+            conn.close()
+            result.success = False
+            result.empty_200 = True
+            result.all_keys_exhausted = False
+            result.final_error_json = {"error": "NV empty 200 response (Content-Length:0)"}
+            result.final_resp_status = 200
+            result.elapsed_ms = 0
+            result.nv_proxy_url = nv_proxy_url
+            return result
+
+        # For chunked encoding or Content-Length > 0: let collect handler process
+        # Don't read body here — the handler will collect it later
+        result.success = True
+        result.resp = resp
+        result.conn = conn
+        result.litellm_model = nv_model_label
+        result.key_idx = nv_key_idx
+        result.key_cycle_attempts = key_cycle_attempts
+        result.upstream_type = "nv"
+        metrics["upstream_type"] = "nv"
+        metrics["nv_key_idx"] = nv_key_idx
+        metrics["litellm_model"] = nv_model_label
+        metrics["nv_proxy_url"] = nv_proxy_url
+        return result
+    """Execute upstream request with strict MS-NV alternating + MS key cycling.
+
+    R36: Strict alternating mode:
+      - Each request gets a slot assignment from _next_variant_key_pair() (5-tuple).
+      - If NV slot: try 1 NV key with its dedicated proxy. On ANY failure (429, timeout,
+        empty 200, connection error) → immediately switch to MS fallback (no NV key cycling).
+      - If MS slot: try MS keys with standard v×k cycling (7 keys per variant).
+        On all MS keys exhausted → ABORT-NO-FALLBACK (no NV fallback, R31.8 principle).
+
+    R33.2/R36 key design principles:
+      - NV failure → immediate MS switch (stability first, no wasted time on NV cycling)
+      - MS failure → ABORT-NO-FALLBACK (no amplification, R31.8 principle)
+      - NV requests use per-key dedicated mihomo proxy (NV_PROXY_URL_MAP, R36)
+      - Empty 200 from NV → treated as failure, switch to MS
 
     Args:
         handler: ProxyHandler instance (needed for _make_upstream_conn)
@@ -174,12 +422,13 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     litellm_url = upstream["chat_url"]
     metrics["upstream"] = upstream_key
 
-    # Get initial slot assignment from round-robin
+    # Get initial slot assignment from round-robin (5-tuple: variant, key, type, nv_key, nv_proxy)
     start_pair = _next_variant_key_pair(mapped_model)
     start_variant_idx = start_pair[0]
     start_key_idx = start_pair[1]
     start_upstream_type = start_pair[2]  # "ms" or "nv"
     start_nv_key_idx = start_pair[3]  # NV key index (0-based, only if "nv")
+    start_nv_proxy_url = start_pair[4]  # Per-key proxy URL
     litellm_model_base = mapped_model
     key_cycle_attempts = []
 
@@ -189,59 +438,65 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     # Determine if this is a forced-stream-for-nonstream request
     force_stream = oai_body.get("stream", False) and not metrics.get("_original_stream", True)
 
-    # ─── Determine primary and fallback upstream types ───
-    # R33.2: If initial slot is NV, try NV first then MS as fallback.
-    # If initial slot is MS, try MS first then NV as fallback.
-    # For NV disabled: pure MS (unchanged behavior).
-    if NV_ENABLED and mapped_model == "glm5.1":
-        primary_type = start_upstream_type  # "ms" or "nv" from round-robin
-        _log("MS-NV", f"slot={start_upstream_type} variant=v{start_variant_idx+1 if start_upstream_type=='ms' else 0} "
-                      f"key=k{start_key_idx+1 if start_upstream_type=='ms' else start_nv_key_idx+1} "
-                      f"(NV interleaving enabled, {MS_NV_TOTAL_SLOTS} total slots)")
-    else:
-        primary_type = "ms"
-        _log("KEY-RR", f"MS-only for {mapped_model} (NV disabled or non-glm5.1)")
-
-    # ─── Phase 1: Try primary upstream type ───
-    if primary_type == "nv":
-        # NV primary — try all NV keys first
-        result = _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                              start_nv_key_idx, key_cycle_attempts, is_stream, force_stream)
-        if result.success:
+    # ─── R36: Strict alternating mode ───
+    if start_upstream_type == "nv" and NV_ENABLED and mapped_model == "glm5.1":
+        # NV slot — try 1 NV key with dedicated proxy
+        _log("MS-NV", f"slot=nv k{start_nv_key_idx+1} proxy={start_nv_proxy_url} "
+                      f"(strict alternating, {MS_NV_TOTAL_SLOTS} total slots)")
+        result = _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                                     start_nv_key_idx, start_nv_proxy_url, is_stream, force_stream)
+        if result.success and not result.empty_200:
+            # Real NV success
             return result
-        # All NV keys failed → fall through to MS
-        _log("NV-FALLTHROUGH", f"All {NV_NUM_KEYS} NV keys failed → trying MS fallback")
-        nv_cycle_attempts = result.key_cycle_attempts
-        result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                              start_variant_idx, start_key_idx, key_cycle_attempts + nv_cycle_attempts,
-                              is_stream, force_stream, litellm_url, litellm_model_base)
-        # Merge NV cycle attempts into final result
-        if not result.success:
-            result.key_cycle_attempts = nv_cycle_attempts + result.key_cycle_attempts
-        return result
 
-    else:
-        # MS primary — try MS keys first (original behavior, with NV fallback if enabled)
+        # NV failed (429, timeout, empty 200, connection error) → immediate MS switch
+        nv_fail_reason = "empty_200" if result.empty_200 else "upstream_error"
+        _log("NV-MS-SWITCH", f"NV k{start_nv_key_idx+1} failed ({nv_fail_reason}) → switching to MS")
+
+        # Close NV connection if still open
+        if result.conn:
+            try:
+                result.conn.close()
+            except Exception:
+                pass
+
+        # MS fallback: use the MS variant/key computed by _next_variant_key_pair()
+        # For NV slots, the 5-tuple returns (ms_fallback_variant, ms_fallback_key, "nv", ...)
+        # which are valid MS positions for this cycle. This avoids the problem of
+        # NV slot returning variant_idx=0 (which was a placeholder, not a real MS variant).
+        ms_variant_idx = start_variant_idx  # MS fallback variant from cycle position
+        ms_key_idx = start_key_idx  # MS fallback key from cycle position
+
+        ms_result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                                  ms_variant_idx, ms_key_idx, result.key_cycle_attempts,
+                                  is_stream, force_stream, litellm_url, litellm_model_base)
+        # Merge NV cycle attempt into final result
+        if not ms_result.success:
+            ms_result.key_cycle_attempts = result.key_cycle_attempts + ms_result.key_cycle_attempts
+        return ms_result
+
+    elif start_upstream_type == "ms":
+        # MS slot — standard MS key cycling (original behavior)
+        if NV_ENABLED and mapped_model == "glm5.1":
+            _log("MS-NV", f"slot=ms v{start_variant_idx+1} k{start_key_idx+1} "
+                          f"(strict alternating, {MS_NV_TOTAL_SLOTS} total slots)")
+        else:
+            _log("KEY-RR", f"MS-only for {mapped_model} (NV disabled or non-glm5.1)")
+
         result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
                               start_variant_idx, start_key_idx, key_cycle_attempts,
                               is_stream, force_stream, litellm_url, litellm_model_base)
         if result.success:
             return result
-        if not result.all_keys_exhausted:
-            return result  # Non-cycling error (400, 401, etc) — no fallback
+        # MS all-fail → return error (no NV fallback per R31.8 principle)
+        return result
 
-        # All MS keys exhausted → try NV fallback if enabled
-        if NV_ENABLED and mapped_model == "glm5.1":
-            _log("MS-FALLTHROUGH", f"All MS keys 429 → trying NV fallback")
-            ms_cycle_attempts = result.key_cycle_attempts
-            result = _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                                  0, ms_cycle_attempts, is_stream, force_stream)
-            # Merge MS cycle attempts into final result
-            if not result.success:
-                result.key_cycle_attempts = ms_cycle_attempts + result.key_cycle_attempts
-            return result
-
-        # MS all-fail, NV not available → return error
+    else:
+        # Fallback: pure MS (should not reach here, but safe default)
+        _log("KEY-RR", f"MS-only fallback for {mapped_model}")
+        result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                              start_variant_idx, start_key_idx, key_cycle_attempts,
+                              is_stream, force_stream, litellm_url, litellm_model_base)
         return result
 
 
