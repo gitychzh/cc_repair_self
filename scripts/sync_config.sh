@@ -69,6 +69,17 @@ SYNC_MAP=(
     "configs/proxy/passthrough-proxy/gateway/logger.py:proxy/passthrough-proxy/gateway/logger.py"
     "configs/proxy/passthrough-proxy/gateway/codex.py:proxy/passthrough-proxy/gateway/codex.py"
 
+    # NV LiteLLM containers (R36: 41101-41105, 1 key each)
+    "configs/litellm-nv/config-k1.yaml:litellm-nv/config-k1.yaml"
+    "configs/litellm-nv/config-k2.yaml:litellm-nv/config-k2.yaml"
+    "configs/litellm-nv/config-k3.yaml:litellm-nv/config-k3.yaml"
+    "configs/litellm-nv/config-k4.yaml:litellm-nv/config-k4.yaml"
+    "configs/litellm-nv/config-k5.yaml:litellm-nv/config-k5.yaml"
+
+    # Mihomo proxy config (R36: per-key NV proxy groups)
+    "configs/mihomo/config-opc_uname.yaml:mihomo/config-opc_uname.yaml"
+    "configs/mihomo/config-opc2_uname.yaml:mihomo/config-opc2_uname.yaml"
+
     # Postgres
     "configs/postgres/init-db.sh:postgres/init-db.sh"
 )
