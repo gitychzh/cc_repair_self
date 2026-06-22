@@ -258,7 +258,7 @@ R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes rec
 | LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
 | PROXY_TIMEOUT | 300 | all proxies | Overall request timeout |
-| NV LiteLLM | no DATABASE_URL | 41101-41105 | R36.2: in-memory mode, mihomo 7880 for GitHub, no cc_postgres dependency |
+| NV LiteLLM | no DATABASE_URL | 41101-41105 | R36.2: in-memory mode, mihomo 7880 for GitHub, no cc_postgres dependency, 2GiB memory limit |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -286,7 +286,8 @@ R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes rec
 - R35.14: Verification round — NV API RECOVERED (4/4 test 200, 1.1-7.4s) but opc2_uname mihomo lacks 7894 port + ModelScope DNS outage (35min → 8x ALL-500) + OpenClaw burst (5 ABORT in 2min then recovered), system fundamentally stable — no changes needed (4/5 consecutive no-change rounds)
 - R36: NV re-enablement — 5 NV keys in 5 mihomo NV proxy ports (7894-7899, per-key fault isolation), strict MS-NV alternating (ms1→nv1→ms2→nv2→...), cycle counter n+1 persistent with NV_MAX_CYCLE=1200000, NV_TIMEOUT=60s, NV failure → immediate MS switch, empty 200 detection via Content-Length=0
 - R36.1: NV LiteLLM containers (41101-41105) added — monitoring/debugging only, each 1 NV key with dedicated proxy port for different US IP per key
-- R36.2: NV LiteLLM containers fixed — remove DATABASE_URL (in-memory mode, no DB schema creation), use mihomo mixed port 7880 for GitHub access (not NV ports 7894-7899), fix YAML merge key conflict (combine host-access + resource-1c1g into resource-1c1g-host anchor for Docker Compose v5.1.x compatibility)
+- R36.2: NV LiteLLM containers fixed — remove DATABASE_URL (in-memory mode, no DB schema creation), use mihomo mixed port 7880 for GitHub access (not NV ports 7894-7899), fix YAML merge key conflict (combine host-access + resource-1c1g into resource-1c1g-host anchor for Docker Compose v5.1.x compatibility), NV read timeout fix (sock.settimeout after conn.request), NV LiteLLM 2GiB memory limit (940MiB model cost map at 1GiB was 91% → OOM risk)
+- R36.2 VERIFIED on opc2_uname: 12 containers all healthy, MS-NV strict alternating working (ms→nv→ms→nv pattern confirmed), all 5 NV proxy ports returning 200 (k1=3-6.8s, k2=12-16.9s, k3=3.3-6s, k4=3.4-8s, k5=5-6.4s), NV LiteLLM memory 47%/2GiB (OOM risk resolved), dispatcher routing+fallback verified
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
