@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.8+, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.9, 2026-06-22)
 
-## Architecture (R35.8+ — dispatcher + blue-green CC proxy + pure MS mode + all fixes deployed)
+## Architecture (R35.9 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -165,7 +165,7 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 cd /opt/cc-infra && docker restart ms_uni41001
 ```
 
-## Current Parameters (R35.8+, confirmed deployed on both machines 2026-06-22)
+## Current Parameters (R35.9, SSE buffer fix pending deploy)
 
 | Parameter | Value | Container | Notes |
 |-----------|-------|-----------|-------|
@@ -181,7 +181,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers (confirmed via docker exec) |
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
 | dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
-| passthrough finish_reason extraction | ✅ | 40003 | R35.8: _stream_openai_passthrough now extracts finish_reason from SSE chunks (confirmed: R35.8 marker present, non-null fr in latest metrics) |
+| passthrough finish_reason extraction | ✅ (R35.9 buffer fix) | 40003 | R35.9: buffer-based SSE parsing replaces chunk-based parsing (94% None→0% expected). R35.8 extraction code preserved but now with correct line buffer. |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -201,3 +201,37 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.7: Stale container deployment fix + 5 code bug fixes (PROXY_TIMEOUT NameError, operator precedence, key_idx KeyError, NV classification, dispatcher close_connection)
 - R35.8: 40003 throttle alignment (2.0→1.5) + passthrough null_finish metrics fix + stale dsv4p rr_counter cleanup
 - R35.8+: Emergency redeployment — R35.7/R35.8 code changes were never synced to opc_uname /opt/cc-infra (third occurrence of stale-container lesson). sync_config.sh + rebuild all 5 containers verified working on both machines.
+- R35.9: Passthrough SSE buffer-based parsing fix (94% finish_reason=None → 0% expected)
+
+## R35.9: Passthrough SSE Buffer-Based Parsing Fix
+
+### Root Cause
+- `_stream_openai_passthrough` used chunk-based line parsing: `text.split("\n")` inside each 8KB `resp.read(8192)` chunk
+- SSE data lines can span 8KB chunk boundaries → broken lines never parsed as complete "data:" JSON
+- finish_reason appears in the LAST SSE data line before `[DONE]` — most likely to be split across chunks
+- Result: 94% of 40003 streaming responses had finish_reason=None (206/219 entries)
+
+### Evidence
+- cc-proxy `stream_to_anth` uses buffer-based parsing (`buffer += chunk.decode()` + `while "\n\n" in buffer`) → 99.6% finish_reason capture
+- passthrough chunk-based parsing → 5.8% finish_reason capture (only when SSE line happens to fit within one 8KB chunk)
+- finish_reason=None entries avg duration=15485ms, nonnull avg=9519ms (longer responses = more likely cross-chunk-boundary)
+
+### R35.9 Changes
+- `passthrough-proxy/gateway/handlers.py` `_stream_openai_passthrough`:
+  - Added `sse_buffer = ""` line-level accumulator
+  - `sse_buffer += chunk.decode()` — accumulate decoded text
+  - `while "\n" in sse_buffer:` — process only complete lines
+  - `sse_buffer.split("\n", 1)` — extract complete line, keep remainder in buffer
+  - End-of-stream: process remaining buffer for last finish_reason
+  - Passthrough behavior unchanged (raw chunk → wfile write)
+
+### R35.8 Verification Data (2.5h post-deploy)
+| Metric | 40003 (throttle=1.5, 06-22) | 40003 (throttle=2.0, 06-21) | Change |
+|--------|----------------------------|----------------------------|--------|
+| 200 rate | 98.2% | 100% | ⚠️ 4 ABORTs (429_all_transient) |
+| 429 cycling rate | 36.1% | 35.8% | ≈ same |
+| Total 429 key-cycles | 159 | 236 | ↓ 33% |
+| Avg TTFB | 10273ms | 8386ms | ↑ 22%* |
+| Avg Duration | 15099ms | 10466ms | ↑ 44%* |
+
+*TTFB/Duration increase attributable to traffic volume difference (06-22: 351 combined req vs 06-21: 71 req in same time window), not throttle change.*

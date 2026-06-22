@@ -540,6 +540,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         ttfb_recorded = False
         streaming_input_tokens = 0
         streaming_output_tokens = 0
+        # R35.9: Line buffer for SSE parsing across chunk boundaries.
+        # Previous R35.8 code split each 8KB chunk by "\n" and parsed "data:" lines
+        # within each chunk independently. This caused 94% finish_reason=None because
+        # SSE lines spanning chunk boundaries were never parsed as complete lines.
+        # Now we accumulate decoded text in a buffer and only process complete lines
+        # (those containing "\n"). This matches cc-proxy stream.py's buffer pattern.
+        sse_buffer = ""
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -550,19 +557,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             while True:
                 chunk = resp.read(8192)
                 if not chunk:
-                    break
-
-                if not ttfb_recorded:
-                    metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
-                    ttfb_recorded = True
-
-                try:
-                    text = chunk.decode("utf-8", errors="replace")
-                    for line in text.split("\n"):
-                        if line.startswith("data:") and line[5:].strip() != "[DONE]":
-                            data_str = line[5:].strip()
-                            if data_str:
+                    # Process any remaining partial line in buffer for metrics
+                    remaining = sse_buffer.strip()
+                    if remaining and remaining.startswith("data:") and remaining[5:].strip() != "[DONE]":
+                        data_str = remaining[5:].strip()
+                        if data_str:
+                            try:
                                 data = json.loads(data_str)
+                                fr = data.get("choices", [{}])[0].get("finish_reason")
+                                if fr:
+                                    metrics["finish_reason"] = fr
                                 chunk_usage = data.get("usage", {})
                                 if chunk_usage:
                                     pt = chunk_usage.get("prompt_tokens", 0)
@@ -571,13 +575,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                         streaming_input_tokens = pt
                                     if ct > 0:
                                         streaming_output_tokens = ct
-                                # R35.8: Extract finish_reason from stream chunks
-                                # Previously all metrics had finish_reason=null because
-                                # passthrough didn't parse this field. Now we capture it
-                                # for monitoring quality (stop/tool_calls/length).
-                                fr = data.get("choices", [{}])[0].get("finish_reason")
-                                if fr:
-                                    metrics["finish_reason"] = fr
+                            except Exception:
+                                pass
+                    break
+
+                if not ttfb_recorded:
+                    metrics["ttfb_ms"] = int((time.time() - t_start) * 1000)
+                    ttfb_recorded = True
+
+                # Accumulate decoded text in buffer; process complete lines only
+                sse_buffer += chunk.decode("utf-8", errors="replace")
+
+                try:
+                    while "\n" in sse_buffer:
+                        line, sse_buffer = sse_buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line or line.startswith(":"):  # SSE comment or empty
+                            continue
+                        if not line.startswith("data:"):
+                            continue  # Not a data line (e.g., "event:" which passthrough ignores)
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            continue
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                            chunk_usage = data.get("usage", {})
+                            if chunk_usage:
+                                pt = chunk_usage.get("prompt_tokens", 0)
+                                ct = chunk_usage.get("completion_tokens", 0)
+                                if pt > 0:
+                                    streaming_input_tokens = pt
+                                if ct > 0:
+                                    streaming_output_tokens = ct
+                            # R35.8→R35.9: Extract finish_reason from SSE data lines.
+                            # With buffer-based parsing, finish_reason now captured correctly
+                            # across 8KB chunk boundaries (was 94% None with chunk-based parsing).
+                            fr = data.get("choices", [{}])[0].get("finish_reason")
+                            if fr:
+                                metrics["finish_reason"] = fr
+                        except json.JSONDecodeError:
+                            pass  # Malformed JSON in SSE line — skip
                 except Exception:
                     pass  # Don't let metrics extraction break passthrough
 
