@@ -224,9 +224,10 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # R36: 5 NV keys + strict alternating + per-key proxy + 60s timeout
+      # R36: 5 NV keys + strict alternating + per-key proxy
+      # R36.3: NV_TIMEOUT 60→20 — NV normal 2-5s, failure wastes 20s max before MS fallback
       NV_NUM_KEYS: "5"
-      NV_TIMEOUT: "60"
+      NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
