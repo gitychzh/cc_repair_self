@@ -1,20 +1,26 @@
-# Deploy Status — opc_uname + opc2_uname (R35.14, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R36.2, 2026-06-22)
 
-## Architecture (R35.14 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix stable + NV API recovered but not yet re-enabled)
+## Architecture (R36.2 — dispatcher + blue-green CC proxy + MS-NV strict alternating + NV LiteLLM monitoring containers)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
-      ├── PRIMARY  → :40005 proxy (EXPERIMENT, pure MS, interval=1.5s)
+      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-NV strict alternating, NV_NUM_KEYS=5)
       │   [40005 连接失败 → 自动 fallback 到 40001]
       └── FALLBACK → :40001 proxy (MIRROR, pure MS, interval=1.5s)
       │   [40001 连接失败 → 自动 fallback 到 40005]
 
-:40001/40005  cc-proxy → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled R35.2)
-:40002        codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
-:40003        openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled R35.5)
+:40005  cc-proxy → _cc /v1/messages → Anthropic→OpenAI 转换 → strict MS-NV alternating (ms1→nv1→ms2→nv2→ms3→nv3→ms4→nv4→ms5→nv5→ms6→nv1→ms7→nv2→...)
+  NV slot: single-key attempt (no cycling), per-key proxy URL (7894-7899), NV_TIMEOUT=60s
+  NV failure → immediate MS switch; MS failure → ABORT-NO-FALLBACK (no NV fallback)
+  Empty 200 detection: Content-Length=0 → treated as NV failure
+  Cycle counter: n+1 atomic disk write, NV_MAX_CYCLE=1200000 reset threshold
+:40001  cc-proxy → _cc /v1/messages → Anthropic→OpenAI 转换 → pure MS glm5.1 v×k cycling (NV disabled, stable baseline)
+:40002  codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
+:40003  openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
-→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 R35.14: RECOVERED and working! 4/4 test 200, 1.1-7.4s latency, not yet re-enabled; deepseek-v4-pro delisted from ModelScope)
+→ :41101-41105 LiteLLM ms_nv_4110X (1 NV key each, in-memory mode, monitoring/debugging only)
+→ :7894-7899 mihomo ♻️US-NV-K1~K5 (independent url-test, 5 best US nodes per key) → NVIDIA integrate API
 ```
 
 ## R35.5: Deepseek-V4-Pro / DSv4P Complete Removal
@@ -139,16 +145,21 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 - Port 7880: mixed port (general use)
 - Port 7891: 🇸🇬狮城节点, 7892: 🇯🇵日本节点, 7893: ♻️US自动
 
-## Containers (R35.5)
+## Containers (R36.2)
 | Container | Port | Role | Notes |
 |-----------|------|------|-------|
 | ms_uni41001 | :41001 | Unified LiteLLM | 70 glm5.1 dep (dsv4p removed R35.5) |
 | cc_postgres | :5432 | LiteLLM DB | PostgreSQL 16-alpine |
+| ms_nv_41101 | :41101 | NV LiteLLM K1 | In-memory, 1 NV key, monitoring only |
+| ms_nv_41102 | :41102 | NV LiteLLM K2 | In-memory, 1 NV key, monitoring only |
+| ms_nv_41103 | :41103 | NV LiteLLM K3 | In-memory, 1 NV key, monitoring only |
+| ms_nv_41104 | :41104 | NV LiteLLM K4 | In-memory, 1 NV key, monitoring only |
+| ms_nv_41105 | :41105 | NV LiteLLM K5 | In-memory, 1 NV key, monitoring only |
 | auth_to_api_40000 | :40000 | Dispatcher + Auto-Fallback | Routes opus→40005, sonnet→40001 |
 | auth_to_api_40001 | :40001 | Proxy (cc, MIRROR) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), interval=1.5s |
 | auth_to_api_40002 | :40002 | Proxy (codex) | PROXY_ROLE=codex |
 | auth_to_api_40003 | :40003 | Proxy (passthrough) | PROXY_ROLE=passthrough, pure MS (NV_NUM_KEYS=0 R35.5) |
-| auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, pure MS (NV_NUM_KEYS=0), interval=1.5s |
+| auth_to_api_40005 | :40005 | Proxy (cc, EXPERIMENT) | PROXY_ROLE=cc, MS-NV alternating (NV_NUM_KEYS=5), interval=1.5s |
 
 ## Deploy Method (R35.7)
 ```bash
@@ -232,25 +243,22 @@ RPM vs cycling: high RPM (>=3/min) → 44.5%, low RPM → 32.1% (burst throttle 
 R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes received, TLS OK但无数据）。
 确认 NV glm-5.1 不可靠，NV_NUM_KEYS=0 决策维持。
 
-## Current Parameters (R35.11, verified stable)
+## Current Parameters (R36.2, verified on opc2_uname)
 
 | Parameter | Value | Container | Notes |
 |-----------|-------|-----------|-------|
 | contextWindow | 170000 | settings.json | CC max context tracking |
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
-| NV_NUM_KEYS | 0 | ALL proxies | R35.7: pure MS everywhere (NV disabled) |
-| NV_TIMEOUT | 20 | all proxies | R35.1: NV-specific timeout |
-| MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | R35.8: ALL ports aligned to 1.5 (opc_uname: confirmed via docker exec env) |
+| NV_NUM_KEYS | 5 | 40005 (EXPERIMENT) | R36: 5 NV keys, strict alternating |
+| NV_NUM_KEYS | 0 | 40001/40003 (STABLE) | Pure MS baseline, no NV |
+| NV_TIMEOUT | 60 | 40005 | R36: increased from 20→60 for stability |
+| NV_PROXY_URL_MAP | {0:7894,1:7895,2:7896,3:7897,4:7899} | 40005 | Per-key proxy URL for fault isolation |
+| NV_MAX_CYCLE | 1200000 | 40005 | Cycle counter reset threshold |
+| MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | R35.8: ALL ports aligned to 1.5 |
 | LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
-| PROXY_TIMEOUT | 300 | all proxies | Overall request timeout (now imported in stream.py) |
-| NV_PROXY_URL | host.docker.internal:7894 | 40001/40003/40005 | Dedicated US proxy port |
-| is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers (confirmed via docker exec) |
-| PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
-| dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
-| dispatcher gateway/ directory | ✅ | 40000 | R35.10: /app/gateway/ now exists (was missing, causing docker exec cat to fail) |
-| passthrough finish_reason extraction | ✅ (R35.9 buffer fix verified, R35.12 re-confirmed) | 40003 | R35.12: post-rebuild FR 85.7% (18/21); pre-rebuild FR 1.9% (4/210). 14.3% None = ModelScope platform truncation (long responses mid-stream cut) |
-| passthrough MSG-FIX | ✅ | 40003 | R35.10: auto-append user 'Continue.' when messages ends with assistant role (fixes "Cannot continue from message role: assistant") |
+| PROXY_TIMEOUT | 300 | all proxies | Overall request timeout |
+| NV LiteLLM | no DATABASE_URL | 41101-41105 | R36.2: in-memory mode, mihomo 7880 for GitHub, no cc_postgres dependency |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -276,6 +284,9 @@ R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes rec
 - R35.12: Verification round — NV API again unavailable (R35.11 recovery confirmed transient), 40005 stable (99.1% 200, 0% ABORT, 35.7% cycling), 40003 SSE buffer fix working (85.7% FR post-rebuild vs 1.9% pre-rebuild), system stable — no changes needed
 - R35.13: Verification round — NV API DNS/connectivity recovered but HTTP 429 rate-limited (no longer timeout), 40005 stable (99.1% 200, 0% ABORT, 36.5% cycling, 0% FR=None), 40003 stable (98.4% 200, 85.3% FR=None passthrough), system stable — no changes needed
 - R35.14: Verification round — NV API RECOVERED (4/4 test 200, 1.1-7.4s) but opc2_uname mihomo lacks 7894 port + ModelScope DNS outage (35min → 8x ALL-500) + OpenClaw burst (5 ABORT in 2min then recovered), system fundamentally stable — no changes needed (4/5 consecutive no-change rounds)
+- R36: NV re-enablement — 5 NV keys in 5 mihomo NV proxy ports (7894-7899, per-key fault isolation), strict MS-NV alternating (ms1→nv1→ms2→nv2→...), cycle counter n+1 persistent with NV_MAX_CYCLE=1200000, NV_TIMEOUT=60s, NV failure → immediate MS switch, empty 200 detection via Content-Length=0
+- R36.1: NV LiteLLM containers (41101-41105) added — monitoring/debugging only, each 1 NV key with dedicated proxy port for different US IP per key
+- R36.2: NV LiteLLM containers fixed — remove DATABASE_URL (in-memory mode, no DB schema creation), use mihomo mixed port 7880 for GitHub access (not NV ports 7894-7899), fix YAML merge key conflict (combine host-access + resource-1c1g into resource-1c1g-host anchor for Docker Compose v5.1.x compatibility)
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
