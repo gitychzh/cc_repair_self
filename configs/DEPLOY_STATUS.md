@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.12, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.13, 2026-06-22)
 
-## Architecture (R35.12 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix verified + NV still unavailable)
+## Architecture (R35.13 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix stable + NV API reachable but 429 rate-limited)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -14,7 +14,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 :40003        openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled R35.5)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
-→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 unavailable — R35.11 temporary recovery confirmed transient by R35.12; deepseek-v4-pro delisted from ModelScope)
+→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 R35.13: reachable but 429 rate-limited, not timeout; deepseek-v4-pro delisted from ModelScope)
 ```
 
 ## R35.5: Deepseek-V4-Pro / DSv4P Complete Removal
@@ -122,8 +122,8 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ## R33.2: cc-proxy Direct NV API (disabled on all ports R35.5)
 
-### NV API Status (R35.5)
-- **glm-5.1 on NV**: UNAVAILABLE (20s curl timeout, DNS errors)
+### NV API Status (R35.13)
+- **glm-5.1 on NV**: DNS/connectivity RECOVERED but HTTP 429 rate-limited (no longer timeout/DNS error, but API refuses service)
 - **deepseek-v4-pro on NV**: ModelScope delisted, no longer relevant
 - **All ports**: NV_NUM_KEYS=0, pure MS mode only
 
@@ -272,6 +272,7 @@ R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes rec
 - R35.10: Dispatcher path fix (unify /app/gateway/ structure) + passthrough messages sequence fix (auto-append user 'Continue.' for assistant-ending sequences)
 - R35.11: Verification round — SSE buffer fix verified (FR 7.2%→87.5%), MSG-FIX working (2 triggers), NV glm-5.1 API discovered working again (not yet re-enabled, monitoring stability)
 - R35.12: Verification round — NV API again unavailable (R35.11 recovery confirmed transient), 40005 stable (99.1% 200, 0% ABORT, 35.7% cycling), 40003 SSE buffer fix working (85.7% FR post-rebuild vs 1.9% pre-rebuild), system stable — no changes needed
+- R35.13: Verification round — NV API DNS/connectivity recovered but HTTP 429 rate-limited (no longer timeout), 40005 stable (99.1% 200, 0% ABORT, 36.5% cycling, 0% FR=None), 40003 stable (98.4% 200, 85.3% FR=None passthrough), system stable — no changes needed
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
