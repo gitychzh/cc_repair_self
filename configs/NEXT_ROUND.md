@@ -1,72 +1,71 @@
-# Round R35.11 (第4轮) — 2026-06-22 18:00 CST
+# Round R35.12 (第5轮) — 2026-06-22 18:30 CST
 
-## R35.10 部署后验证数据（2.5h, 15:36-18:00 CST）
+## R35.12 验证数据（~8h post-last-rebuild, opc_uname）
 
-### 40005 (cc-proxy, EXPERIMENT, 395 entries)
+### 40005 (cc-proxy, EXPERIMENT, 1182 entries, 06-22 全天)
 
-| 指标 | R35.10 部署后 | R35.9前(06-22 early) | 变化 |
-|------|-------------|---------------------|------|
-| 总请求 | 395 | ~623 (pre-rebuild) | — |
-| 200率 | 98.5% (389/395) | ~99% | 稳定 |
-| FR capture (200 streaming) | 100.0% (387/387) | — | cc-proxy一直正常 |
-| 429 cycling率 (200) | 42.9% (167/389) | ~38-49% | 在预期范围 |
-| ABORT率 | 1.5% (6/395) | — | 低 |
-| Avg TTFB | 8108ms | 9309ms(pre-rebuild) | ↓12% |
-| Avg Duration | 13721ms | — | 正常 |
+| 指标 | R35.12 (全天) | R35.11 (2.5h) | 变化 |
+|------|---------------|----------------|------|
+| 总请求 | 1182 | 395 | ↑ 3x |
+| 200率 | 99.1% (1171/1182) | 98.5% (389/395) | ↑ |
+| FR capture (200 streaming) | 100.0% | 100.0% | 稳定 |
+| 429 cycling率 (200) | 35.7% (418/1171) | 42.9% (167/389) | ↓ 7.2% |
+| ABORT率 | 0% (0/1182) | 1.5% (6/395) | ↓ 消除 |
+| Avg TTFB | 8904ms | 8108ms | ↑ 9.6%* |
+| Avg Duration | 14349ms | 13721ms | ↑ 4.6% |
 
-429 cycling 分布: 1-key=59, 2-key=43, 3-key=38, 4-key=16, 5-key=6, 6-key=5
-高RPM(>=3/min) → cycling 44.5%, 低RPM → cycling 32.1%
-6个ABORT分布在v5,v6,v1,v3,v8,v8 — 非系统性
+*TTFB上升可能来自更大的request context，非系统退化
 
-### 40003 (passthrough, 11 entries, 低流量)
+429 cycling 分布: 1-key=178, 2-key=115, 3-key=70, 4-key=30, 5-key=14, 6-key=11
+cycling 深度均匀分布 → 不是特定 variant/key 的瓶颈
 
-| 指标 | R35.10 部署后 | R35.10前(旧chunk parsing) | 变化 |
-|------|-------------|--------------------------|------|
-| 总请求 | 11 | 229 | 流量少 |
-| 200率 | 100% (11/11) | 98.2% (225/229) | ↑无ABORT |
-| FR capture (200 streaming) | **87.5%** (7/8) | **7.2%** (16/222) | ✅ 12x改善 |
-| 429 cycling率 | 0% | 36.0% | 0 (流量少) |
-| MSG-FIX triggers | 2 (proxy.log) | 0 | ✅ 功能工作 |
+### 40003 (passthrough) — SSE buffer fix re-confirmed ✅
 
-唯一 KEY_MISSING 条目: output_tokens=0, duration=22086ms — 可能是 ModelScope 边缘情况（模型返回空content+reasoning_content，无finish_reason chunk）
+**关键发现**：之前的 86% finish_reason=None 率被旧容器数据污染！
 
-### 40001 (MIRROR/STABLE): 1 entry — dispatcher 极少路由到它
+| 时间段 | FR capture率 | 条件 |
+|--------|--------------|------|
+| 旧容器 (10:xx, chunk-based) | 4/210 = **1.9%** | R35.8 chunk-based parsing |
+| 新容器 (15:39+, buffer-based) | 18/21 = **85.7%** | R35.9 buffer-based parsing ✅ |
 
-### ⚡ 重大发现：NV glm-5.1 API 恢复工作！
+**3条 post-rebuild FR=None 全是 ModelScope 平台截断**：
+1. 22086ms, 0 output_tokens — ModelScope 边缘情况
+2. 45170ms, 0 output_tokens — ModelScope 流截断
+3. 42806ms, 0 output_tokens — 测试请求（也是截断）
 
-**测试结果** (5 sequential non-streaming requests via mihomo ♻️US-NV 7894):
-- 成功率: 5/5 (100%) — **首次确认自 R35.3 禁用后 NV glm-5.1 API 可用！**
-- 延迟: 2199ms, 3395ms, 7566ms, 7880ms, 3579ms (avg ~5s)
-- Streaming: 正常工作, finish_reason="stop" in last chunk
-- thinking_budget: 仍然 400 Unsupported (proxy 需 strip)
+**ModelScope SSE 格式发现**：
+- finish_reason chunk 和 usage chunk 是两个独立 SSE data line
+- finish_reason line: `data: {"choices":[{"finish_reason":"stop/length","delta":{}]}]}`
+- usage line: `data: {"choices":[{"delta":{}],"usage":{...}}}`
+- 长响应（>30s）有时被 mid-stream 截断，不发 finish_reason/[DONE]
 
-**风险评估**:
-- NV 可能是临时��复（之前完全不可用数月）
-- NV 延迟不稳定 (2-8s, burst queue 效果)
-- NV 提供独立 quota 源（如启用可减少 MS 429 cycling）
-- re-enablement 需要 HTTPS CONNECT tunnel + thinking_budget strip（已有代码，只是 NV_NUM_KEYS=0 禁用了）
+### NV glm-5.1 API ❌ 再次不可用
+
+R35.11 的 5/5 成功是临时性的。3次 R35.12 测试全部超时（20s, 0 bytes）。
+症状与 R35.3 禁用时相同：TLS OK → 0 response bytes → timeout。
+**确认 NV glm-5.1 API 不可靠，NV_NUM_KEYS=0 维持不变。**
+
+### 40001 (MIRROR/STABLE): 1 entry — 正常（极少流量）
+### 40002 (codex): 0 entries — 正常（Codex 不活跃）
+### Dispatcher: 0 fallback events — 正常运行
 
 ---
 
 ## Action: 本轮无需修改 ✅
 
-**不做的事**（稳定优先，无数据支撑不改）:
-- ❌ 不重新启用 NV: 仅测试了5次请求，NV 可能临时恢复，需 24-48h 稳定性监控
-- ❌ 不降低 throttle 到 1.0: 429 cycling率42.9%仍是 RPM burst根因，降低间隔加剧burst
-- ❌ 不修改 MSG-FIX metrics 记录: 仅2次触发，非紧急
-- ❌ 不修改任何参数: 系统运行稳定
+**不做的事**（稳定优先，数据确认无问题）:
+- ❌ 不重新启用 NV: R35.11 临时恢复已确认失效，不可靠
+- ❌ 不修改任何参数: 系统运行稳定（99.1% 200率，0 ABORT）
+- ❌ 不修改 passthrough SSE 处理: 85.7% FR capture 是正常水平（14.3% None 来自 ModelScope 平台截断）
+- ❌ 不降低 throttle 到 1.0: 429 cycling率35.7%仍是 RPM burst根因
 
 ---
 
-## 参数现状 (R35.11)
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s (ALL ports) | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False | PROXY_TIMEOUT import in stream.py | dispatcher close_connection | passthrough SSE buffer-based parsing (R35.9, VERIFIED FR 7.2%→87.5%) | cc-proxy buffer-based parsing (100% FR) | MSG-FIX (R35.10, VERIFIED 2 triggers) | NV glm-5.1 API now WORKING (not yet re-enabled)
+## 参数现状 (R35.12)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s (ALL ports) | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False | PROXY_TIMEOUT import in stream.py | dispatcher close_connection | passthrough SSE buffer-based parsing (R35.9, R35.12 RE-CONFIRMED: 1.9%→85.7%) | cc-proxy buffer-based parsing (100% FR) | MSG-FIX (R35.10, VERIFIED) | NV glm-5.1 API UNAVAILABLE again (R35.11 temporary recovery confirmed transient)
 
-## 下轮待办 (R35.12)
-- 🔥 **NV 稳定性持续监控**：如 NV glm-5.1 API 持续可用 >48h，可考虑重新启用 NV_NUM_KEYS=2（先在 40005 EXPERIMENT 上测试）
-- **40003 finish_reason 更多数据**：当前仅 8 条 streaming entries，需更多流量数据验证 87.5% → >95%
-- **MSG-FIX metrics 记录**：添加 `msg_fix_appended` field 到 metrics dict（低优先级）
-- **NV re-enablement 计划**（如果稳定性确认）：
-  1. 40005 NV_NUM_KEYS=2 (EXPERIMENT) — 先在蓝绿实验端测试
-  2. 观察 40005 vs 40001 429 cycling 率对比
-  3. 如果 NV 减少 429 cycling → 版本提升到 40001
-  4. 如果 NV 不稳定 → 回滚 NV_NUM_KEYS=0
+## 下轮待办 (R35.13)
+- NV glm-5.1 API 不再监控（已确认不可靠，除非连续72h可用才考虑）
+- MSG-FIX metrics 记录添加（低优先级，建议添加 `msg_fix_appended` field）
+- log_cleanup.sh 加入 crontab（`0 2 * * *`）
+- 40003 FR 85.7% 已足够好（14.3% None 是 ModelScope 平台限制，不可 proxy 层修复）

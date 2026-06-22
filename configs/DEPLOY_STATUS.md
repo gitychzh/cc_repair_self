@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.11, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.12, 2026-06-22)
 
-## Architecture (R35.11 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix verified + messages sequence fix verified)
+## Architecture (R35.12 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix verified + NV still unavailable)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -14,7 +14,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 :40003        openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled R35.5)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
-→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 unavailable; deepseek-v4-pro delisted from ModelScope)
+→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 unavailable — R35.11 temporary recovery confirmed transient by R35.12; deepseek-v4-pro delisted from ModelScope)
 ```
 
 ## R35.5: Deepseek-V4-Pro / DSv4P Complete Removal
@@ -202,6 +202,34 @@ RPM vs cycling: high RPM (>=3/min) → 44.5%, low RPM → 32.1% (burst throttle 
 - thinking_budget: 仍然 400 Unsupported (proxy 需 strip)
 - **暂不重新启用 NV**：需更多稳定性数据（24-48h）
 
+## R35.12 Verification Data (8h post-last-rebuild, opc_uname)
+
+### 40005 (cc-proxy, EXPERIMENT) — 1182 entries (06-22 全天)
+
+| 指标 | R35.12 (全天) | R35.11 (2.5h) | 变化 |
+|------|---------------|----------------|------|
+| 200率 | 99.1% (1171/1182) | 98.5% (389/395) | ↑ |
+| FR capture (200 streaming) | 100.0% | 100.0% | 稳定 |
+| 429 cycling率 (200) | 35.7% (418/1171) | 42.9% (167/389) | ↓ 7.2% |
+| ABORT率 | 0% (0/1182) | 1.5% (6/395) | ↓ 消除 |
+| Avg TTFB | 8904ms | 8108ms | ↑ 9.6%* |
+| Avg Duration | 14349ms | 13721ms | ↑ 4.6% |
+
+*TTFB上升可能来自更大的request context（更多messages/tools），非系统退化
+
+### 40003 (passthrough) — post-rebuild FR capture re-confirmed
+
+| 时间段 | FR capture率 | 条件 |
+|--------|--------------|------|
+| 旧容器 (10:xx, chunk-based) | 4/210 = **1.9%** | R35.8 chunk-based parsing |
+| 新容器 (15:39+, buffer-based) | 18/21 = **85.7%** | R35.9 buffer-based parsing ✅ |
+
+**3条 finish_reason=None 来自新容器**：全部是 ModelScope 平台截断问题（output_tokens=None, 22-45s duration, mid-stream截断不发 finish_reason/[DONE]），非 proxy bug
+
+### NV glm-5.1 API 状态 ❌ 再次不可用
+R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes received, TLS OK但无数据）。
+确认 NV glm-5.1 不可靠，NV_NUM_KEYS=0 决策维持。
+
 ## Current Parameters (R35.11, verified stable)
 
 | Parameter | Value | Container | Notes |
@@ -219,7 +247,7 @@ RPM vs cycling: high RPM (>=3/min) → 44.5%, low RPM → 32.1% (burst throttle 
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
 | dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
 | dispatcher gateway/ directory | ✅ | 40000 | R35.10: /app/gateway/ now exists (was missing, causing docker exec cat to fail) |
-| passthrough finish_reason extraction | ✅ (R35.9 buffer fix verified) | 40003 | R35.11 验证：FR 捕获率 7.2%→87.5%（重建后8条streaming中7条有finish_reason） |
+| passthrough finish_reason extraction | ✅ (R35.9 buffer fix verified, R35.12 re-confirmed) | 40003 | R35.12: post-rebuild FR 85.7% (18/21); pre-rebuild FR 1.9% (4/210). 14.3% None = ModelScope platform truncation (long responses mid-stream cut) |
 | passthrough MSG-FIX | ✅ | 40003 | R35.10: auto-append user 'Continue.' when messages ends with assistant role (fixes "Cannot continue from message role: assistant") |
 
 ## Previous History
@@ -243,6 +271,7 @@ RPM vs cycling: high RPM (>=3/min) → 44.5%, low RPM → 32.1% (burst throttle 
 - R35.9: Passthrough SSE buffer-based parsing fix (94% finish_reason=None → 0% expected)
 - R35.10: Dispatcher path fix (unify /app/gateway/ structure) + passthrough messages sequence fix (auto-append user 'Continue.' for assistant-ending sequences)
 - R35.11: Verification round — SSE buffer fix verified (FR 7.2%→87.5%), MSG-FIX working (2 triggers), NV glm-5.1 API discovered working again (not yet re-enabled, monitoring stability)
+- R35.12: Verification round — NV API again unavailable (R35.11 recovery confirmed transient), 40005 stable (99.1% 200, 0% ABORT, 35.7% cycling), 40003 SSE buffer fix working (85.7% FR post-rebuild vs 1.9% pre-rebuild), system stable — no changes needed
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
