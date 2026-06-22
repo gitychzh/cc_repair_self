@@ -457,8 +457,11 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                       f"(strict alternating, {MS_NV_TOTAL_SLOTS} total slots)")
         result = _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_start,
                                      start_nv_key_idx, start_nv_proxy_url, is_stream, force_stream)
+        elapsed_ms = int((time.time() - t_start) * 1000)
         if result.success and not result.empty_200:
-            # Real NV success
+            # Real NV success — log and return
+            _log("NV-SUCCESS", f"NV k{start_nv_key_idx+1} proxy={start_nv_proxy_url} succeeded in {elapsed_ms}ms "
+                              f"(stream={is_stream}, model={mapped_model})")
             return result
 
         # NV failed (429, timeout, empty 200, connection error) → immediate MS switch
