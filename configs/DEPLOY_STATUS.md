@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.13, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.14, 2026-06-22)
 
-## Architecture (R35.13 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix stable + NV API reachable but 429 rate-limited)
+## Architecture (R35.14 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix stable + NV API recovered but not yet re-enabled)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -14,7 +14,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 :40003        openai-proxy → _ol/_oc/_hm chat/completions → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled R35.5)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
-→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 R35.13: reachable but 429 rate-limited, not timeout; deepseek-v4-pro delisted from ModelScope)
+→ :7894 mihomo ♻️US-NV url-test (5 best US nodes) → NVIDIA integrate API (glm-5.1 R35.14: RECOVERED and working! 4/4 test 200, 1.1-7.4s latency, not yet re-enabled; deepseek-v4-pro delisted from ModelScope)
 ```
 
 ## R35.5: Deepseek-V4-Pro / DSv4P Complete Removal
@@ -122,10 +122,12 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ## R33.2: cc-proxy Direct NV API (disabled on all ports R35.5)
 
-### NV API Status (R35.13)
-- **glm-5.1 on NV**: DNS/connectivity RECOVERED but HTTP 429 rate-limited (no longer timeout/DNS error, but API refuses service)
+### NV API Status (R35.14)
+- **glm-5.1 on NV**: ✅ RECOVERED and working (4/4 test via 7893 US proxy, 1.1-7.4s latency, content complete)
+- **thinking_budget**: still returns 400 (proxy strips for NV calls)
+- **opc2_uname mihomo**: 缺少7894端口（只有7891/7892/7893/7880/9090）→ NV_PROXY_URL=host.docker.internal:7894 无法工作，需配7894+US-NV proxy-group 才能重启用
+- **All ports**: NV_NUM_KEYS=0, pure MS mode only (not re-enabled yet, monitoring stability 1 more round)
 - **deepseek-v4-pro on NV**: ModelScope delisted, no longer relevant
-- **All ports**: NV_NUM_KEYS=0, pure MS mode only
 
 ### NV API Unsupported Parameters
 - **thinking_budget**: returns 400 → proxy strips for NV calls
@@ -273,6 +275,7 @@ R35.11 的 5/5 成功是临时性的。3次测试全部超时（20s, 0 bytes rec
 - R35.11: Verification round — SSE buffer fix verified (FR 7.2%→87.5%), MSG-FIX working (2 triggers), NV glm-5.1 API discovered working again (not yet re-enabled, monitoring stability)
 - R35.12: Verification round — NV API again unavailable (R35.11 recovery confirmed transient), 40005 stable (99.1% 200, 0% ABORT, 35.7% cycling), 40003 SSE buffer fix working (85.7% FR post-rebuild vs 1.9% pre-rebuild), system stable — no changes needed
 - R35.13: Verification round — NV API DNS/connectivity recovered but HTTP 429 rate-limited (no longer timeout), 40005 stable (99.1% 200, 0% ABORT, 36.5% cycling, 0% FR=None), 40003 stable (98.4% 200, 85.3% FR=None passthrough), system stable — no changes needed
+- R35.14: Verification round — NV API RECOVERED (4/4 test 200, 1.1-7.4s) but opc2_uname mihomo lacks 7894 port + ModelScope DNS outage (35min → 8x ALL-500) + OpenClaw burst (5 ABORT in 2min then recovered), system fundamentally stable — no changes needed (4/5 consecutive no-change rounds)
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
