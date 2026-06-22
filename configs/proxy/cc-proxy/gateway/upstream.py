@@ -514,189 +514,6 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                               is_stream, force_stream, litellm_url, litellm_model_base)
         return result
 
-
-def _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                  start_nv_key_idx, prior_cycle_attempts, is_stream, force_stream):
-    """Try all NV keys starting from start_nv_key_idx, cycling on 429/500/502.
-
-    Returns UpstreamResult. If all NV keys fail, result.all_keys_exhausted=True.
-    """
-    result = UpstreamResult()
-    result.is_stream = is_stream
-    key_cycle_attempts = list(prior_cycle_attempts)
-    nv_model_id = NV_MODEL_IDS.get(mapped_model, "z-ai/glm-5.1")
-
-    # Strip NV unsupported params
-    nv_body = _strip_nv_unsupported_params(oai_body)
-    nv_body["model"] = nv_model_id
-
-    for attempt_idx in range(NV_NUM_KEYS):
-        nv_key_idx = (start_nv_key_idx + attempt_idx) % NV_NUM_KEYS
-        nv_key = NV_KEYS[nv_key_idx]
-        nv_model_label = f"nvk{nv_key_idx+1}"
-
-        _log("NV-RR", f"NV attempt {attempt_idx+1}/{NV_NUM_KEYS}: k{nv_key_idx+1} → model={nv_model_id}")
-
-        headers_out = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {nv_key}",
-            "Content-Length": str(len(json.dumps(nv_body).encode("utf-8"))),
-        }
-        nv_data = json.dumps(nv_body).encode("utf-8")
-
-        try:
-            conn, path_prefix = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, NV_TIMEOUT)
-            # NVIDIA API path: /v1/chat/completions
-            nv_path = path_prefix.rstrip("/") + "/chat/completions"
-            throttle_outbound()
-            conn.request("POST", nv_path, body=nv_data, headers=headers_out)
-            # R36.2: Set read timeout after request is sent
-            if conn.sock:
-                conn.sock.settimeout(NV_TIMEOUT)
-            resp = conn.getresponse()
-
-            if resp.status >= 400:
-                error_body = resp.read()
-                try:
-                    error_json = json.loads(error_body)
-                except Exception:
-                    error_json = {"error": error_body.decode("utf-8", errors="replace")}
-                conn.close()
-                err_str = json.dumps(error_json)
-
-                # Cycling errors for NV
-                should_cycle = resp.status in (429, 500, 502)
-                if should_cycle:
-                    cycle_reason = "429_nv_rate_limit" if resp.status == 429 else \
-                                   "500_nv_error" if resp.status == 500 else "502_nv_error"
-                    key_cycle_attempts.append({
-                        "nv_key_idx": nv_key_idx,
-                        "litellm_model": nv_model_label,
-                        "error_body": err_str[:500],
-                        "error_type": cycle_reason,
-                        "upstream_type": "nv",
-                    })
-                    _log("NV-CYCLE", f"NV k{nv_key_idx+1}/{NV_NUM_KEYS} ({nv_model_label}) → {resp.status} ({cycle_reason}), cycling to next NV key")
-                    continue
-
-                # NV-specific: 400 Unsupported parameter → strip params and retry
-                if resp.status == 400 and "Unsupported parameter" in err_str:
-                    _log("NV-STRIP", f"NV 400 Unsupported parameter → stripping unsupported params and retrying")
-                    nv_body_retry = _strip_nv_unsupported_params(nv_body)
-                    nv_data_retry = json.dumps(nv_body_retry).encode("utf-8")
-                    headers_retry = dict(headers_out)
-                    headers_retry["Content-Length"] = str(len(nv_data_retry))
-                    try:
-                        conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, NV_TIMEOUT)
-                        throttle_outbound()
-                        conn2.request("POST", nv_path, body=nv_data_retry, headers=headers_retry)
-                        # R36.2: Set read timeout on retry connection
-                        if conn2.sock:
-                            conn2.sock.settimeout(NV_TIMEOUT)
-                        resp2 = conn2.getresponse()
-                        if resp2.status < 400:
-                            result.success = True
-                            result.resp = resp2
-                            result.conn = conn2
-                            result.litellm_model = nv_model_label
-                            result.key_idx = nv_key_idx
-                            result.key_cycle_attempts = key_cycle_attempts
-                            result.upstream_type = "nv"
-                            metrics["upstream_type"] = "nv"
-                            metrics["nv_key_idx"] = nv_key_idx
-                            metrics["litellm_model"] = nv_model_label
-                            return result
-                        # Strip retry also failed
-                        error_body2 = resp2.read()
-                        try:
-                            error_json2 = json.loads(error_body2)
-                        except Exception:
-                            error_json2 = {"error": error_body2.decode("utf-8", errors="replace")}
-                        conn2.close()
-                        # If it's a cycling error after strip, continue cycling
-                        if resp2.status in (429, 500, 502):
-                            key_cycle_attempts.append({
-                                "nv_key_idx": nv_key_idx,
-                                "litellm_model": nv_model_label,
-                                "error_body": json.dumps(error_json2)[:500],
-                                "error_type": f"{resp2.status}_nv_after_strip",
-                                "upstream_type": "nv",
-                            })
-                            continue
-                        # Non-cycling error after strip → report
-                        result.success = False
-                        result.all_keys_exhausted = False
-                        result.final_error_json = error_json2
-                        result.final_resp_status = resp2.status
-                        result.key_cycle_attempts = key_cycle_attempts
-                        result.elapsed_ms = int((time.time() - t_start) * 1000)
-                        return result
-                    except Exception as e2:
-                        _log("NV-ERR", f"NV strip retry connection error: {e2}")
-                        continue
-
-                # Non-cycling, non-retryable NV error → report
-                result.success = False
-                result.all_keys_exhausted = False
-                result.final_error_json = error_json
-                result.final_resp_status = resp.status
-                result.key_cycle_attempts = key_cycle_attempts
-                result.elapsed_ms = int((time.time() - t_start) * 1000)
-                return result
-
-            # ─── NV Success ───
-            result.success = True
-            result.resp = resp
-            result.conn = conn
-            result.litellm_model = nv_model_label
-            result.key_idx = nv_key_idx
-            result.key_cycle_attempts = key_cycle_attempts
-            result.upstream_type = "nv"
-            metrics["upstream_type"] = "nv"
-            metrics["nv_key_idx"] = nv_key_idx
-            metrics["litellm_model"] = nv_model_label
-            if key_cycle_attempts:
-                metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
-                metrics["key_cycle_details"] = key_cycle_attempts
-                _log("NV-SUCCESS", f"NV k{nv_key_idx+1} succeeded after {len(key_cycle_attempts)} cycle attempts")
-            return result
-
-        except socket.timeout as e:
-            elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("NV-TIMEOUT", f"NV k{nv_key_idx+1} socket timeout after {elapsed_ms}ms")
-            key_cycle_attempts.append({
-                "nv_key_idx": nv_key_idx,
-                "litellm_model": nv_model_label,
-                "error_type": "NVSocketTimeout",
-                "elapsed_ms": elapsed_ms,
-                "upstream_type": "nv",
-            })
-            continue
-
-        except Exception as e:
-            error_class = type(e).__name__
-            elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("NV-ERR", f"NV k{nv_key_idx+1} {error_class}: {e}")
-            key_cycle_attempts.append({
-                "nv_key_idx": nv_key_idx,
-                "litellm_model": nv_model_label,
-                "error": str(e)[:200],
-                "error_type": f"NV{error_class}",
-                "elapsed_ms": elapsed_ms,
-                "upstream_type": "nv",
-            })
-            continue
-
-    # All NV keys exhausted
-    result.success = False
-    result.all_keys_exhausted = True
-    result.all_429 = all(a.get("error_type") in ("429_nv_rate_limit", "429_nv_rate_limit_variant_fallback") for a in key_cycle_attempts if a.get("upstream_type") == "nv")
-    result.key_cycle_attempts = key_cycle_attempts
-    result.elapsed_ms = int((time.time() - t_start) * 1000)
-    _log("NV-ALL-FAIL", f"All {NV_NUM_KEYS} NV keys exhausted, elapsed={result.elapsed_ms}ms")
-    return result
-
-
 def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
                   start_variant_idx, start_key_idx, prior_cycle_attempts,
                   is_stream, force_stream, litellm_url, litellm_model_base):
@@ -1035,207 +852,15 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
     has_timeout = any(a.get("error_type") == "SocketTimeout" for a in key_cycle_attempts)
     has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "NVConnectionRefusedError", "NVConnectionError") for a in key_cycle_attempts)
 
-    # ─── Variant Fallback (R23) ───
-    # When all 7 keys in the start variant are 429, try 2 fallback variants
-    # (1 key each). This uses different variant's independent RPM quota.
-    variant_fallback_attempts = []
-    variant_fallback_success = False
-
-    if False and all_429 and not has_500 and not has_502 and not has_timeout and not has_conn_err:
-        # R31.8: Variant fallback DISABLED.
-        # Previously, when all 7 keys returned 429, the proxy retried 9 fallback
-        # variants (each 1 key) — 16-17x request amplification. In a systemic
-        # failure (e.g. a software bug causing every request to 429), this would
-        # rapidly burn through account quota. Per user requirement: 7 keys all-429
-        # must terminate immediately and return the error to CC. CC retries on its
-        # own terms; the proxy no longer amplifies. `if False` keeps the fallback
-        # code intact for future re-enablement while guaranteeing it never runs.
-        num_variants = NUM_VARIANTS.get(mapped_model, 10)
-        # If ALL 429s are non-quota (RPM/false-positive), brief delay before sweeping all variants
-        all_non_quota_v429 = all(
-            a.get("error_type") in (None, "429", "429_rate_limit")
-            for a in key_cycle_attempts
-        )
-        if all_non_quota_v429:
-            _log("VARIANT-FALLBACK-DELAY", f"All {NUM_KEYS} non-quota 429s — 2s delay before sweeping ALL variants")
-            time.sleep(2)
-        _log("VARIANT-FALLBACK-START", f"All {NUM_KEYS} keys 429 for v{start_variant_idx+1}, "
-                                       f"trying ALL fallback variants for {mapped_model}")
-
-        for fallback_v_offset in range(1, num_variants):
-            fallback_v_idx = (start_variant_idx + fallback_v_offset) % num_variants
-            # R31.8: rotate the physical key too, not just the variant. Previously
-            # fixed to start_key_idx, so all 9 fallback attempts landed on the SAME
-            # physical key (e.g. all k7) and, since ModelScope RPM is per-key, all
-            # 9 retried the same burst-exhausted key. Rotating by offset spreads
-            # the 9 attempts across distinct physical keys.
-            fallback_k_idx = (start_key_idx + fallback_v_offset) % num_keys
-            litellm_model_fb = f"{litellm_model_base}v{fallback_v_idx+1}k{fallback_k_idx+1}"
-            oai_body_fb = dict(oai_body)  # Clone body for fallback
-            oai_body_fb["model"] = litellm_model_fb
-
-            _log("VARIANT-FALLBACK-TRY", f"Fallback variant #{fallback_v_offset}: "
-                                         f"v{fallback_v_idx+1} k{fallback_k_idx+1} → model={litellm_model_fb}")
-
-            auth_key_fb = handler.headers.get("x-api-key") or handler.headers.get("X-Api-Key") or LITELLM_KEY
-            headers_fb = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {auth_key_fb}",
-                "Content-Length": str(len(json.dumps(oai_body_fb).encode("utf-8"))),
-            }
-            oai_data_fb = json.dumps(oai_body_fb).encode("utf-8")
-            parsed_upstream_fb = urllib.parse.urlparse(litellm_url)
-
-            try:
-                conn_fb = handler._make_upstream_conn(parsed_upstream_fb)
-                throttle_outbound()  # R31.9: burst smoothing
-                conn_fb.request("POST", parsed_upstream_fb.path, body=oai_data_fb, headers=headers_fb)
-                resp_fb = conn_fb.getresponse()
-
-                # Extract LiteLLM routing/quota headers
-                for hdr_key, metrics_key in [
-                    ("x-litellm-model-id", "litellm_model_id"),
-                    ("x-litellm-response-duration-ms", "litellm_response_duration_ms"),
-                ]:
-                    val_fb = resp_fb.getheader(hdr_key)
-                    if val_fb:
-                        metrics[metrics_key] = val_fb
-
-                # Extract ModelScope quota headers
-                for hdr_key, metrics_key in [
-                    ("llm_provider-modelscope-ratelimit-model-requests-remaining", "ms_model_requests_remaining"),
-                    ("llm_provider-modelscope-ratelimit-requests-remaining", "ms_requests_remaining"),
-                ]:
-                    val_fb = resp_fb.getheader(hdr_key)
-                    if val_fb:
-                        metrics[metrics_key] = int(val_fb)
-
-                if resp_fb.status >= 400:
-                    error_body_fb = resp_fb.read()
-                    try:
-                        error_json_fb = json.loads(error_body_fb)
-                    except Exception:
-                        error_json_fb = {"error": error_body_fb.decode("utf-8", errors="replace")}
-                    conn_fb.close()
-                    err_str_fb = json.dumps(error_json_fb)
-
-                    # Only 429 errors should try next fallback variant
-                    if resp_fb.status == 429:
-                        if is_quota_exhaustion(error_json_fb):
-                            fb_error_type = "429_quota_exhausted_variant_fallback"
-                        else:
-                            fb_error_type = "429_rate_limit_variant_fallback"
-                        variant_fallback_attempts.append({
-                            "variant_idx": fallback_v_idx,
-                            "key_idx": fallback_k_idx,
-                            "litellm_model": litellm_model_fb,
-                            "error_body": err_str_fb[:500],
-                            "error_type": fb_error_type,
-                        })
-                        _log_error_detail({
-                            "request_id": request_id,
-                            "timestamp": datetime.datetime.now().isoformat(),
-                            "error_subcategory": "429_variant_fallback_attempt",
-                            "upstream_status": resp_fb.status,
-                            "variant_idx": fallback_v_idx,
-                            "key_idx": fallback_k_idx,
-                            "litellm_model": litellm_model_fb,
-                            "fallback_offset": fallback_v_offset,
-                            "upstream_error_body_full": err_str_fb[:3000],
-                        })
-                        _log("VARIANT-FALLBACK-429", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) → "
-                                                   f"429, trying next fallback variant")
-                        continue  # Try next fallback variant
-                    else:
-                        # Non-429 error in fallback — stop and include in final classification
-                        variant_fallback_attempts.append({
-                            "variant_idx": fallback_v_idx,
-                            "key_idx": fallback_k_idx,
-                            "litellm_model": litellm_model_fb,
-                            "error_body": err_str_fb[:500],
-                            "error_type": f"{resp_fb.status}_variant_fallback_non429",
-                        })
-                        _log("VARIANT-FALLBACK-ERR", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) → "
-                                                    f"{resp_fb.status} non-429 error, stopping fallback")
-                        break  # Non-429 error: stop fallback attempts
-
-                else:
-                    # ─── Variant fallback SUCCESS ───
-                    variant_fallback_success = True
-                    metrics["variant_fallback"] = True
-                    metrics["fallback_variant_idx"] = fallback_v_idx
-                    metrics["fallback_key_idx"] = fallback_k_idx
-                    metrics["litellm_model"] = litellm_model_fb
-                    metrics["key_idx"] = fallback_k_idx
-                    metrics["variant_idx"] = fallback_v_idx
-                    metrics["variant_fallback_attempts"] = variant_fallback_attempts
-                    metrics["variant_fallback_429s_before_success"] = len(variant_fallback_attempts)
-
-                    _log("VARIANT-FALLBACK-SUCCESS", f"Success on fallback variant v{fallback_v_idx+1} "
-                                                      f"k{fallback_k_idx+1} ({litellm_model_fb}) after "
-                                                      f"{len(key_cycle_attempts)} key 429s + {len(variant_fallback_attempts)} variant 429s")
-
-                    result.success = True
-                    result.resp = resp_fb
-                    result.conn = conn_fb
-                    result.litellm_model = litellm_model_fb
-                    result.variant_idx = fallback_v_idx
-                    result.key_idx = fallback_k_idx
-                    result.key_cycle_attempts = key_cycle_attempts
-                    if variant_fallback_attempts:
-                        metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts) + len(variant_fallback_attempts)
-                        metrics["key_cycle_details"] = key_cycle_attempts + variant_fallback_attempts
-                    return result
-
-            except socket.timeout as e_fb:
-                elapsed_ms_fb = int((time.time() - t_start) * 1000)
-                variant_fallback_attempts.append({
-                    "variant_idx": fallback_v_idx,
-                    "key_idx": fallback_k_idx,
-                    "litellm_model": litellm_model_fb,
-                    "error_type": "SocketTimeout_variant_fallback",
-                    "elapsed_ms": elapsed_ms_fb,
-                })
-                _log("VARIANT-FALLBACK-TIMEOUT", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) "
-                                                  f"socket timeout after {elapsed_ms_fb}ms, trying next variant")
-                continue  # Try next fallback variant
-
-            except Exception as e_fb:
-                err_str_fb = str(e_fb)
-                error_class_fb = type(e_fb).__name__
-                variant_fallback_attempts.append({
-                    "variant_idx": fallback_v_idx,
-                    "key_idx": fallback_k_idx,
-                    "litellm_model": litellm_model_fb,
-                    "error_type": f"{error_class_fb}_variant_fallback",
-                    "error": err_str_fb[:200],
-                })
-                _log("VARIANT-FALLBACK-CONNERR", f"v{fallback_v_idx+1} k{fallback_k_idx+1} ({litellm_model_fb}) "
-                                                  f"{error_class_fb}: {err_str_fb[:100]}, trying next variant")
-                continue  # Try next fallback variant
-
-        # All fallback variants also failed
-        _log("VARIANT-FALLBACK-ALL-FAILED", f"All {len(variant_fallback_attempts)} fallback variant attempts also 429 "
-                                            f"for {mapped_model}. Original: {len(key_cycle_attempts)} key 429s in v{start_variant_idx+1}, "
-                                            f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
-
-        # Merge fallback attempts into classification
-        all_attempts = key_cycle_attempts + variant_fallback_attempts
-        # R35.6+: Added NV error types to all_429/has_conn_err checks for future NV re-enable.
-        all_429 = all(a.get("error_type") in (None, "429", "429_rate_limit", "429_quota_exhausted", "429_rate_limit_variant_fallback", "429_quota_exhausted_variant_fallback", "429_nv_rate_limit", "429_nv_rate_limit_variant_fallback") for a in all_attempts)
-        has_500 = any(a.get("error_type") in ("500_internal_server_error", "500_variant_fallback_non429") for a in all_attempts)
-        has_502 = any(a.get("error_type") in ("502_bad_gateway", "502_variant_fallback_non429") for a in all_attempts)
-        has_timeout = any(a.get("error_type") in ("SocketTimeout", "SocketTimeout_variant_fallback") for a in all_attempts)
-        has_conn_err = any(a.get("error_type") in ("ConnectionRefusedError", "ConnectionError", "ConnectionRefusedError_variant_fallback", "ConnectionError_variant_fallback", "NVConnectionRefusedError", "NVConnectionError", "NVConnectionRefusedError_variant_fallback", "NVConnectionError_variant_fallback") for a in all_attempts)
-    else:
-        # Non-429 mixed errors: no variant fallback attempted
-        all_attempts = key_cycle_attempts
+    # ─── Variant Fallback (R23) — DISABLED (R31.8) ───
+    # All 7 keys 429 → terminate immediately, return error to CC. No 17x amplification.
+    # Dead code (variant-fallback loop body) removed for clarity.
+    all_attempts = key_cycle_attempts
 
     elapsed_ms = int((time.time() - t_start) * 1000)
 
-    # R31.8: hard termination — no variant fallback. Log clearly so the
-    # 7-key-all-429-immediate-stop is observable in real traffic.
-    if all_429 and not variant_fallback_attempts:
+    # R31.8: hard termination — no variant fallback.
+    if all_429:
         _log("ABORT-NO-FALLBACK", f"7 keys all-429 for v{start_variant_idx+1} ({mapped_model}) — "
                                  f"terminating immediately (no variant fallback), returning error to client. "
                                  f"Keys: {[a['litellm_model'] for a in key_cycle_attempts]} elapsed={elapsed_ms}ms")
@@ -1244,19 +869,17 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
     if all_429:
         # R35.6+: Added "429_nv_rate_limit" — NV transient 429 should get retry-after:5, not 180.
         all_non_quota_429 = all(
-            a.get("error_type") in (None, "429", "429_rate_limit", "429_rate_limit_variant_fallback", "429_nv_rate_limit")
+            a.get("error_type") in (None, "429", "429_rate_limit", "429_nv_rate_limit")
             for a in all_attempts
         )
         if all_non_quota_429:
             error_subcategory = "429_all_transient"
             _log("ALL-KEYS-TRANSIENT", f"All 429s non-quota (transient) for {mapped_model}. "
-                                       f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]} "
-                                       f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
+                                       f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]}")
         else:
             error_subcategory = "429_all_keys_exhausted"
-            _log("ALL-KEYS-429", f"All keys 429 for {mapped_model} (including variant fallbacks). "
-                                 f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]} "
-                                 f"Fallback: {[a['litellm_model'] for a in variant_fallback_attempts]}")
+            _log("ALL-KEYS-429", f"All keys 429 for {mapped_model}. "
+                                 f"Key cycles: {[a['litellm_model'] for a in key_cycle_attempts]}")
     elif has_500 or has_502:
         error_subcategory = "all_keys_500_or_502"
         _log("ALL-KEYS-500/502", f"All keys failed for {mapped_model} (includes 500/502). "
@@ -1280,8 +903,6 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
         "total_keys": NUM_KEYS,
         "key_cycle_attempts": key_cycle_attempts,
         "key_cycle_attempt_types": [a.get("error_type", "429_rate_limit") for a in key_cycle_attempts],
-        "variant_fallback_attempts": variant_fallback_attempts,
-        "variant_fallback_attempt_types": [a.get("error_type") for a in variant_fallback_attempts],
         "elapsed_since_request_start_ms": elapsed_ms,
         "upstream_timeout_setting_ms": UPSTREAM_TIMEOUT * 1000,
         "all_429": all_429,
@@ -1296,7 +917,6 @@ def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
     metrics["status"] = 429 if all_429 else 502
     metrics["error_type"] = error_subcategory
     metrics["key_cycle_attempts"] = key_cycle_attempts
-    metrics["variant_fallback_attempts"] = variant_fallback_attempts
     metrics["key_cycle_attempt_types"] = [a.get("error_type", "429_rate_limit") for a in key_cycle_attempts]
     metrics["duration_ms"] = elapsed_ms
     metrics["timeout_exceeded_by_ms"] = elapsed_ms - UPSTREAM_TIMEOUT * 1000 if elapsed_ms > UPSTREAM_TIMEOUT * 1000 else 0

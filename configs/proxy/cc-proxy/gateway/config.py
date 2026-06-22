@@ -491,18 +491,6 @@ atexit.register(_save_rr_counter)
 _signal.signal(_signal.SIGTERM, _flush_and_exit)
 _signal.signal(_signal.SIGINT, _flush_and_exit)
 
-def _is_routing_name(name: str) -> bool:
-    """Check if a model name is an internal variant×key routing name.
-    R21: Routing names use v+k format. These are proxy→LiteLLM routing, NOT meant for agents.
-    Checks for glm5.1 routing names only."""
-    for base in MODEL_UPSTREAMS:
-        num_variants = NUM_VARIANTS.get(base, 10)
-        for vi in range(num_variants):
-            for ki in range(NUM_KEYS):
-                if name == f"{base}v{vi+1}k{ki+1}":
-                    return True
-    return False
-
 # ─── Thread locks for logging ────────────────────────────────────────────
 _log_lock = threading.Lock()
 _metrics_lock = threading.Lock()

@@ -33,7 +33,7 @@ from .converters import anth_to_openai, openai_to_anth, _estimate_text_chars
 from .stream import stream_to_anth, collect_stream_to_anth
 from .error_mapping import (
     convert_error, get_upstream_status_for_client,
-    is_input_overflow, is_quota_exhaustion,
+    is_input_overflow,
 )
 from .upstream import execute_request, UpstreamResult
 
@@ -241,7 +241,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                        f"Please retry in a few seconds. Keys cycled: {cycled_keys}"
                         },
                         "model": request_model,
-                    }, extra_headers={"retry-after": "10"})
+                    }, extra_headers={"retry-after": "5"})
                 else:
                     failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
                     timeout_keys = [f"k{a.get('key_idx',a.get('nv_key_idx',0))+1}" for a in result.key_cycle_attempts if a.get("error_type") == "SocketTimeout"]
@@ -281,13 +281,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 error_payload = convert_error(error_json, request_model)
                 extra_hdrs = None
                 if client_status == 429:
-                    quota_exhaust = is_quota_exhaustion(error_json)
-                    retry_seconds = 30 if quota_exhaust else 5
-                    extra_hdrs = {"retry-after": str(retry_seconds)}
-                    _log("RETRY-AFTER", f"429 rate_limit_error → retry-after={retry_seconds}s (quota={quota_exhaust})")
-                elif client_status == 529:
+                    # is_quota_exhaustion() always returns False (R31.8: all 429s are RPM burst)
+                    # retry-after=5 per CLAUDE.md spec (CC waits 5s then retries)
                     extra_hdrs = {"retry-after": "5"}
-                    _log("RETRY-AFTER", f"529 overloaded → retry-after=5s (api_error, CC retries then stops)")
+                    _log("RETRY-AFTER", f"429 rate_limit_error → retry-after=5s")
                 # R35.6: Log metrics for non-cycling error path
                 metrics["status"] = client_status
                 metrics["error_type"] = "upstream_error"
