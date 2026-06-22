@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.7, 2026-06-21)
+# Deploy Status — opc_uname + opc2_uname (R35.8+, 2026-06-22)
 
-## Architecture (R35.7 — dispatcher + blue-green CC proxy + pure MS mode + dsv4p removed + code bug fixes)
+## Architecture (R35.8+ — dispatcher + blue-green CC proxy + pure MS mode + all fixes deployed)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -165,7 +165,7 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 cd /opt/cc-infra && docker restart ms_uni41001
 ```
 
-## Current Parameters (R35.5)
+## Current Parameters (R35.8+, confirmed deployed on both machines 2026-06-22)
 
 | Parameter | Value | Container | Notes |
 |-----------|-------|-----------|-------|
@@ -173,15 +173,15 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
 | NV_NUM_KEYS | 0 | ALL proxies | R35.7: pure MS everywhere (NV disabled) |
 | NV_TIMEOUT | 20 | all proxies | R35.1: NV-specific timeout |
-| MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | R35.8: 40003 aligned from 2.0→1.5 (data: 2.0s had 3 ABORTs+10s TTFB, 1.5s had 0 ABORTs+6.9s TTFB) |
+| MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | R35.8: ALL ports aligned to 1.5 (opc_uname: confirmed via docker exec env) |
 | LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
 | PROXY_TIMEOUT | 300 | all proxies | Overall request timeout (now imported in stream.py) |
 | NV_PROXY_URL | host.docker.internal:7894 | 40001/40003/40005 | Dedicated US proxy port |
-| is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers |
+| is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers (confirmed via docker exec) |
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
-| dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error |
-| passthrough finish_reason extraction | ✅ | 40003 | R35.8: _stream_openai_passthrough now extracts finish_reason from SSE chunks (was 99% null) |
+| dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
+| passthrough finish_reason extraction | ✅ | 40003 | R35.8: _stream_openai_passthrough now extracts finish_reason from SSE chunks (confirmed: R35.8 marker present, non-null fr in latest metrics) |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -200,3 +200,4 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.6: OpenClaw stuck bug fix (is_quota_exhaustion asymmetry + Ghost-ABORT metrics)
 - R35.7: Stale container deployment fix + 5 code bug fixes (PROXY_TIMEOUT NameError, operator precedence, key_idx KeyError, NV classification, dispatcher close_connection)
 - R35.8: 40003 throttle alignment (2.0→1.5) + passthrough null_finish metrics fix + stale dsv4p rr_counter cleanup
+- R35.8+: Emergency redeployment — R35.7/R35.8 code changes were never synced to opc_uname /opt/cc-infra (third occurrence of stale-container lesson). sync_config.sh + rebuild all 5 containers verified working on both machines.
