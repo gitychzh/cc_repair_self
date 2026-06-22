@@ -388,6 +388,9 @@ def _check_nv_success(resp, conn, nv_key_idx, nv_model_label, nv_proxy_url,
         metrics["litellm_model"] = nv_model_label
         metrics["nv_proxy_url"] = nv_proxy_url
         return result
+
+
+def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
     """Execute upstream request with strict MS-NV alternating + MS key cycling.
 
     R36: Strict alternating mode:
