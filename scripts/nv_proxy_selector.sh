@@ -17,7 +17,7 @@
 #   nv_proxy_selector.sh --status  — Show current K1-K5 assignments only
 #
 # Cron recommended:
-#   */5  * * * *  nv_proxy_selector.sh          (re-select every 5 min)
+#   */30 * * * *  nv_proxy_selector.sh           (re-select every 30 min)
 #   0    */2 * * *  nv_proxy_selector.sh --test  (test inference every 2 hours)
 
 import json, sys, os, datetime, urllib.request, urllib.parse, urllib.error, time
