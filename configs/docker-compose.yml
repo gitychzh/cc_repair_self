@@ -50,6 +50,19 @@ x-resource-1c1g: &resource-1c1g
         memory: 256M
         cpus: "0.1"
 
+x-resource-1c2g-host: &resource-1c2g-host
+  # R36.2: NV LiteLLM containers need 2GiB (model cost map ~940MiB at startup)
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  deploy:
+    resources:
+      limits:
+        memory: 2G
+        cpus: "1.0"
+      reservations:
+        memory: 512M
+        cpus: "0.1"
+
 x-logging: &logging
   driver: json-file
   options:
@@ -395,7 +408,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-nv/config-k1.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -433,7 +446,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-nv/config-k2.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -471,7 +484,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-nv/config-k3.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -509,7 +522,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-nv/config-k4.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -547,7 +560,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-nv/config-k5.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
