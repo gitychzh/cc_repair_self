@@ -1,0 +1,149 @@
+# R36.3: NV 代理节点动态选优方案
+
+## 问题分析
+
+### 当前状态
+- opc2_uname 实际运行的仍是 R35.3 配置（NV_NUM_KEYS=0, mihomo 只有单 US-NV 组）
+- 仓库中的 R36.2 配置（5 key alternating + per-key proxy + 5 region groups）从未部署到 opc2_uname
+- NV API /v1/chat/completions 当前完全不可用（60s timeout，推理层问题）
+- mihomo 204 延迟测试 ≠ NV API 真实推理延迟（TCP+TLS 延迟正常但推理超时）
+
+### R36.1 的 5 组 region-divided 设计的问题
+1. **K2（阿什本）延迟最差** — 实测 ~230-260ms，比 K1/K3 慢 3-8 倍
+2. **区域是人为硬分** — 节点池动态变化，硬编码区域筛选跟不上
+3. **6 个圣何塞 0.1倍节点 unreachable** — filter 只看名称不看可用性
+4. **204 延迟和 NV API 延迟相关性弱** — 快建连 ≠ 快推理
+5. **单一 provider 池** — 所有 5 组从同一个 `nv-us-provider` 取节点，provider 可能换源
+
+### 设计约束
+- **不能每次请求都测延迟** — 会卡顿、增加延迟、浪费 quota
+- **NV quota 极贵** — 不能用 NV API 本身做频繁测试
+- **5 个 key 需要 IP 多样性** — 同一 IP = NVIDIA 可能限速/封号
+- **节点池是外部动态的** — pqjc 每小时更新，节点数量/延迟/可用性随时变化
+- **mihomo url-test 机制** — 204 测延迟有 interval（当前 60s），自动选最低延迟节点
+
+## 方案：混合架构 — mihomo 智能分组 + 脚本定期 NV 可达性验证
+
+### 第一步：先部署 R36.2 配置（mihomo + docker-compose）
+
+虽然当前 NV API 不可用，但 mihomo 的 5 组代理本身是独立功能，应先部署：
+
+1. **部署 mihomo R36.2 配置到 opc2_uname** — 更新 `~/.config/mihomo/config.yaml` 为仓库版本
+2. **部署 docker-compose R36.2 到 opc2_uname** — 同步仓库版���到 /opt/cc-infra，rebuild 40005
+3. 验证 5 个 mihomo 端口（7894-7899）各自独立选节点
+
+### 第二步：优化 mihomo 分组策略（取代区域硬分）
+
+**核心改进：从「按区域硬分」→「按延迟梯队自动分组」**
+
+当前 R36.1 设计的 5 组按区域名硬分（K1=圣何塞, K2=阿什本, K3=其他...）有问题：
+- 区域节点数不均（圣何塞 13 个，阿什本 3 个）
+- 不考虑节点实际可用性
+- K2 阿什本是最差区域却仍被使用
+
+**新方案：5 组全部用同一池，通过 mihomo 的 tolerance + exclude-filter 梯队机制**
+
+```yaml
+# nv-us-provider: 包含所有美国节点（不再按区域细分）
+
+# K1: 最快组 — tolerance=0, 选绝对最快节点
+♻️US-NV-K1:
+  type: url-test
+  tolerance: 0
+  interval: 120
+  url: http://www.gstatic.com/generate_204
+  use: [nv-us-provider]
+
+# K2: 快速组 — tolerance=30, 选前30ms范围内的最快节点（可能和K1不同节点）
+♻️US-NV-K2:
+  type: url-test
+  tolerance: 30
+  interval: 120
+  url: http://www.gstatic.com/generate_204
+  use: [nv-us-provider]
+  # exclude-filter: 排除K1当前选中节点名（动态脚本设置）
+
+# K3: 中速组 — tolerance=80, 选前80ms范围内
+♻️US-NV-K3:
+  type: url-test
+  tolerance: 80
+  interval: 120
+  url: http://www.gstatic.com/generate_204
+  use: [nv-us-provider]
+
+# K4: 低成本组 — filter: "0.1倍"  (0.1倍率节点，性价比高)
+♻️US-NV-K4:
+  type: url-test
+  tolerance: 0
+  interval: 120
+  url: http://www.gstatic.com/generate_204
+  use: [nv-us-provider]
+  filter: "0\\.1倍"
+
+# K5: 兜底组 — 全部美国节点，选绝对最快（含所有类型）
+♻️US-NV-K5:
+  type: url-test
+  tolerance: 0
+  interval: 120
+  url: http://www.gstatic.com/generate_204
+  use: [nv-us-provider]
+```
+
+**问题**：这样 K1/K2/K3 可能选到同一个节点 → IP 无多样性
+
+**解决方案**：用脚本定期检查 5 组的 active 节点，如果重复 → 通过 mihomo API 切换该组到次优节点
+
+### 第三步：创建 `nv_proxy_selector.sh` 脚本
+
+脚本职责：
+1. **查询 mihomo API** — 获取 5 个 NV-K 组当前 active 节点和延迟
+2. **检查 IP 多样性** — 如果多个组选了同一节点，通过 API 切换到不同节点
+3. **低频 NV 可达性验证**（每 30 分钟）— 通过每个组的当前节点发 1 次 NV API `/v1/models` 请求（GET，不消耗 quota，只验证可达性）
+4. **NV 推理可用性检测**（每 2 小时）— 通过 1 个节点发 1 次 `/v1/chat/completions` 最小请求（消耗 1 次 quota，检测推理层是否恢复）
+5. **输出结果** — 写入日志 + JSON 状态文件
+
+```
+运行频率：
+- IP 多样性检查 + 204 延迟验证：每 5 分钟（轻量，纯 API 查询）
+- NV 可达性验证（/v1/models GET）：每 30 分钟（5 次 GET，0 quota 消耗）
+- NV 推理检测（/v1/chat/completions）：每 2 小时（1 次 POST，1 quota 消耗）
+```
+
+### 第四步：proxy 层集成验证结果
+
+cc-proxy 的 NV 调用逻辑改进：
+- 读取脚本输出的 JSON 状态文件
+- 如果某 NV key 对应的代理节点标记为 "nv-unreachable" → 该 NV slot 直接 skip 转为 MS
+- 如果 NV API 整体不可用（推理层 down）→ 所有 NV slot skip，纯 MS 模式
+
+这比当前硬编码的 NV_NUM_KEYS=5 更灵活 — NV API 不可用时自动降级，恢复时自动启用。
+
+### 第五步：节点类型偏好
+
+观察节点池数据发现：
+- **Hysteria2 类型**：153-189ms，更稳定（基于 QUIC，抗丢包）
+- **Vless 类型**：147-280ms，范围更广，部分节点 unreachable
+- **0.01倍率节点**：258-380ms，最慢
+
+偏好策略：
+- K1/K2：优先选 Hysteria2 节点（快+稳定）
+- K3：选 Vless 节点（IP 多样性，Vless 和 Hysteria2 用不同协议 = 不同出口 IP）
+- K4：0.1倍率节点（成本低，数量多）
+- K5：全类型兜底
+
+## 实施步骤
+
+1. **先部署 R36.2 到 opc2_uname** — mihomo config + docker-compose sync + rebuild
+2. **修改 mihomo 配置** — 从区域硬分改为 tolerance 梯队分组
+3. **编写 nv_proxy_selector.sh** — IP 多样性检查 + NV 可达性验证
+4. **设置 cron** — 每 5 分钟运行 IP 多样性检查，每 30 分钟运行可达性验证
+5. **更新 cc-proxy NV logic** — 读取可达性状态，自动 skip 不可达节点
+6. **更新 CLAUDE.md + memory** — 记录方案和参数
+
+## 不做的事
+
+- **不用 NV API 做频繁延迟测试** — quota 太贵
+- **不每次请求测延迟** — 会卡顿
+- **不硬编码区域** — 节点池动态变化
+- **不在 mihomo 内做 NV API health-check** — mihomo 只支持 204 类 GET 测试
+- **不在 proxy 内做节点延迟测试** — proxy 职责是转发，不做额外网络测试
