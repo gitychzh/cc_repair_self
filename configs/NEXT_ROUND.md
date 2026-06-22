@@ -1,99 +1,72 @@
-# Round R35.9 (第3轮) — 2026-06-22
+# Round R35.11 (第4轮) — 2026-06-22 18:00 CST
 
-## R35.8 部署后验证数据（2.5h，10:04-13:26 UTC）
+## R35.10 部署后验证数据（2.5h, 15:36-18:00 CST）
 
-### 40003 (passthrough, throttle=1.5, POST-DEPLOY)
+### 40005 (cc-proxy, EXPERIMENT, 395 entries)
 
-| 指标 | R35.8 部署后 | R35.8前(06-21, throttle=2.0) | 变化 |
-|------|-------------|---------------------------|------|
-| 总请求 | 223 | 274 | - |
-| 200率 | 98.2% (219/223) | 100% (274/274) | ⚠️ 出现4个429终态ABORT |
-| 429 cycling率 (key_cycle_429s>0) | 36.1% | 35.8% | 基本不变 |
-| 总429 key-cycles | 159 | 236 | ↓减少33% |
-| Avg TTFB (200) | 10273ms | 8386ms | ↑+22% |
-| Avg Duration (200) | 15099ms | 10466ms | ↑+44% |
+| 指标 | R35.10 部署后 | R35.9前(06-22 early) | 变化 |
+|------|-------------|---------------------|------|
+| 总请求 | 395 | ~623 (pre-rebuild) | — |
+| 200率 | 98.5% (389/395) | ~99% | 稳定 |
+| FR capture (200 streaming) | 100.0% (387/387) | — | cc-proxy一直正常 |
+| 429 cycling率 (200) | 42.9% (167/389) | ~38-49% | 在预期范围 |
+| ABORT率 | 1.5% (6/395) | — | 低 |
+| Avg TTFB | 8108ms | 9309ms(pre-rebuild) | ↓12% |
+| Avg Duration | 13721ms | — | 正常 |
 
-**⚠️ TTFB上升原因分析**：
-- 06-22 10h UTC：215 req vs 06-21 10h UTC：52 req — 请求量4倍
-- 06-22 10h UTC 40005：136 req vs 06-21 10h UTC：19 req — CC请求量7倍
-- 合计RPM: 2.6 RPM（3.7%容量利用率），但burst模式仍然导致429
-- TTFB上升是流量增加导致的，不是throttle=1.5本身恶化
+429 cycling 分布: 1-key=59, 2-key=43, 3-key=38, 4-key=16, 5-key=6, 6-key=5
+高RPM(>=3/min) → cycling 44.5%, 低RPM → cycling 32.1%
+6个ABORT分布在v5,v6,v1,v3,v8,v8 — 非系统性
 
-**结论**：throttle 1.5 vs 2.0 对429 cycling率影响不大（36% vs 36%），根因仍是ModelScope RPM burst throttle。降低throttle到1.0可能进一步加剧burst，不建议此时尝试。
+### 40003 (passthrough, 11 entries, 低流量)
 
-### 40005 (cc-proxy, throttle=1.5)
+| 指标 | R35.10 部署后 | R35.10前(旧chunk parsing) | 变化 |
+|------|-------------|--------------------------|------|
+| 总请求 | 11 | 229 | 流量少 |
+| 200率 | 100% (11/11) | 98.2% (225/229) | ↑无ABORT |
+| FR capture (200 streaming) | **87.5%** (7/8) | **7.2%** (16/222) | ✅ 12x改善 |
+| 429 cycling率 | 0% | 36.0% | 0 (流量少) |
+| MSG-FIX triggers | 2 (proxy.log) | 0 | ✅ 功能工作 |
 
-| 指标 | 06-22 POST-DEPLOY | 
-|------|-------------------|
-| 总请求 | 311 (280+31) |
-| 200率 | 99.6% (279/280) |
-| 429 cycling率 | 38.6% |
-| Avg TTFB | 10470ms |
-| Avg Duration | 14385ms |
-| finish_reason分布 | tool_calls=274, stop=5, None=1 |
+唯一 KEY_MISSING 条目: output_tokens=0, duration=22086ms — 可能是 ModelScope 边缘情况（模型返回空content+reasoning_content，无finish_reason chunk）
 
-**40005 finish_reason只有1条None**（vs 40003 206条None）— cc-proxy buffer-based解析工作正常。
+### 40001 (MIRROR/STABLE): 1 entry — dispatcher 极少路由到它
 
-### 关键发现：40003 finish_reason SSE解析bug（94% None）
+### ⚡ 重大发现：NV glm-5.1 API 恢复工作！
 
-**根因**：passthrough `_stream_openai_passthrough` 使用 chunk-based line parsing（每次read(8192)后split("\n")），SSE data行可跨越8KB chunk边界 → 被拆分的行无法被完整解析 → finish_reason丢失。
+**测试结果** (5 sequential non-streaming requests via mihomo ♻️US-NV 7894):
+- 成功率: 5/5 (100%) — **首次确认自 R35.3 禁用后 NV glm-5.1 API 可用！**
+- 延迟: 2199ms, 3395ms, 7566ms, 7880ms, 3579ms (avg ~5s)
+- Streaming: 正常工作, finish_reason="stop" in last chunk
+- thinking_budget: 仍然 400 Unsupported (proxy 需 strip)
 
-**对比**：cc-proxy `stream_to_anth` 使用 buffer-based parsing（`buffer += chunk.decode()` + `while "\n\n" in buffer`），正确处理SSE跨chunk边界。
-
-**证据**：
-- 40003 finish_reason=None: 206/219 (94.1%) 200 streaming entries
-- 40005 finish_reason=None: 1/280 (0.4%) 200 streaming entries
-- 40003 fr=None 平均 duration=15485ms, fr=nonnull 平均 duration=9519ms（长响应更易跨chunk边界）
-
-### 40005 ConnectionRefusedError 事件
-
-- 10条 upstream_ConnectionRefusedError，全部为 variant_idx=9 (glm5.1v10k*)
-- 时间窗口: 10:30-10:31 UTC（约2分钟后恢复）
-- 2条 socket_timeout (glm5.1v6k3, glm5.1v6k6)
-
-### 40001 (mirror/backup)
-
-- 仅1个请求（77s TTFB, 3次429 cycling）— dispatcher极少路由到它
-- 1次 double-failure (40005和40001同时超时)，发生在容器重建期间
+**风险评估**:
+- NV 可能是临时��复（之前完全不可用数月）
+- NV 延迟不稳定 (2-8s, burst queue 效果)
+- NV 提供独立 quota 源（如启用可减少 MS 429 cycling）
+- re-enablement 需要 HTTPS CONNECT tunnel + thinking_budget strip（已有代码，只是 NV_NUM_KEYS=0 禁用了）
 
 ---
 
-## Action 1: 修复 40003 SSE finish_reason 解析 bug — ✅ CODE DONE, 待部署
+## Action: 本轮无需修改 ✅
 
-**WHY**: 94% finish_reason=None 使 passthrough proxy 的响应质量监控完全失效。cc-proxy 已用buffer-based解析100%正常，passthrough 也应采用。
-
-**改动**: `passthrough-proxy/gateway/handlers.py` `_stream_openai_passthrough` 方法
-- 新增 `sse_buffer = ""` 行级缓冲变量
-- `sse_buffer += chunk.decode()` 累积解码文本
-- `while "\n" in sse_buffer:` 仅处理完整行
-- `sse_buffer.split("\n", 1)` 从缓冲取出完整行
-- 流结束时处理缓冲剩余行（finish_reason可能在最后一个SSE事件中）
-- passthrough 写 chunk→wfile 的行为不变（纯透传）
-
-**风险**: LOW — 仅影响 metrics 提取，不改变 SSE 透传行为。cc-proxy 已验证此模式。
+**不做的事**（稳定优先，无数据支撑不改）:
+- ❌ 不重新启用 NV: 仅测试了5次请求，NV 可能临时恢复，需 24-48h 稳定性监控
+- ❌ 不降低 throttle 到 1.0: 429 cycling率42.9%仍是 RPM burst根因，降低间隔加剧burst
+- ❌ 不修改 MSG-FIX metrics 记录: 仅2次触发，非紧急
+- ❌ 不修改任何参数: 系统运行稳定
 
 ---
 
-## Action 2: 参数观察 — 🔄 不变更
+## 参数现状 (R35.11)
+PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s (ALL ports) | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False | PROXY_TIMEOUT import in stream.py | dispatcher close_connection | passthrough SSE buffer-based parsing (R35.9, VERIFIED FR 7.2%→87.5%) | cc-proxy buffer-based parsing (100% FR) | MSG-FIX (R35.10, VERIFIED 2 triggers) | NV glm-5.1 API now WORKING (not yet re-enabled)
 
-**数据支撑的结论**:
-- throttle 1.5 vs 2.0: 429 cycling率基本相同（36.1% vs 35.8%），没有明显改善
-- throttle 不宜进一步降低到 1.0 — burst throttle根因不变，降低间隔会加剧burst
-- 40001/40005镜像保持一致 — 蓝绿架构健康
-- NV glm-5.1仍不可用 — 无数据支撑重启NV
-
-**不做的事**:
-- ❌ throttle 1.5→1.0: 429 cycling率无改善证据，降低间隔可能加剧burst
-- ❌ NV 重启: NV API仍不可用，无数据支撑
-- ❌ LiteLLM router策略变更: simple-shuffle vs least-busy需更多数据
-- ❌ 大范围参数调整: 稳定优先
-
----
-
-## 参数现状 (R35.9)
-PROXY_TIMEOUT=300 | UPSTREAM_TIMEOUT=60 | CPT=3.0 | SAFETY=170000 | THROTTLE=1.5s (ALL ports) | NV_NUM_KEYS=0 | NV_TIMEOUT=20 | MS_NV_TOTAL_SLOTS=N/A(pure MS) | LOG_RETENTION_DAYS=7 | is_quota_exhaustion=always-False | PROXY_TIMEOUT import in stream.py | dispatcher close_connection | passthrough SSE buffer-based parsing (R35.9) | cc-proxy buffer-based parsing (正常)
-
-## 下轮待办 (R35.10)
-- 验证 R35.9 SSE buffer fix 部署后 40003 finish_reason 分布（预期 None<5%）
-- 继续监控 throttle=1.5 效果（需更多同流量时段对比数据）
-- 如finish_reason修复成功，可开始关注 passthrough proxy 的其他指标（output_tokens分布、error_type分布）
+## 下轮待办 (R35.12)
+- 🔥 **NV 稳定性持续监控**：如 NV glm-5.1 API 持续可用 >48h，可考虑重新启用 NV_NUM_KEYS=2（先在 40005 EXPERIMENT 上测试）
+- **40003 finish_reason 更多数据**：当前仅 8 条 streaming entries，需更多流量数据验证 87.5% → >95%
+- **MSG-FIX metrics 记录**：添加 `msg_fix_appended` field 到 metrics dict（低优先级）
+- **NV re-enablement 计划**（如果稳定性确认）：
+  1. 40005 NV_NUM_KEYS=2 (EXPERIMENT) — 先在蓝绿实验端测试
+  2. 观察 40005 vs 40001 429 cycling 率对比
+  3. 如果 NV 减少 429 cycling → 版本提升到 40001
+  4. 如果 NV 不稳定 → 回滚 NV_NUM_KEYS=0

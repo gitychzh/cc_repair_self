@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.10, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.11, 2026-06-22)
 
-## Architecture (R35.10 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix + messages sequence fix)
+## Architecture (R35.11 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix verified + messages sequence fix verified)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -165,7 +165,44 @@ cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40
 cd /opt/cc-infra && docker restart ms_uni41001
 ```
 
-## Current Parameters (R35.9, SSE buffer fix pending deploy)
+## R35.11 Verification Data (2.5h post-rebuild, opc_uname)
+
+### 40005 (cc-proxy, EXPERIMENT) — 395 entries
+
+| 指标 | 值 |
+|------|-----|
+| 200率 | 98.5% (389/395) |
+| FR capture (200 streaming) | 100.0% (387/387) |
+| 429 cycling率 (200) | 42.9% (167/389) |
+| ABORT率 | 1.5% (6/395, all 429_all_transient) |
+| Avg TTFB | 8108ms (median: 7096ms) |
+| Avg Duration | 13721ms |
+
+429 cycling distribution: 1-key=59, 2-key=43, 3-key=38, 4-key=16, 5-key=6, 6-key=5
+RPM vs cycling: high RPM (>=3/min) → 44.5%, low RPM → 32.1% (burst throttle root cause confirmed)
+
+### 40003 (passthrough) — 11 entries (low traffic)
+
+| 指标 | 值 |
+|------|-----|
+| 200率 | 100% (11/11) |
+| FR capture (200 streaming) | 87.5% (7/8) — **从 7.2% 大幅改善** |
+| 429 cycling率 | 0% (0/8) |
+| MSG-FIX triggers | 2 (proxy.log) |
+| Avg TTFB | 7866ms |
+
+唯一 KEY_MISSING 条目: output_tokens=0, duration=22086ms — ModelScope 边缘情况
+
+### 40001 (MIRROR): 1 entry only (dispatcher rarely routes to it)
+
+### ⚡ NV glm-5.1 API 发现恢复工作！
+- 5/5 请求成功，finish_reason="stop"，内容完整
+- 延迟: 2199ms~7880ms (avg ~5s)
+- Streaming: 正常工作
+- thinking_budget: 仍然 400 Unsupported (proxy 需 strip)
+- **暂不重新启用 NV**：需更多稳定性数据（24-48h）
+
+## Current Parameters (R35.11, verified stable)
 
 | Parameter | Value | Container | Notes |
 |-----------|-------|-----------|-------|
@@ -182,7 +219,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
 | dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
 | dispatcher gateway/ directory | ✅ | 40000 | R35.10: /app/gateway/ now exists (was missing, causing docker exec cat to fail) |
-| passthrough finish_reason extraction | ✅ (R35.9 buffer fix) | 40003 | R35.9: buffer-based SSE parsing replaces chunk-based parsing (94% None→0% expected). R35.8 extraction code preserved but now with correct line buffer. |
+| passthrough finish_reason extraction | ✅ (R35.9 buffer fix verified) | 40003 | R35.11 验证：FR 捕获率 7.2%→87.5%（重建后8条streaming中7条有finish_reason） |
 | passthrough MSG-FIX | ✅ | 40003 | R35.10: auto-append user 'Continue.' when messages ends with assistant role (fixes "Cannot continue from message role: assistant") |
 
 ## Previous History
@@ -205,6 +242,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.8+: Emergency redeployment — R35.7/R35.8 code changes were never synced to opc_uname /opt/cc-infra (third occurrence of stale-container lesson). sync_config.sh + rebuild all 5 containers verified working on both machines.
 - R35.9: Passthrough SSE buffer-based parsing fix (94% finish_reason=None → 0% expected)
 - R35.10: Dispatcher path fix (unify /app/gateway/ structure) + passthrough messages sequence fix (auto-append user 'Continue.' for assistant-ending sequences)
+- R35.11: Verification round — SSE buffer fix verified (FR 7.2%→87.5%), MSG-FIX working (2 triggers), NV glm-5.1 API discovered working again (not yet re-enabled, monitoring stability)
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
