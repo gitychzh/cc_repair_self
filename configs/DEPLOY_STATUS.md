@@ -1,15 +1,18 @@
-# Deploy Status — opc_uname + opc2_uname (R36.3, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R36.5, 2026-06-23)
 
-## Architecture (R36.3)
+## Architecture (R36.5)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
-      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-NV strict alternating, NV_NUM_KEYS=5)
+      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-first + NV last-resort fallback)
       └── FALLBACK → :40001 proxy (STABLE, pure MS, interval=1.5s)
 
-:40005  cc-proxy → _cc /v1/messages → strict MS-NV alternating (ms→nv→ms→nv→ms→nv→ms→nv→ms→nv→ms→nv→ms→nv→...)
-  NV slot: single-key attempt, per-key proxy URL (7894-7899), NV_TIMEOUT=20s, sock.settimeout(NV_TIMEOUT) after conn.request()
-  NV failure → immediate MS switch; MS failure → ABORT-NO-FALLBACK
+:40005  cc-proxy → _cc /v1/messages → MS-first (ALL requests go to MS first)
+  MS success → done (fast, ~9s avg)
+  MS all-429 → NV last-resort fallback (round-robin across 5 NV keys)
+  NV last-resort success → return (slow ~13-30s, but better than error)
+  NV last-resort fail → ABORT-NO-FALLBACK
+  NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
 :40001  cc-proxy → _cc /v1/messages → pure MS glm5.1 v×k cycling (NV disabled, stable baseline)
 :40002  codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
 :40003  openai-proxy → _ol/_oc/_hm → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled)
@@ -21,14 +24,14 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 (region-divided url-test, tolerance=0) → NVIDIA integrate API
 ```
 
-## Containers (R36.3)
+## Containers (R36.5)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
 | auth_to_api_40001 | :40001 | Proxy(cc,STABLE) | 1CPU/1GiB | Pure MS, NV_NUM_KEYS=0 |
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, SSE buffer |
-| auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-NV alternating, NV_TIMEOUT=20s |
+| auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep (R36.3: 1→2GiB) |
 | ms_nv_41101 | :41101 | LiteLLM NV K1 | 1CPU/2GiB | In-memory, 7894 proxy |
 | ms_nv_41102 | :41102 | LiteLLM NV K2 | 1CPU/2GiB | In-memory, 7895 proxy |
@@ -37,15 +40,15 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | ms_nv_41105 | :41105 | LiteLLM NV K5 | 1CPU/2GiB | In-memory, 7899 proxy |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
-## Current Parameters (R36.3)
+## Current Parameters (R36.5)
 | Parameter | Value | Scope | Notes |
 |-----------|-------|-------|-------|
 | contextWindow | 170000 | settings.json | CC max context |
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
 | API_TIMEOUT_MS | 600000 | settings.json | CC→proxy timeout |
-| NV_NUM_KEYS | 5 | 40005 | R36: strict MS-NV alternating |
+| NV_NUM_KEYS | 5 | 40005 | R36.5: NV last-resort fallback (not alternating) |
 | NV_NUM_KEYS | 0 | 40001/40003 | Pure MS baseline |
-| NV_TIMEOUT | 20 | 40005 | R36.3: 60→30→20 (NV normal 2-5s, max 20s) |
+| NV_TIMEOUT | 30 | 40005 | R36.5: 40→30 (p50=13.4s, p80=~30s) |
 | NV_PROXY_URL_MAP | {0:7894,1:7895,2:7896,3:7897,4:7899} | 40005 | Per-key proxy URL |
 | NV_MAX_CYCLE | 1200000 | 40005 | Counter reset threshold |
 | MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | RPM throttle (R36.3: lock-free sleep) |
@@ -55,18 +58,33 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | LOG_RETENTION_DAYS | 7 | ALL proxies | Auto-cleanup |
 | STORE_MODEL_IN_DB | False | 41101-41105 | NV LiteLLM in-memory |
 
-## R36.3 Changes (opc2_uname, 2026-06-22)
-1. 死代码清理: 410行删除 (_try_nv_keys 180行, if False variant-fallback 190行, _is_routing_name 11行, 529死分支)
-2. Dispatcher Content-Length双重注入修复 — 加入HOP集排除原始Content-Length
-3. Dispatcher PROXY_TIMEOUT=600 总超时保护 — relay循环添加deadline检查
-4. ms_uni41001 1GiB→2GiB — 79%→52%内存使用率，OOM风险消除
-5. retry-after=10→5 (瞬态429) — 与CLAUDE.md规范对齐
-6. throttle_outbound 锁外sleep — 并发请求不再排队等彼此的sleep
-7. NV_TIMEOUT 60→20 — NV失败浪费从60s减到20s
-8. 所有12容器healthy ✅, 5端口全部200 ✅
-- All 5 NV ports: k1(7894)=2.7-6.8s, k2(7895)=10.5-16.9s, k3(7896)=1.9-3.3s, k4(7897)=3.4-8s, k5(7899)=5-6.4s ✅
-- 40001 baseline + dispatcher fallback ✅
-- NV LiteLLM memory: 47%/2GiB (OOM resolved) ✅
+## R36.5 Changes (opc2_uname, 2026-06-23) — NV alternating → MS-first + NV last-resort
+
+### 根因分析（数据驱动）
+NV alternating 是纯负优化，数据证明：
+- NV 成功率: 31.5% (222 attempts, 70 successes, 60 timeouts, 92 fast-fails)
+- NV timeout 浪费: 27% × 40s = **40 min/day 空等**
+- NV 成功延迟 p50=13.4s vs MS p50=8.9s (NV 比MS慢 1.5x 即使成功)
+- MS quota 使用率: **1.3%** (14000 req/day capacity, 178 req/day actual)
+- NV "免费额度"在 MS quota 98.7% 空闲时毫无价值
+- R36 strict alternating 强制 41.7% slot 给 NV → **56% throughput reduction**
+
+### 修改内容
+1. **config.py `_next_variant_key_pair`**: 删除 strict alternating 逻辑 → 纯 MS round-robin
+   - NV_ENABLED=True 时也走 MS-only 路径（所有请求 type=ms）
+   - 消除 41.7% forced NV slots → 100% slots 给 MS
+2. **upstream.py `execute_request`**: MS-first + NV last-resort
+   - 删除 NV slot/MS slot 分支 → 全部走 MS-first
+   - MS all-429 时尝试 NV 作为 last-resort（round-robin across 5 keys）
+   - NV last-resort 新增 `_try_nv_last_resort()` 函数
+   - MS 500/502/timeout → ABORT-NO-FALLBACK（NV 无济于事，只会加延迟）
+3. **NV_TIMEOUT 40→30**: p50=13.4s, p80=~30s → 30s 捕获 80% viable NV requests
+4. 验证: 40005 healthy ✅, MS-first 日志确认 ✅, 5 端口全部 200 ✅
+
+### 预期效果
+- **~56% throughput increase** (消除 NV timeout 浪费 + 全 slot 给 MS)
+- NV last-resort 只在 MS all-429 时触发（极罕见，因为 MS quota 98.7% 空闲）
+- 即使触发 NV fallback，30s timeout vs 40s 减少每超时 10s 浪费
 
 ## Deploy Method
 ```bash
@@ -74,7 +92,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 bash ~/cc_ps/cc_repair_self/scripts/sync_config.sh
 
 # Step 2: rebuild (code changes must rebuild!)
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40000 auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005
+cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005
 
 # Step 3: verify
 curl -sf http://127.0.0.1:40000/health && curl -sf http://127.0.0.1:40005/health
@@ -94,3 +112,5 @@ curl -sf http://127.0.0.1:40000/health && curl -sf http://127.0.0.1:40005/health
 - R36: NV re-enablement (5-key alternating, per-key proxy, NV_TIMEOUT=60)
 - R36.1: NV LiteLLM containers (41101-41105)
 - R36.2: Container standardization (1CPU/1-2GiB, Docker proxy, mihomo region-divided, NV read timeout fix, 2GiB NV LiteLLM)
+- R36.3: Dead code cleanup (410行), dispatcher fixes, ms_uni41001 2GiB, retry-after=5, throttle lock-free, NV_TIMEOUT 20
+- R36.5: MS-first + NV last-resort (数据证明 NV alternating 是纯负优化 → 56% throughput reduction)

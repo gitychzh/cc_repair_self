@@ -399,21 +399,86 @@ def _check_nv_success(resp, conn, nv_key_idx, nv_model_label, nv_proxy_url,
         return result
 
 
+def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                         prior_cycle_attempts, is_stream, force_stream):
+    """Try NV keys as last-resort fallback when ALL MS keys returned 429.
+
+    R36.5: NV round-robin across all NV keys (1 attempt per key).
+    Unlike R36 strict alternating (1 attempt, immediate fail), this gives NV
+    a reasonable chance since it's only called when MS is completely exhausted.
+
+    NV_TIMEOUT=30s (R36.5: reduced from 40s — NV success p50=13.4s, p95=~30s,
+    so 30s captures 80% of viable NV requests while limiting waste on failures).
+
+    Returns UpstreamResult. Success → return to user (slow but better than error).
+    All NV keys fail → result with combined cycle attempts.
+    """
+    result = UpstreamResult()
+    result.is_stream = is_stream
+    nv_cycle_attempts = []
+
+    for nv_key_idx in range(NV_NUM_KEYS):
+        nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
+        nv_result = _try_nv_single_key(handler, oai_body, mapped_model, request_id,
+                                        metrics, t_start, nv_key_idx, nv_proxy_url,
+                                        is_stream, force_stream)
+        if nv_result.success and not nv_result.empty_200:
+            # NV last-resort succeeded — merge prior MS cycle attempts for logging
+            nv_result.key_cycle_attempts = prior_cycle_attempts + nv_cycle_attempts + nv_result.key_cycle_attempts
+            _log("NV-LAST-RESORT-SUCCESS", f"NV k{nv_key_idx+1} succeeded as last-resort "
+                                           f"after MS all-429 (attempt {nv_key_idx+1}/{NV_NUM_KEYS})")
+            return nv_result
+
+        # NV key failed — record attempt and continue
+        nv_cycle_attempts.append({
+            "nv_key_idx": nv_key_idx,
+            "litellm_model": f"nvk{nv_key_idx+1}",
+            "error_type": nv_result.final_error_json.get("error", "unknown")[:200] if nv_result.final_error_json else "unknown",
+            "elapsed_ms": nv_result.elapsed_ms,
+            "upstream_type": "nv",
+            "nv_proxy_url": nv_proxy_url,
+        })
+        elapsed_ms = int((time.time() - t_start) * 1000)
+        fail_reason = "empty_200" if nv_result.empty_200 else f"status={nv_result.final_resp_status}"
+        _log("NV-LAST-RESORT-FAIL", f"NV k{nv_key_idx+1} failed ({fail_reason}) after {elapsed_ms}ms "
+                                    f"(attempt {nv_key_idx+1}/{NV_NUM_KEYS})")
+
+        # Close failed NV connection
+        if nv_result.conn:
+            try:
+                nv_result.conn.close()
+            except Exception:
+                pass
+
+    # All NV keys failed — return combined failure result
+    result.success = False
+    result.all_keys_exhausted = True
+    result.all_429 = True  # MS was all-429 that triggered this fallback
+    result.key_cycle_attempts = prior_cycle_attempts + nv_cycle_attempts
+    result.upstream_type = "nv"
+    result.elapsed_ms = int((time.time() - t_start) * 1000)
+    result.final_error_json = nv_cycle_attempts[-1].get("error_type", "NV all keys failed") if nv_cycle_attempts else {"error": "NV all keys failed"}
+    result.final_resp_status = 429
+    return result
+
+
 def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute upstream request with strict MS-NV alternating + MS key cycling.
+    """Execute upstream request with MS-first + NV last-resort fallback.
 
-    R36: Strict alternating mode:
-      - Each request gets a slot assignment from _next_variant_key_pair() (5-tuple).
-      - If NV slot: try 1 NV key with its dedicated proxy. On ANY failure (429, timeout,
-        empty 200, connection error) → immediately switch to MS fallback (no NV key cycling).
-      - If MS slot: try MS keys with standard v×k cycling (7 keys per variant).
-        On all MS keys exhausted → ABORT-NO-FALLBACK (no NV fallback, R31.8 principle).
+    R36.5: MS-first design:
+      - Primary path: ALL requests go to MS first (via pure MS round-robin)
+      - If MS succeeds → done (fast, reliable, ~9s avg)
+      - If ALL 7 MS keys 429 → try NV as LAST-RESORT fallback (round-robin across NV keys)
+      - NV failure (429, timeout, empty 200, connection error) → ABORT-NO-FALLBACK
+      - NV success → return result (slow but better than error to user)
 
-    R33.2/R36 key design principles:
-      - NV failure → immediate MS switch (stability first, no wasted time on NV cycling)
-      - MS failure → ABORT-NO-FALLBACK (no amplification, R31.8 principle)
-      - NV requests use per-key dedicated mihomo proxy (NV_PROXY_URL_MAP, R36)
-      - Empty 200 from NV → treated as failure, switch to MS
+    R36.5 rationale (data-driven):
+      - NV success rate: 31.5% (222 attempts, 70 successes)
+      - NV timeout waste: 27% of attempts × 40s = 40min/day wasted
+      - NV success p50: 13.4s vs MS p50: 8.9s (NV is 1.5x slower even on success)
+      - MS quota utilization: 1.3% (14000 req/day capacity, 178 req/day actual)
+      - NV "free quota" adds NO value when MS quota is 98.7% unused
+      - R36 strict alternating forced 41.7% slots to NV → 56% throughput reduction
 
     Args:
         handler: ProxyHandler instance (needed for _make_upstream_conn)
@@ -434,13 +499,10 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     litellm_url = upstream["chat_url"]
     metrics["upstream"] = upstream_key
 
-    # Get initial slot assignment from round-robin (5-tuple: variant, key, type, nv_key, nv_proxy)
+    # R36.5: ALWAYS MS-first — _next_variant_key_pair returns (variant, key, "ms", 0, proxy)
     start_pair = _next_variant_key_pair(mapped_model)
     start_variant_idx = start_pair[0]
     start_key_idx = start_pair[1]
-    start_upstream_type = start_pair[2]  # "ms" or "nv"
-    start_nv_key_idx = start_pair[3]  # NV key index (0-based, only if "nv")
-    start_nv_proxy_url = start_pair[4]  # Per-key proxy URL
     litellm_model_base = mapped_model
     key_cycle_attempts = []
 
@@ -450,69 +512,33 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     # Determine if this is a forced-stream-for-nonstream request
     force_stream = oai_body.get("stream", False) and not metrics.get("_original_stream", True)
 
-    # ─── R36: Strict alternating mode ───
-    if start_upstream_type == "nv" and NV_ENABLED and mapped_model == "glm5.1":
-        # NV slot — try 1 NV key with dedicated proxy
-        _log("MS-NV", f"slot=nv k{start_nv_key_idx+1} proxy={start_nv_proxy_url} "
-                      f"(strict alternating, {MS_NV_TOTAL_SLOTS} total slots)")
-        result = _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                                     start_nv_key_idx, start_nv_proxy_url, is_stream, force_stream)
-        elapsed_ms = int((time.time() - t_start) * 1000)
-        if result.success and not result.empty_200:
-            # Real NV success — log and return
-            _log("NV-SUCCESS", f"NV k{start_nv_key_idx+1} proxy={start_nv_proxy_url} succeeded in {elapsed_ms}ms "
-                              f"(stream={is_stream}, model={mapped_model})")
-            return result
+    # ─── R36.5: MS-first (no forced NV alternating) ───
+    # All requests start with MS. NV only tried if ALL MS keys 429.
+    _log("MS-FIRST", f"slot=ms v{start_variant_idx+1} k{start_key_idx+1} (MS-first, NV=last-resort)")
 
-        # NV failed (429, timeout, empty 200, connection error) → immediate MS switch
-        nv_fail_reason = "empty_200" if result.empty_200 else "upstream_error"
-        _log("NV-MS-SWITCH", f"NV k{start_nv_key_idx+1} failed ({nv_fail_reason}) → switching to MS")
-
-        # Close NV connection if still open
-        if result.conn:
-            try:
-                result.conn.close()
-            except Exception:
-                pass
-
-        # MS fallback: use the MS variant/key computed by _next_variant_key_pair()
-        # For NV slots, the 5-tuple returns (ms_fallback_variant, ms_fallback_key, "nv", ...)
-        # which are valid MS positions for this cycle. This avoids the problem of
-        # NV slot returning variant_idx=0 (which was a placeholder, not a real MS variant).
-        ms_variant_idx = start_variant_idx  # MS fallback variant from cycle position
-        ms_key_idx = start_key_idx  # MS fallback key from cycle position
-
-        ms_result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                                  ms_variant_idx, ms_key_idx, result.key_cycle_attempts,
-                                  is_stream, force_stream, litellm_url, litellm_model_base)
-        # Merge NV cycle attempt into final result
-        if not ms_result.success:
-            ms_result.key_cycle_attempts = result.key_cycle_attempts + ms_result.key_cycle_attempts
+    ms_result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                              start_variant_idx, start_key_idx, key_cycle_attempts,
+                              is_stream, force_stream, litellm_url, litellm_model_base)
+    if ms_result.success:
         return ms_result
 
-    elif start_upstream_type == "ms":
-        # MS slot — standard MS key cycling (original behavior)
-        if NV_ENABLED and mapped_model == "glm5.1":
-            _log("MS-NV", f"slot=ms v{start_variant_idx+1} k{start_key_idx+1} "
-                          f"(strict alternating, {MS_NV_TOTAL_SLOTS} total slots)")
-        else:
-            _log("KEY-RR", f"MS-only for {mapped_model} (NV disabled or non-glm5.1)")
+    # ─── MS all-fail → try NV as last-resort fallback (R36.5) ───
+    # Only attempt NV when ALL 7 MS keys returned 429 (burst throttle).
+    # Don't try NV on 500/502/timeout/conn errors — those are MS-side issues
+    # that NV won't help with (and NV adds 40s+ latency waste on top).
+    if ms_result.all_429 and NV_ENABLED and mapped_model == "glm5.1":
+        _log("NV-LAST-RESORT", f"MS all-429 → trying NV as last-resort fallback ({NV_NUM_KEYS} keys)")
+        nv_result = _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_start,
+                                          ms_result.key_cycle_attempts, is_stream, force_stream)
+        if nv_result.success:
+            return nv_result
+        # NV also failed → ABORT (no more fallbacks)
+        _log("NV-LAST-RESORT-FAIL", f"NV last-resort also failed → ABORT-NO-FALLBACK")
+        nv_result.key_cycle_attempts = ms_result.key_cycle_attempts + nv_result.key_cycle_attempts
+        return nv_result
 
-        result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                              start_variant_idx, start_key_idx, key_cycle_attempts,
-                              is_stream, force_stream, litellm_url, litellm_model_base)
-        if result.success:
-            return result
-        # MS all-fail → return error (no NV fallback per R31.8 principle)
-        return result
-
-    else:
-        # Fallback: pure MS (should not reach here, but safe default)
-        _log("KEY-RR", f"MS-only fallback for {mapped_model}")
-        result = _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                              start_variant_idx, start_key_idx, key_cycle_attempts,
-                              is_stream, force_stream, litellm_url, litellm_model_base)
-        return result
+    # MS failed with non-429 errors → ABORT-NO-FALLBACK (R31.8 principle)
+    return ms_result
 
 def _try_ms_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
                   start_variant_idx, start_key_idx, prior_cycle_attempts,

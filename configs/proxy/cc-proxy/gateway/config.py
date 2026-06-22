@@ -417,17 +417,16 @@ _load_rr_counter()
 def _next_variant_key_pair(model: str) -> tuple:
     """Get next (variant_idx, key_idx, upstream_type, nv_key_idx, nv_proxy_url) for 2D round-robin.
 
-    R36: Strict MS-NV alternating. When NV_ENABLED and model="glm5.1":
-      - total_slots = NUM_KEYS + NV_NUM_KEYS (7+5=12)
-      - Strict alternating: even slots→MS, odd slots→NV
-      - Even slot (MS): ms_position = slot//2, key_idx = ms_position % NUM_KEYS
-      - Odd slot (NV): nv_position = slot//2, nv_key_idx = nv_position % NV_NUM_KEYS
-      - Each NV key gets its own proxy URL from NV_PROXY_URL_MAP
-      - Returns 5-tuple: (variant_idx, key_idx, "ms"/"nv", nv_key_idx, nv_proxy_url)
+    R36.5: MS-first + NV last-resort fallback. When NV_ENABLED and model="glm5.1":
+      - Primary path: pure MS round-robin (same as NV_ENABLED=False)
+      - NV is NOT forced into alternating slots (R36 strict alternating removed —
+        data proved NV is net-negative: 31.5% success rate, 27% timeout at 40s,
+        MS quota only 1.3% utilized, NV's "free quota" adds no value)
+      - NV is only tried as LAST-RESORT fallback when ALL 7 MS keys 429 (ABORT path)
+      - This gives MS ~100% of slots (vs R36's 58%), eliminating 40min/day NV timeout waste
 
-    When NV_ENABLED=False: pure MS round-robin (unchanged):
-      - Counter N → variant=(N//NUM_KEYS)%NUM_VARIANTS, key=N%NUM_KEYS
-      - Returns 5-tuple: (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
+    Returns 5-tuple: (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
+    NV fallback in execute_request() picks NV key via round-robin on its own counter.
 
     R30: counter persisted to disk so restarts don't reset it.
     R31.3: persist EVERY increment so even power loss loses 0 steps.
@@ -444,40 +443,15 @@ def _next_variant_key_pair(model: str) -> tuple:
             print(f"[RR-COUNTER] {model} counter reset to 0 (reached NV_MAX_CYCLE={NV_MAX_CYCLE})", file=sys.stderr, flush=True)
             _save_rr_counter()
 
-        # R36: Strict MS-NV alternating for glm5.1
-        if NV_ENABLED and model == "glm5.1":
-            slot_in_cycle = counter % MS_NV_TOTAL_SLOTS
-            is_nv_slot = slot_in_cycle % 2 == 1  # Odd slots = NV, Even = MS
-            position = slot_in_cycle // 2  # Position within MS/NV sequence
-
-            if is_nv_slot:
-                # NV slot — strict alternating, each NV key has dedicated proxy
-                nv_key_idx = position % NV_NUM_KEYS
-                nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
-                # Also compute MS fallback variant/key for this cycle position
-                # (used by execute_request when NV fails → MS switch)
-                ms_fallback_variant = (counter // MS_NV_TOTAL_SLOTS) % num_variants
-                ms_fallback_key = counter % NUM_KEYS  # Same formula as MS slot
-                _vk_rr_counter[model] = counter + 1
-                _save_rr_counter()
-                return (ms_fallback_variant, ms_fallback_key, "nv", nv_key_idx, nv_proxy_url)
-            else:
-                # MS slot — variant advances every full cycle of total_slots
-                # R36: MS key uses counter % NUM_KEYS to ensure ALL 7 keys are used
-                # (not just k1-k6 from position-based assignment).
-                # Each 12-slot cycle uses 6/7 keys; over 2 cycles all 7 keys appear.
-                ms_key_idx = counter % NUM_KEYS
-                variant_idx = (counter // MS_NV_TOTAL_SLOTS) % num_variants
-                _vk_rr_counter[model] = counter + 1
-                _save_rr_counter()
-                return (variant_idx, ms_key_idx, "ms", 0, NV_PROXY_URL)
-        else:
-            # Pure MS round-robin (NV disabled)
-            variant_idx = (counter // NUM_KEYS) % num_variants
-            key_idx = counter % NUM_KEYS
-            _vk_rr_counter[model] = counter + 1
-            _save_rr_counter()
-            return (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
+        # R36.5: MS-first — ALWAYS pure MS round-robin for primary path
+        # NV is now LAST-RESORT only (tried in execute_request when MS all-429)
+        # This eliminates 41.7% forced NV slots that had 68.5% failure rate.
+        # Counter increments by 1 per request (not by 1 per slot in 12-slot cycle).
+        variant_idx = (counter // NUM_KEYS) % num_variants
+        key_idx = counter % NUM_KEYS
+        _vk_rr_counter[model] = counter + 1
+        _save_rr_counter()
+        return (variant_idx, key_idx, "ms", 0, NV_PROXY_URL)
 
 # R31.3: flush on exit. atexit covers normal interpreter exit; explicit signal
 # handlers cover SIGTERM/SIGINT (which is how `docker stop` and Ctrl-C kill the

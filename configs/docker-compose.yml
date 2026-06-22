@@ -228,10 +228,10 @@ services:
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # R36: 5 NV keys + strict alternating + per-key proxy + timeout
       NV_NUM_KEYS: "5"
-      # R36.4: NV_TIMEOUT 60→40 — data-driven: NV success p50=12s, 95% within 40s.
-      #   20s was too short (killed ~40% of viable requests); 60s wasted too much on failures.
-      #   40s balances: reduces false timeout kills while limiting waste on genuine failures.
-      NV_TIMEOUT: "40"
+      # R36.5: NV_TIMEOUT 40→30 — NV last-resort mode: success p50=13.4s, p80=~30s
+      #   30s captures 80% of viable NV requests while limiting waste per failure.
+      #   With MS-first design, NV is only tried on MS all-429 (rare), so fewer timeouts overall.
+      NV_TIMEOUT: "30"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
       NV_KEY1: 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
       NV_KEY2: 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
