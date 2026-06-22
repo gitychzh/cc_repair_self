@@ -196,6 +196,12 @@ def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_s
         nv_path = path_prefix.rstrip("/") + "/chat/completions"
         throttle_outbound()
         conn.request("POST", nv_path, body=nv_data, headers=headers_out)
+        # R36.2: Set read timeout AFTER request is sent.
+        # http.client.HTTPSConnection.timeout only controls connect phase.
+        # For getresponse() (waiting for server data), we must set socket timeout directly.
+        # This ensures NV_TIMEOUT covers both connect AND read phases.
+        if conn.sock:
+            conn.sock.settimeout(NV_TIMEOUT)
         resp = conn.getresponse()
 
         if resp.status >= 400:
@@ -218,6 +224,9 @@ def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_s
                     conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, nv_proxy_url, NV_TIMEOUT)
                     throttle_outbound()
                     conn2.request("POST", nv_path, body=nv_data_retry, headers=headers_retry)
+                    # R36.2: Set read timeout on retry connection too
+                    if conn2.sock:
+                        conn2.sock.settimeout(NV_TIMEOUT)
                     resp2 = conn2.getresponse()
                     if resp2.status < 400:
                         # Success after strip retry — check for empty 200
@@ -538,6 +547,9 @@ def _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
             nv_path = path_prefix.rstrip("/") + "/chat/completions"
             throttle_outbound()
             conn.request("POST", nv_path, body=nv_data, headers=headers_out)
+            # R36.2: Set read timeout after request is sent
+            if conn.sock:
+                conn.sock.settimeout(NV_TIMEOUT)
             resp = conn.getresponse()
 
             if resp.status >= 400:
@@ -575,6 +587,9 @@ def _try_nv_keys(handler, oai_body, mapped_model, request_id, metrics, t_start,
                         conn2, path_prefix2 = _make_nv_conn(NV_BASEURL, NV_PROXY_URL, NV_TIMEOUT)
                         throttle_outbound()
                         conn2.request("POST", nv_path, body=nv_data_retry, headers=headers_retry)
+                        # R36.2: Set read timeout on retry connection
+                        if conn2.sock:
+                            conn2.sock.settimeout(NV_TIMEOUT)
                         resp2 = conn2.getresponse()
                         if resp2.status < 400:
                             result.success = True
