@@ -25,6 +25,8 @@ SYNC_MAP=(
     # Dispatcher (40000)
     "configs/proxy/dispatcher/Dockerfile:proxy/dispatcher/Dockerfile"
     "configs/proxy/dispatcher/gateway_main.py:proxy/dispatcher/gateway_main.py"
+    "configs/proxy/dispatcher/gateway/__init__.py:proxy/dispatcher/gateway/__init__.py"
+    "configs/proxy/dispatcher/gateway/gateway_main.py:proxy/dispatcher/gateway/gateway_main.py"
 
     # CC-proxy (40005 primary, 40001 fallback builds from ./proxy for now)
     "configs/proxy/cc-proxy/Dockerfile:proxy/cc-proxy/Dockerfile"

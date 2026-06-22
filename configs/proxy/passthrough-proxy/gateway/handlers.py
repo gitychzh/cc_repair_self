@@ -436,10 +436,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # causing "Cannot continue from message role: assistant" from GLM 5.1 API.
         # Fix: if messages ends with assistant role, append a minimal user message.
         messages = body.get("messages", [])
+        original_msg_count = len(messages)
         if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant":
             body["messages"].append({"role": "user", "content": "Continue."})
             _log("MSG-FIX", f"appended user 'Continue.' to fix assistant-ending messages sequence "
-                           f"(original msgs={len(messages)}, now {len(body['messages'])})")
+                           f"(original msgs={original_msg_count}, now {len(body['messages'])})")
 
         # ─── Execute upstream request with v×k cycling ───
         # For OpenAI agents: do NOT force-stream-for-nonstream
