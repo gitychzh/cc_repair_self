@@ -34,9 +34,14 @@ listeners:
 - listen: 0.0.0.0
   name: us-fast
   port: 7893
-  proxy: 🇺🇸美国节点
+  proxy: ♻️US自动
   type: mixed
-# ── R36: NV per-key proxy ports (5 keys × 5 dedicated US proxy groups) ──
+# ── R36.1: NV per-key proxy ports — each key gets a different US region for IP diversity ──
+# K1(7894): San Jose (硅谷数据中心, lowest latency ~160ms)
+# K2(7895): Ashburn (东海岸DC数据中心, ~230ms)
+# K3(7896): US general (排除SJ/ASH/LA, ~160-174ms)
+# K4(7897): US cheap 0.1x (低成本高性价比节点)
+# K5(7899): US all (全部美国节点url-test选最优, fallback)
 - listen: 0.0.0.0
   name: nv-us-k1
   port: 7894
@@ -113,6 +118,14 @@ proxy-groups:
   type: select
   use:
   - pq-provider
+- interval: 300
+  name: ♻️US自动
+  proxies: []
+  tolerance: 50
+  type: url-test
+  url: http://www.gstatic.com/generate_204
+  use:
+  - pq-provider
 - name: 🐟漏网之鱼
   proxies:
   - DIRECT
@@ -127,47 +140,55 @@ proxy-groups:
   type: select
   use:
   - pq-provider
-# ── R36: 5 independent NV US proxy groups (per-key fault isolation) ──
+# ── R36.1: 5 NV proxy groups — region-divided for guaranteed IP diversity ──
+# Each group uses filter/exclude-filter to select nodes from a specific US region.
+# url-test with tolerance=0 picks the lowest-latency node within that region.
+# This guarantees each key exits from a DIFFERENT US IP (different region = different IP).
 - interval: 60
   name: ♻️US-NV-K1
   proxies: []
-  tolerance: 100
+  tolerance: 0
   type: url-test
   url: http://www.gstatic.com/generate_204
   use:
   - nv-us-provider
+  filter: "圣何塞"
 - interval: 60
   name: ♻️US-NV-K2
   proxies: []
-  tolerance: 100
+  tolerance: 0
   type: url-test
   url: http://www.gstatic.com/generate_204
   use:
   - nv-us-provider
+  filter: "阿什本"
 - interval: 60
   name: ♻️US-NV-K3
   proxies: []
-  tolerance: 100
+  tolerance: 0
   type: url-test
   url: http://www.gstatic.com/generate_204
   use:
   - nv-us-provider
+  exclude-filter: "圣何塞|阿什本|洛杉矶"
 - interval: 60
   name: ♻️US-NV-K4
   proxies: []
-  tolerance: 100
+  tolerance: 0
   type: url-test
   url: http://www.gstatic.com/generate_204
   use:
   - nv-us-provider
+  filter: "0\\.1倍"
 - interval: 60
   name: ♻️US-NV-K5
   proxies: []
-  tolerance: 100
+  tolerance: 0
   type: url-test
   url: http://www.gstatic.com/generate_204
   use:
   - nv-us-provider
+  # No filter — all US nodes, picks absolute lowest latency as fallback
 proxy-providers:
   nv-us-provider:
     filter: 美国|圣何塞|阿什本|洛杉矶
@@ -178,7 +199,7 @@ proxy-providers:
     interval: 3600
     path: /home/opc2_uname/.config/mihomo/nv-us-provider.yaml
     type: http
-    url: https://dash.xn--cp3a08l.com/api/v1/pq/ad4978e7f9844ad86d770a863f61ad4b
+    url: https://dash.xn--cp3a08l.com/api/v1/pq/f36ac84aef68421fa5e73ac59aa78b8d
   pq-provider:
     health-check:
       enable: true
@@ -187,7 +208,7 @@ proxy-providers:
     interval: 3600
     path: /home/opc2_uname/.config/mihomo/pq-provider.yaml
     type: http
-    url: https://dash.xn--cp3a08l.com/api/v1/pq/ad4978e7f9844ad86d770a863f61ad4b
+    url: https://dash.xn--cp3a08l.com/api/v1/pq/f36ac84aef68421fa5e73ac59aa78b8d
 rules:
 - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
 - DOMAIN-SUFFIX,ts.net,DIRECT
