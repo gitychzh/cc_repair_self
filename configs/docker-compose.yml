@@ -27,6 +27,19 @@ x-proxy-env-ms: &proxy-env-ms
   HTTPS_PROXY: http://host.docker.internal:7880
   NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001,auth_to_api_40000,auth_to_api_40001,auth_to_api_40002,auth_to_api_40003,auth_to_api_40005
 
+x-resource-1c1g-host: &resource-1c1g-host
+  # R36.2: Combined resource limits + host access (YAML prohibits multiple << merge keys per mapping)
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  deploy:
+    resources:
+      limits:
+        memory: 1G
+        cpus: "1.0"
+      reservations:
+        memory: 256M
+        cpus: "0.1"
+
 x-resource-1c1g: &resource-1c1g
   deploy:
     resources:
@@ -97,7 +110,7 @@ services:
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
       <<: *proxy-env-ms
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-glm51/config.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -109,7 +122,6 @@ services:
     depends_on:
       cc_postgres:
         condition: service_healthy
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -156,7 +168,7 @@ services:
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./logs/proxy40001:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -166,7 +178,6 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -214,7 +225,7 @@ services:
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./logs/proxy40005:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -224,7 +235,6 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -342,7 +352,7 @@ services:
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./logs/proxy40003:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -352,7 +362,6 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -386,7 +395,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-nv/config-k1.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -395,7 +404,6 @@ services:
       - 41101:4000
     networks:
       - cc-net
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -425,7 +433,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-nv/config-k2.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -434,7 +442,6 @@ services:
       - 41102:4000
     networks:
       - cc-net
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -464,7 +471,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-nv/config-k3.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -473,7 +480,6 @@ services:
       - 41103:4000
     networks:
       - cc-net
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -503,7 +509,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-nv/config-k4.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -512,7 +518,6 @@ services:
       - 41104:4000
     networks:
       - cc-net
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -542,7 +547,7 @@ services:
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
-    <<: *host-access
+    <<: *resource-1c1g-host
     volumes:
       - ./litellm-nv/config-k5.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -551,7 +556,6 @@ services:
       - 41105:4000
     networks:
       - cc-net
-    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
