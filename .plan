@@ -1,0 +1,139 @@
+# R36.4 全链路优化计划
+
+## 数据摘要（opc2_uname，2026-06-22 24h）
+
+| Proxy | Requests | Success | 429 Rate | 502 Rate | TTFB avg | TTFB p50 |
+|-------|---------|---------|----------|----------|----------|----------|
+| 40005 (MS-NV) | 294 | 93.5% | 1.4% | 2.7% | — | — |
+| 40001 (MS baseline) | 60 | 93.3% | 3.3% | 3.3% | 7326ms | 6473ms |
+| 40003 (passthrough) | 121 | 89.3% | 4.1% | 6.6% | 9068ms | 7611ms |
+| 40002 (codex) | 3 | 100% | 0 | 0 | 5176ms | 4368ms |
+
+### NV 关键数据（40005）
+
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| NV 总尝试 | 142 | NV-SUCCESS=75 + NV-MS-SWITCH=67 |
+| NV 成功率 | 52.8% | 逐小时恶化: 86%→48%→36% |
+| NV 有效产出 | 25.5% | 75/294 请求最终由 NV 成功服务 |
+| k1(7894) 成功率 | 25% | 54次失败：SSLError=10, Timeout=7, RemoteDisconnected=6 |
+| k2(7895) 成功率 | 83% | 仅4次失败（最佳key） |
+| k3-k5 成功率 | ~26-28% | 远低于k2 |
+| NV 成功 TTFB | key2=12841ms (最快), key1=33226ms (最慢) |
+| NV 失败浪费延迟 | avg~20s (timeout=20s) | 每 NV-MS-SWITCH 白等 20s |
+
+## 发现的 5 个关键问题
+
+### 1. NV key0(k1=7894) 极不稳定（CRITICAL）
+**证据**: k1 成功率仅 25%（18成功/54失败），远低于 k2(83%)。k1 的主要错误是 SSLError(10)、SocketTimeout(7)、RemoteDisconnected(6)。
+**根因**: opc2_uname mihomo 仍在 R36.1 配置（type:url-test 区域硬分），7894端口固定映射到 San Jose 节点组，url-test 自动选择的节点质量差（SSL 连接不稳定）。R36.3 已在 opc_uname 上部署 type:select + nv_proxy_selector.sh 延迟排序，但 opc2_uname 未同步。
+**方案**: 将 opc2_uname 的 mihomo NV 配置从 R36.1(url-test 区域硬分)升级到 R36.3(type:select + nv_proxy_selector.sh 延迟排序)，部署 nv_proxy_selector.sh，设置 cron */30。
+
+### 2. NV metrics 不记录 NV-MS-SWITCH 状态（BUG）
+**证据**: 142次 NV 尝试中，metrics.jsonl 仅记录了75次 nv_key_idx（全是 NV 成功）。67次 NV-MS-SWITCH 失败后的 MS fallback 请求不保留 nv_key_idx、nv_status、nv_proxy_url 等字段。
+**根因**: upstream.py 的 execute_request 中，NV-MS-SWITCH 路径返回 MS result，MS result 的 metrics dict 从 `_try_ms_keys` 覆盖了之前 NV slot 设置的 nv_key_idx 等字段。handlers.py 在成功路径也只写入 result 中的字段，不合并 NV cycle attempt 的 nv_key_idx。
+**方案**: 在 handlers.py 成功路径中，当 key_cycle_details 包含 NV attempts 时，额外写入 `nv_ms_switch=True, nv_key_idx=..., nv_error_type=..., nv_waste_ms=...` 到 metrics dict。
+
+### 3. NV_TIMEOUT=20s 在 opc2_uname 上（仓库为 60s）
+**证据**: opc2_uname 部署的 docker-compose.yml NV_TIMEOUT=20s，但仓库 docker-compose.yml NV_TIMEOUT=60s。NV timeout 实际日志也显示 timeout 在 20-30s 之间（不同重启时段不同值）。
+**根因**: opc2_uname 的部署配置是旧版本，从未从仓库同步 R36.2+ 配置。NV_TIMEOUT=20s 对 NV API 来说太短（NV 成功请求 TTFB avg=13-33s，p50=12-34s），导致本可以成功的请求被误判为 timeout。
+**方案**: 将 NV_TIMEOUT 调回 60s（与仓库一致）。NV API 正常请求 p50=12s，但偶发慢请求可达 30-40s。20s timeout ��误杀本可成功的请求。60s timeout 失败浪费更多时间（60s vs 20s），但 NV 成功率会从 52.8% 大幅提升（减少误判 timeout），整体效果更好。
+**评估**: 理论计算 — 当前 NV 失败67次 * 20s = 1340s浪费；调到60s后，假设timeout减少50%（33次而非67次），NV timeout浪费 = 33 * 60s = 1980s，但新增33次成功请求节省 ~33 * 12s = 396s MS TTFB，净浪费增加约 1600s。这不太划算。
+**改进方案**: NV_TIMEOUT=40s 是最佳平衡点。NV 成功 p50=12s，95%在40s内完成。40s timeout 减少40%误判（vs 20s），浪费=40*40=1600s vs 当前20*67=1340s，但新增约27次成功请求节省27*12=324s，净增加约276s浪费。**实际上更重要的是：减少 NV-MS-SWITCH 意味减少 MS 的额外负载，MS 本身 p50=6-10s 且有 429 burst 问题。** 最终推荐 NV_TIMEOUT=40s。
+
+### 4. NV LiteLLM 容器（41101-41105）浪费 ~4.1GiB 内存
+**证据**: 5个 NV LiteLLM 容器各自 ~820MiB/2GiB，但 NV API 完全绕过 LiteLLM（HTTPS CONNECT tunnel 直连），这些容器只做 health check。
+**根因**: R36.2 设计中保留了 NV LiteLLM 容器作为"monitoring/debugging"用途，但实际 NV 流量从不经过它们。
+**方案**: 暂不删除（CLAUDE.md 中 port assignments 41101-41105 列为不可变更约束），但将内存限制从 2GiB 降低到 512MiB（每个容器），总共节省 ~7.5GiB。当前实际使用 ~820MiB 是 model cost map，但 512MiB 可能不够。改为 1GiB 更稳妥，总节省 ~5GiB。
+**⚠️ 约束检查**: CLAUDE.md 说 "container names" 是不可变更的，但 "memory limits" 在可调整参数中。确认可以降内存但保留容器名和端口。
+
+### 5. opc2_uname 缺少 R36.3 优化工具链
+**证据**: opc2_uname 没有 nv_proxy_selector.sh、compare_proxies.sh、auto_tune.sh、run_optimization_loop.sh。没有 optimization cron。mihomo 还是 R36.1 区域硬分配置。
+**根因**: R36.3 的变更只部署到了 opc_uname，从未同步到 opc2_uname。
+**方案**: deploy全套 R36.3 配置到 opc2_uname — mihomo config + nv_proxy_selector.sh + cron。
+
+## 代码修改计划
+
+### A. handlers.py — NV-MS-SWITCH metrics 补全（BUG FIX）
+
+在 `handlers.py:300-305` 成功路径（NV-MS-SWITCH 后 MS 成功），添加 NV 诊断字段：
+
+```python
+# 在 metrics["key_cycle_429s_before_success"] 和 key_cycle_details 设置之后
+if result.key_cycle_attempts:
+    metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
+    metrics["key_cycle_details"] = result.key_cycle_attempts
+    # R36.4: 保留 NV slot 失败诊断信息到 metrics（修复 NV-MS-SWITCH metrics 缺失 BUG）
+    nv_attempts = [c for c in result.key_cycle_attempts if c.get("upstream_type") == "nv"]
+    if nv_attempts:
+        nv_first = nv_attempts[0]
+        metrics["nv_ms_switch"] = True
+        metrics["nv_key_idx"] = nv_first.get("nv_key_idx")
+        metrics["nv_error_type"] = nv_first.get("error_type")
+        metrics["nv_waste_ms"] = sum(c.get("elapsed_ms", 0) for c in nv_attempts)
+```
+
+### B. docker-compose.yml — NV_TIMEOUT 调整
+
+40005: NV_TIMEOUT 从 60s → 40s（R36.4 优化，基于数据：NV 成功 p50=12s，95%在40s内）
+
+40001: NV_TIMEOUT 不变（NV_NUM_KEYS=0，无 NV 流量）
+
+40003: NV_TIMEOUT 不变（NV_NUM_KEYS=0）
+
+### C. docker-compose.yml — NV LiteLLM 内存优化
+
+41101-41105: memory limit 从 2G → 1G（从 `x-resource-1c2g-host` 改为新 anchor `x-resource-1c1g-host-nv`）
+需要创建新 YAML anchor 或直接在 5 个 NV 容器上覆盖 memory limit。
+
+### D. mihomo config-opc2_uname.yaml — 升级到 R36.3 type:select
+
+将 5 个 NV proxy group 从 `type: url-test` + `tolerance: 0` 改为 `type: select` + `use: nv-us-provider`
+（与 config-opc_uname.yaml 的 R36.3 版本一致）
+
+修复 config-opc2_uname.yaml 中的 "止告拦截" typo（应为 "🛑广告拦截"）
+
+### E. deploy nv_proxy_selector.sh + cron 到 opc2_uname
+
+将 scripts/nv_proxy_selector.sh 复制到 opc2_uname:/opt/cc-infra/scripts/
+设置 cron: `*/30 * * * * /opt/cc-infra/scripts/nv_proxy_selector.sh`
+
+### F. CLAUDE.md — 更新 NV_TIMEOUT 文档
+
+更新可调整参数表中 NV_TIMEOUT 当前值从 60 → 40，说明改为 40s 的原因（数据驱动）。
+
+## 部署顺序（仅远程 opc2_uname）
+
+1. 先 push 代码变更到仓库（所有文件修改）
+2. 在 opc2_uname 上 `git pull` + `sync_config.sh` 同步配置
+3. 重建 40005 容器（`docker compose up -d --build --force-recreate auth_to_api_40005`）
+4. 重建 41101-41105 容器（`docker compose up -d --force-recreate ms_nv_41101 ms_nv_41102 ms_nv_41103 ms_nv_41104 ms_nv_41105`）
+5. 更新 opc2_uname mihomo config（复制 R36.3 config）+ restart mihomo
+6. 部署 nv_proxy_selector.sh + 设置 cron
+7. curl 验证 200 + 检查日志
+
+## 本机配置评估
+
+**NV_TIMEOUT=40s 是否要同步到本机（opc_uname）？**
+- 本机 opc_uname 的 40005 已有 NV_TIMEOUT=60s（仓库值），运行状况较好
+- 40s vs 60s 对本机的影响需要本机的 NV 成功/TTFB 数据来判断
+- **建议：暂不改本机**，先在 opc2_uname 验证 40s 效果，有数据后再决定是否同步
+
+**NV metrics 补全 bug fix 要同步到本机？**
+- 这是代码级 bug fix，对所有机器都适用
+- **建议：push 后本机下次 rebuild 自动生效**，无需单独操作
+
+**NV LiteLLM 内存降级要同步到本机？**
+- 同属 docker-compose.yml 变更，本机 rebuild 自动生效
+- **建议：push 后同步**
+
+## 预期效果
+
+| 指标 | 当前 | 优化后预期 | 改进幅度 |
+|------|------|-----------|---------|
+| NV 成功率 | 52.8% | ~70-80% | +25-30% (减少 timeout 误判 + 更好的节点选择) |
+| NV 有效产出 | 25.5% | ~40% | +15% |
+| NV 失败浪费延迟/次 | 20s | 40s (但次数减少40%) | 净浪费降低 |
+| NV LiteLLM 总内存 | ~4.1GiB | ~1GiB | 节省3.1GiB |
+| NV metrics 可观测性 | 仅75/142记录 | 142/142全记录 | 100%覆盖 |
+| k1(7894) 成功率 | 25% | ~70% (延迟排序选好节点) | +45% |

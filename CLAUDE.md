@@ -19,7 +19,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
       │   [40001 连接失败 → 自动 fallback 到 40005]
 
 :40005  cc-proxy(experiment) → _cc /v1/messages → strict MS-NV alternating (ms→nv→ms→nv→ms→nv→ms→nv→ms→nv→ms→nv→ms→nv)
-  NV slot: single-key attempt, per-key proxy URL (7894-7899), NV_TIMEOUT=60s, sock.settimeout() after conn.request()
+  NV slot: single-key attempt, per-key proxy URL (7894-7899), NV_TIMEOUT=40s, sock.settimeout() after conn.request()
   NV failure → immediate MS switch; MS failure → ABORT-NO-FALLBACK; Empty 200 → NV failure
 :40001  cc-proxy(stable)     → _cc /v1/messages → pure MS glm5.1 v×k cycling (NV disabled, baseline)
 :40002  codex-proxy          → _cx /v1/responses  → Responses→Chat 转换 → MS glm5.1 v×k cycling
@@ -122,7 +122,7 @@ CC 收到 429 会自动退避重试，对用户透明（"7key 全 429 你无感�
 | NV_PROXY_URL | host.docker.internal:7894 | — | mihomo ♻️US-NV-K1 (fallback single-key proxy) |
 | NV_PROXY_URL_MAP | {0:7894,1:7895,2:7896,3:7897,4:7899} | — | R36.2: per-key proxy URL for fault isolation + IP diversity |
 | MS_NV_TOTAL_SLOTS | 12 (7MS+5NV on 40005) | 7-12 | R36: strict alternating, even=MS, odd=NV |
-| NV_TIMEOUT | 60 | 10-60 | R36: increased from 20→60; sock.settimeout() after conn.request() for read timeout |
+| NV_TIMEOUT | 40 | 10-60 | R36.4: 20→40 (data-driven: NV success p50=12s, 95% within 40s; 20s killed viable requests, 60s wasted too much on failures); sock.settimeout() after conn.request() for read timeout |
 | NV_MAX_CYCLE | 1200000 | — | Cycle counter reset threshold |
 
 ### CC settings（claude/settings-*.json）

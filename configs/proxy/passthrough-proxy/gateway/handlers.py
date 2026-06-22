@@ -506,6 +506,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if result.key_cycle_attempts:
             metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
             metrics["key_cycle_details"] = result.key_cycle_attempts
+            # R36.4: Preserve NV slot diagnostics in metrics even when NV-MS-SWITCH path succeeds via MS.
+            nv_attempts = [c for c in result.key_cycle_attempts if c.get("upstream_type") == "nv"]
+            if nv_attempts:
+                nv_first = nv_attempts[0]
+                metrics["nv_ms_switch"] = True
+                metrics["nv_key_idx"] = nv_first.get("nv_key_idx")
+                metrics["nv_error_type"] = nv_first.get("error_type")
+                metrics["nv_waste_ms"] = sum(c.get("elapsed_ms", 0) for c in nv_attempts)
 
         if is_stream:
             # Streaming: pass SSE stream directly to client (no Anthropic conversion)

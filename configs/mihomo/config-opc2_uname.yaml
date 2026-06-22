@@ -169,7 +169,9 @@ proxy-groups:
   - nv-us-provider
 proxy-providers:
   nv-us-provider:
-    filter: 美国|圣何塞|阿什本|洛杉矶
+    # R36.3→R36.4: Removed regional filter — latency-based top5 selection by script
+    # needs full US node pool for optimal choice, not just SJ/ASH/LA subset.
+    # filter removed to give nv_proxy_selector.sh access to all 32 US nodes.
     health-check:
       enable: true
       interval: 300
@@ -192,7 +194,7 @@ rules:
 - DOMAIN-SUFFIX,ts.net,DIRECT
 - DOMAIN-SUFFIX,tailscale.com,DIRECT
 - DOMAIN-KEYWORD,tailscale,DIRECT
-- DOMAIN-SUFFIX,ads.google.com,止告拦截
+- DOMAIN-SUFFIX,ads.google.com,🛑广告拦截
 - DOMAIN-SUFFIX,ad.doubleclick.net,🛑广告拦截
 - DOMAIN-SUFFIX,tracking.google.com,🛑广告拦截
 - GEOIP,CN,DIRECT

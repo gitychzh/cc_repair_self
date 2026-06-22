@@ -169,7 +169,8 @@ proxy-groups:
   - nv-us-provider
 proxy-providers:
   nv-us-provider:
-    filter: 美国|圣何塞|阿什本|洛杉矶
+    # R36.3→R36.4: Removed regional filter — latency-based top5 selection by script
+    # needs full US node pool for optimal choice, not just SJ/ASH/LA subset.
     health-check:
       enable: true
       interval: 300
