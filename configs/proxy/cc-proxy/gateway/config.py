@@ -341,9 +341,9 @@ _outbound_throttle_lock = threading.Lock()
 def throttle_outbound():
     """Enforce MIN_OUTBOUND_INTERVAL_S between consecutive outbound requests.
     Call this immediately before every conn.request("POST", ...).
-    Blocks the calling thread (not the whole process — each request runs in its
-    own handler thread) until the minimum interval has elapsed since the last
-    send. No-op if MIN_OUTBOUND_INTERVAL_S <= 0.
+    R36.3: Lock only for timestamp read/write — sleep outside the lock so
+    concurrent handlers don't queue behind each other's sleeps.
+    No-op if MIN_OUTBOUND_INTERVAL_S <= 0.
     """
     if MIN_OUTBOUND_INTERVAL_S <= 0:
         return
@@ -352,10 +352,13 @@ def throttle_outbound():
         now = time.monotonic()
         elapsed = now - _outbound_last_sent
         wait = MIN_OUTBOUND_INTERVAL_S - elapsed
-        if wait > 0:
-            time.sleep(wait)
-            now = time.monotonic()
-        _outbound_last_sent = now
+        # Reserve a slot: advance the timestamp immediately so the next
+        # caller calculates its wait relative to THIS slot (not the previous).
+        _outbound_last_sent = now if wait <= 0 else now + wait
+    # Sleep outside the lock — other threads can enter and reserve their
+    # slots while this one is sleeping.
+    if wait > 0:
+        time.sleep(wait)
 
 
 # R30/R31.3: Persist counter to disk so container restarts do NOT reset to v1k1.

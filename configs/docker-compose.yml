@@ -102,6 +102,7 @@ services:
     logging: *logging
 
   # ─── LiteLLM container (70 glm5.1 dep) ───
+  # R36.3: 2GiB memory limit — model cost map ~810MiB at runtime, needs headroom
   ms_uni41001:
     image: litellm/litellm:v1.87.0
     container_name: ms_uni41001
@@ -123,7 +124,7 @@ services:
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
       <<: *proxy-env-ms
       TZ: Asia/Shanghai
-    <<: *resource-1c1g-host
+    <<: *resource-1c2g-host
     volumes:
       - ./litellm-glm51/config.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro

@@ -18,10 +18,13 @@ PRIMARY = os.environ.get("DISPATCH_PRIMARY", "http://auth_to_api_40005:40005")
 FALLBACK = os.environ.get("DISPATCH_FALLBACK", "http://auth_to_api_40001:40001")
 PORT = int(os.environ.get("LISTEN_PORT", "40000"))
 CONNECT_TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "60"))
+# R36.3: PROXY_TIMEOUT — overall request deadline (env var was unused before).
+# After this many seconds, the relay is forcefully terminated regardless of upstream state.
+PROXY_TIMEOUT = float(os.environ.get("PROXY_TIMEOUT", "600"))
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
        "te", "trailers", "transfer-encoding", "upgrade", "host",
-       "accept-encoding"}  # keep content-length so the relay can signal body end
+       "accept-encoding", "content-length"}  # R36.3: content-length added — dispatcher recomputes from buffered body
 
 
 def parse(url):
@@ -59,8 +62,13 @@ def _try_relay(self, upstream_url, role_label, body):
     self.send_header("Connection", "close")
     self.end_headers()
 
+    # R36.3: Overall request deadline — terminate relay if total time exceeds PROXY_TIMEOUT.
+    deadline = time.monotonic() + PROXY_TIMEOUT
     try:
         while not resp.closed:
+            if time.monotonic() > deadline:
+                sys.stderr.write(f"[DISPATCH] relay exceeded PROXY_TIMEOUT={PROXY_TIMEOUT}s, terminating\n")
+                break
             chunk = resp.read(8192)
             if not chunk:
                 break
