@@ -430,6 +430,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"msgs={len(body.get('messages',[]))} "
                     f"agent={agent_suffix}")
 
+        # ─── Messages sequence fix (R35.10) ───
+        # OpenAI API requires messages to end with a user/tool role message.
+        # OpenClaw auto-compact can truncate the sequence to end with assistant role,
+        # causing "Cannot continue from message role: assistant" from GLM 5.1 API.
+        # Fix: if messages ends with assistant role, append a minimal user message.
+        messages = body.get("messages", [])
+        if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant":
+            body["messages"].append({"role": "user", "content": "Continue."})
+            _log("MSG-FIX", f"appended user 'Continue.' to fix assistant-ending messages sequence "
+                           f"(original msgs={len(messages)}, now {len(body['messages'])})")
+
         # ─── Execute upstream request with v×k cycling ───
         # For OpenAI agents: do NOT force-stream-for-nonstream
         # OpenAI agents expect proper non-stream responses
