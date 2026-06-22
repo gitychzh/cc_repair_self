@@ -36,12 +36,10 @@ listeners:
   port: 7893
   proxy: ♻️US自动
   type: mixed
-# ── R36.3: NV per-key proxy ports — protocol-based groups for guaranteed IP diversity ──
-# K1(7894): Hysteria2 fastest (QUIC protocol, 8 unique servers, ~165ms, anti-packet-loss)
-# K2(7895): Vless 三网推荐 (7 unique IPs 134.195.101.x, ~170-207ms, San Jose real IPs)
-# K3(7896): Vless 0.1倍率 excluding 三网/电信联通 (CF CDN shared IP, cheap nodes)
-# K4(7897): All US tolerance=30 (fallback, picks within 30ms of best)
-# K5(7899): All US tolerance=0 (absolute fastest, emergency fallback)
+# ── R36.3: NV per-key proxy — script selects top5 by nvidia latency ──
+# All 5 groups are type:select, managed by nv_proxy_selector.sh
+# Script tests all US nodes against NV API /v1/models, picks lowest latency top5
+# Each K gets a different node → different exit IP → IP diversity by latency ranking
 - listen: 0.0.0.0
   name: nv-us-k1
   port: 7894
@@ -140,61 +138,35 @@ proxy-groups:
   type: select
   use:
   - pq-provider
-# ── R36.3: 5 NV proxy groups — protocol-based for guaranteed IP diversity ──
-# Each group selects nodes by protocol/server type, not by region name.
-# Different protocols → different servers → different exit IPs → guaranteed IP diversity.
-# url-test with tolerance=0 picks the lowest-latency node within each group.
-# Script (nv_proxy_selector.sh) handles IP diversity enforcement via mihomo API.
-- interval: 120
-  name: ♻️US-NV-K1
+# ── R36.3: 5 NV proxy groups — type:select, managed by script ──
+# Script (nv_proxy_selector.sh) tests all US nodes against NV API /v1/models,
+# ranks by latency, assigns top5 to K1-K5. No url-test auto-switching.
+# This ensures: lowest latency + no overlap + script full control.
+- name: ♻️US-NV-K1
   proxies: []
-  tolerance: 0
-  type: url-test
-  url: http://www.gstatic.com/generate_204
+  type: select
   use:
   - nv-us-provider
-  # Hysteria2 nodes: pq.us1-8.globals-download.com, 8 unique exit IPs, QUIC protocol
-  filter: "电信联通移动推荐"
-- interval: 120
-  name: ♻️US-NV-K2
+- name: ♻️US-NV-K2
   proxies: []
-  tolerance: 0
-  type: url-test
-  url: http://www.gstatic.com/generate_204
+  type: select
   use:
   - nv-us-provider
-  # Vless 三网推荐: 134.195.101.x unique IPs (San Jose real servers), best Vless quality
-  filter: "三网推荐"
-- interval: 120
-  name: ♻️US-NV-K3
+- name: ♻️US-NV-K3
   proxies: []
-  tolerance: 0
-  type: url-test
-  url: http://www.gstatic.com/generate_204
+  type: select
   use:
   - nv-us-provider
-  # Vless 0.1倍率 excluding 三网/电信联通推荐 (cheaper CF CDN nodes, shared IP pool)
-  filter: "0\\.1倍"
-  exclude-filter: "电信联通移动推荐|三网推荐"
-- interval: 120
-  name: ♻️US-NV-K4
+- name: ♻️US-NV-K4
   proxies: []
-  tolerance: 30
-  type: url-test
-  url: http://www.gstatic.com/generate_204
+  type: select
   use:
   - nv-us-provider
-  # Vless nodes excluding 三网/电信联通推荐 — pure Vless pool (different protocol from K1)
-  exclude-filter: "电信联通移动推荐|三网推荐"
-- interval: 120
-  name: ♻️US-NV-K5
+- name: ♻️US-NV-K5
   proxies: []
-  tolerance: 0
-  type: url-test
-  url: http://www.gstatic.com/generate_204
+  type: select
   use:
   - nv-us-provider
-  # All US nodes, tolerance=0 — absolute fastest, emergency fallback
 proxy-providers:
   nv-us-provider:
     filter: 美国|圣何塞|阿什本|洛杉矶
