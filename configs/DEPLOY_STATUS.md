@@ -173,8 +173,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | autoCompactWindow | 155000 | settings.json | CC auto-compact trigger |
 | NV_NUM_KEYS | 0 | ALL proxies | R35.7: pure MS everywhere (NV disabled) |
 | NV_TIMEOUT | 20 | all proxies | R35.1: NV-specific timeout |
-| MIN_OUTBOUND_INTERVAL_S | 1.5 | 40001/40005 | R35.2: validated (429 rate 30%) |
-| MIN_OUTBOUND_INTERVAL_S | 2.0 | 40003 | unchanged |
+| MIN_OUTBOUND_INTERVAL_S | 1.5 | ALL proxies | R35.8: 40003 aligned from 2.0→1.5 (data: 2.0s had 3 ABORTs+10s TTFB, 1.5s had 0 ABORTs+6.9s TTFB) |
 | LOG_RETENTION_DAYS | 7 | all proxies | R35.4: auto-cleanup old logs on startup |
 | UPSTREAM_TIMEOUT | 60 | all proxies | Per-key HTTPConnection timeout |
 | PROXY_TIMEOUT | 300 | all proxies | Overall request timeout (now imported in stream.py) |
@@ -182,6 +181,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers |
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
 | dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error |
+| passthrough finish_reason extraction | ✅ | 40003 | R35.8: _stream_openai_passthrough now extracts finish_reason from SSE chunks (was 99% null) |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -199,3 +199,4 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.5: Complete dsv4p/deepseek-v4-pro removal (ModelScope delisted), all agents route to glm5.1 only
 - R35.6: OpenClaw stuck bug fix (is_quota_exhaustion asymmetry + Ghost-ABORT metrics)
 - R35.7: Stale container deployment fix + 5 code bug fixes (PROXY_TIMEOUT NameError, operator precedence, key_idx KeyError, NV classification, dispatcher close_connection)
+- R35.8: 40003 throttle alignment (2.0→1.5) + passthrough null_finish metrics fix + stale dsv4p rr_counter cleanup
