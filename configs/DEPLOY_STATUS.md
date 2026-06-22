@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R35.9, 2026-06-22)
+# Deploy Status — opc_uname + opc2_uname (R35.10, 2026-06-22)
 
-## Architecture (R35.9 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix)
+## Architecture (R35.10 — dispatcher + blue-green CC proxy + pure MS mode + SSE buffer fix + messages sequence fix)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay + close_connection on error)
@@ -181,7 +181,9 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | is_quota_exhaustion | always-False | ALL proxies | R35.7: now actually deployed in containers (confirmed via docker exec) |
 | PROXY_TIMEOUT import | ✅ | stream.py | R35.7: fixed NameError bug |
 | dispatcher close_connection | ✅ | 40000 | R35.7: fixed missing close_connection on error (confirmed: 3 occurrences in container) |
+| dispatcher gateway/ directory | ✅ | 40000 | R35.10: /app/gateway/ now exists (was missing, causing docker exec cat to fail) |
 | passthrough finish_reason extraction | ✅ (R35.9 buffer fix) | 40003 | R35.9: buffer-based SSE parsing replaces chunk-based parsing (94% None→0% expected). R35.8 extraction code preserved but now with correct line buffer. |
+| passthrough MSG-FIX | ✅ | 40003 | R35.10: auto-append user 'Continue.' when messages ends with assistant role (fixes "Cannot continue from message role: assistant") |
 
 ## Previous History
 - R30/R30.1: counter persistence + monitor.sh fix
@@ -202,6 +204,7 @@ cd /opt/cc-infra && docker restart ms_uni41001
 - R35.8: 40003 throttle alignment (2.0→1.5) + passthrough null_finish metrics fix + stale dsv4p rr_counter cleanup
 - R35.8+: Emergency redeployment — R35.7/R35.8 code changes were never synced to opc_uname /opt/cc-infra (third occurrence of stale-container lesson). sync_config.sh + rebuild all 5 containers verified working on both machines.
 - R35.9: Passthrough SSE buffer-based parsing fix (94% finish_reason=None → 0% expected)
+- R35.10: Dispatcher path fix (unify /app/gateway/ structure) + passthrough messages sequence fix (auto-append user 'Continue.' for assistant-ending sequences)
 
 ## R35.9: Passthrough SSE Buffer-Based Parsing Fix
 
@@ -235,3 +238,22 @@ cd /opt/cc-infra && docker restart ms_uni41001
 | Avg Duration | 15099ms | 10466ms | ↑ 44%* |
 
 *TTFB/Duration increase attributable to traffic volume difference (06-22: 351 combined req vs 06-21: 71 req in same time window), not throttle change.*
+
+## R35.10: Dispatcher Path Fix + Passthrough Messages Sequence Fix
+
+### Problem 1: `⚠️ 🛠️ docker exec auth_to_api_40000 cat /app/gateway/gateway_main.py ... grep -c "close_connection" failed`
+- **Root cause**: Dispatcher Dockerfile only `COPY gateway_main.py .` → file at `/app/gateway_main.py` (no `/app/gateway/` subdirectory). Other 4 proxy containers have `COPY gateway/ ./gateway/` → file at `/app/gateway/gateway_main.py`. OpenClaw agent uses unified path `/app/gateway/gateway_main.py` for all containers → wrong path for dispatcher → cat fails → grep returns 0 → OpenClaw reports "failed"
+- **Fix**: Added `COPY gateway/ ./gateway/` to dispatcher Dockerfile + created `configs/proxy/dispatcher/gateway/` subdirectory with `__init__.py` and `gateway_main.py`. Original `COPY gateway_main.py .` preserved for CMD compatibility. Both `/app/gateway_main.py` and `/app/gateway/gateway_main.py` now exist in dispatcher container.
+- **Verification**: `docker exec auth_to_api_40000 cat /app/gateway/gateway_main.py | grep -c "close_connection"` now returns `3` (was `0`)
+
+### Problem 2: `⚠️ 🛠️ run python3 inline script failed`
+- **Root cause**: OpenClaw agent (GLM 5.1) generates `python3 -c "..."` commands with Python Traceback errors. This is an agent behavior quality issue, not infrastructure.
+- **Status**: NOT FIXED — agent behavior problem, outside proxy scope.
+
+### Problem 3: `Cannot continue from message role: assistant`
+- **Root cause**: OpenClaw auto-compact truncates conversation history to end with an assistant role message. GLM 5.1 API (OpenAI /v1/chat/completions format) requires messages sequence to end with user/tool role. Passthrough proxy (40003) does direct body passthrough without modification → malformed sequence propagates to ModelScope → API rejects → entire session fails.
+- **Fix**: Added messages sequence fix in passthrough proxy `_handle_openai_with_cycling`: if `body["messages"]` ends with `role="assistant"`, append `{"role": "user", "content": "Continue."}`. Minimal fix per OpenAI API spec requirement. Logged as `[MSG-FIX]`.
+- **Verification**: curl test with assistant-ending messages → 200 OK with proper response (was "Cannot continue from message role: assistant")
+
+### sync_config.sh Update
+- Added dispatcher `gateway/__init__.py` and `gateway/gateway_main.py` entries to SYNC_MAP (was missing, causing gateway subdirectory not synced to /opt/cc-infra)
