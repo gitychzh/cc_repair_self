@@ -1,17 +1,51 @@
-# R29: Three-proxy architecture — 3 proxy containers + 1 LiteLLM + 1 postgres
-# R36: NV re-enabled on 40005 (5 keys + strict MS-NV alternating + per-key proxy)
+# R29→R36: Multi-proxy architecture
+# R36.1: All containers 1CPU/1GB + Docker official proxy config (YAML anchors)
 # 40001 (cc):          CC → Anthropic format → 41001 glm5.1 v×k (pure MS, stable baseline)
 # 40005 (cc):          CC → Anthropic format → 41001 glm5.1 v×k + NV 5-key alternating (EXPERIMENT)
 # 40002 (codex):       Codex → Responses API → 41001 glm5.1 v×k
 # 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 glm5.1 v×k (pure MS)
-# 41001: ms_uni41001 LiteLLM (70 glm5.1 dep, dsv4p removed from ModelScope)
-# 41101-41105: ms_nv_4110X LiteLLM (1 NV key each, for monitoring/debugging only)
+# 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
+# 41101-41105: ms_nv_4110X LiteLLM (1 NV key each, monitoring/debugging only)
 # NV proxy calls go through cc-proxy HTTPS CONNECT tunnel directly (not through LiteLLM)
 #
-# Port assignments: 41001=LiteLLM MS, 41101-41105=LiteLLM NV, 40000=dispatcher, 40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough), 40005=proxy(cc-experiment)
+# Port assignments: 41001=LiteLLM MS, 41101-41105=LiteLLM NV, 40000=dispatcher,
+#   40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough), 40005=proxy(cc-experiment)
 # ulimit nofile: 41001 uses 2048 soft / 65536 hard (70 dep)
 
+# ── Docker official proxy config: YAML anchors (docs.docker.com/network/proxy/) ──
+# All containers needing host access use host.docker.internal (Linux requires extra_hosts).
+# Proxy env vars follow Docker official naming (uppercase + lowercase auto-set by config.json).
+# NO_PROXY prevents proxy loops for inter-container traffic on cc-net.
+
+x-host-access: &host-access
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-proxy-env-ms: &proxy-env-ms
+  # MS containers: use mihomo mixed port 7880 for GitHub access (LiteLLM startup fetch)
+  HTTP_PROXY: http://host.docker.internal:7880
+  HTTPS_PROXY: http://host.docker.internal:7880
+  NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001,auth_to_api_40000,auth_to_api_40001,auth_to_api_40002,auth_to_api_40003,auth_to_api_40005
+
+x-resource-1c1g: &resource-1c1g
+  deploy:
+    resources:
+      limits:
+        memory: 1G
+        cpus: "1.0"
+      reservations:
+        memory: 256M
+        cpus: "0.1"
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: '5'
+    tag: container/{{.Name}}
+
 services:
+  # ─── PostgreSQL ───
   cc_postgres:
     image: postgres:16-alpine
     container_name: cc_postgres
@@ -20,7 +54,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51 litellm_nv
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51
       TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
@@ -30,14 +64,7 @@ services:
       - "5432"
     networks:
       - cc-net
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 256M
-          cpus: "0.25"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -46,12 +73,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    logging: &id001
-      driver: json-file
-      options:
-        max-size: 50m
-        max-file: '5'
-        tag: container/{{.Name}}
+    logging: *logging
 
   # ─── LiteLLM container (70 glm5.1 dep) ───
   ms_uni41001:
@@ -73,7 +95,9 @@ services:
       MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
       MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
+      <<: *proxy-env-ms
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-glm51/config.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -85,14 +109,7 @@ services:
     depends_on:
       cc_postgres:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 1536M
-          cpus: "1.5"
-        reservations:
-          memory: 1536M
-          cpus: "0.5"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -101,26 +118,20 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
       - --port
       - "4000"
 
-  # ─── 40001: FALLBACK CC proxy — identical config to 40005 (R35) ───
-  # R35: 40001 is a full mirror of 40005 (same code, same NV interleaving).
-  #   Dispatcher auto-fallback sends traffic here when 40005 connection fails.
-  #   Both containers serve identical capability — fallback is lossless.
-  #   rr_counter.json isolated in ./logs/proxy40001 (independent from 40005).
+  # ─── 40001: FALLBACK CC proxy (pure MS, stable baseline) ───
   auth_to_api_40001:
     build:
       context: ./proxy/cc-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40001
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
@@ -136,9 +147,6 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # ── R35.3: 40001 = 40005 mirror — both pure MS (NV_NUM_KEYS=0) ──
-      # NV glm-5.1 API unavailable (0% success). NV fallthrough wastes ~40s.
-      # Pure MS ensures lossless fallback (no NV delay).
       NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
@@ -148,6 +156,7 @@ services:
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./logs/proxy40001:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -157,14 +166,7 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 512M
-          cpus: "0.1"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -173,27 +175,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    logging: *id001
+    logging: *logging
 
-  # ─── 40005: PRIMARY CC proxy (Anthropic format → glm5.1 v×k, MS-NV interleaving) ───
-  # R31: 40005 = default CC endpoint (opus), 40001 = fallback (sonnet).
-  # R31.5: builds from ./proxy/cc-proxy (physically isolated cc-role code).
-  # R35: 40005 is the EXPERIMENT container — new params/code deploy here first,
-  #   40001 stays as STABLE baseline. compare_proxies.sh + auto_tune.sh drive the iteration.
-  # Both share 41001 LiteLLM + same glm5.1 variants + same MS_KEY → quota is shared
-  # per model-id+key, NOT per proxy port. So:
-  #   - 40005 PROXY crash / bad params → dispatcher auto-fallback to 40001 (R35)
-  #   - glm5.1 quota exhausted (all 429) → 40001 will ALSO be all-429 (shared quota)
-  # rr_counter.json isolated in ./logs/proxy40005 (R30.1, independent from 40001).
-  # When 40005 experiments succeed → sync validated params to 40001 (version promotion).
+  # ─── 40005: PRIMARY CC proxy (MS-NV alternating, EXPERIMENT) ───
   auth_to_api_40005:
     build:
       context: ./proxy/cc-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40005
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       PROXY_ROLE: cc
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
@@ -209,10 +199,7 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # ── R36: 40005 EXPERIMENT — NV re-enabled with 5 keys + strict alternating ──
-      # 5 NV keys, each with dedicated mihomo proxy port (fault isolation).
-      # Strict MS-NV alternating: ms1→nv1→ms2→nv2→ms3→nv3→ms4→nv4→ms5→nv5→ms6→nv1→ms7→nv2→...
-      # NV failure → immediate MS switch (no NV key cycling). NV timeout 60s.
+      # R36: 5 NV keys + strict alternating + per-key proxy + 60s timeout
       NV_NUM_KEYS: "5"
       NV_TIMEOUT: "60"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
@@ -222,13 +209,12 @@ services:
       NV_KEY4: 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
       NV_KEY5: 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
       NV_PROXY_URL: http://host.docker.internal:7894
-      # R36: Per-key proxy URL map — each NV key has dedicated mihomo US proxy port
-      # JSON format: {"0":"url_k1","1":"url_k2",...}
       NV_PROXY_URL_MAP: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895","2":"http://host.docker.internal:7896","3":"http://host.docker.internal:7897","4":"http://host.docker.internal:7899"}'
       NV_MAX_CYCLE: "1200000"
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./logs/proxy40005:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -238,14 +224,7 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 512M
-          cpus: "0.1"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -254,15 +233,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    logging: *id001
+    logging: *logging
 
-  # ─── 40000: CC model→endpoint dispatcher (R31.7) ───
-  # CC reads ONE ANTHROPIC_BASE_URL. /model only changes the request body model field,
-  # not the downstream port. This dispatcher routes by that field so /model switching =
-  # upstream switching with zero CC restart:
-  #   claude-sonnet-* → 40001 (fallback), everything else (opus, glm5.1_*) → 40005 (primary)
-  # Pure relay: no parsing/truncation/format conversion. SSE streamed byte-for-byte.
-  # CC's settings.json env.ANTHROPIC_BASE_URL points here permanently (one-time switch).
+  # ─── 40000: CC model→endpoint dispatcher ───
   auth_to_api_40000:
     build:
       context: ./proxy/dispatcher
@@ -283,14 +256,7 @@ services:
     depends_on:
       - auth_to_api_40005
       - auth_to_api_40001
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -299,11 +265,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    logging: *id001
+    logging: *logging
 
   # ─── 40002: Codex proxy (Responses API → glm5.1 v×k) ───
-  # R31.6: physically isolated — builds from configs/proxy/codex-proxy/ (own image,
-  # not shared with 40001/40003/40005). A change here cannot affect other roles.
   auth_to_api_40002:
     build:
       context: ./proxy/codex-proxy
@@ -336,14 +300,7 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 512M
-          cpus: "0.1"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -352,22 +309,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    logging: *id001
+    logging: *logging
 
-  # ─── 40003: Passthrough proxy (OpenAI → pure MS v×k, NV disabled R35.3) ───
-  # R34: _ol/_oc/_hm → nearly-transparent passthrough
-  # R35.3: NV_NUM_KEYS set to 0 — NV glm-5.1 API unavailable (0% success, 30~100s fallthrough waste).
-  #   40003 had NV_NUM_KEYS=5 but every NV attempt failed: DNS errors + 20s timeouts.
-  #   NV_FALLTHROUGH wasted 30~100s before MS fallback. Pure MS = instant response.
-  #   Same rationale as 40001/40005 (R35.2). All 3 CC/passthrough proxies now pure MS.
+  # ─── 40003: Passthrough proxy (OpenAI → pure MS v×k) ───
   auth_to_api_40003:
     build:
       context: ./proxy/passthrough-proxy
       dockerfile: Dockerfile
     container_name: auth_to_api_40003
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       PROXY_ROLE: passthrough
       LITELLM_URL_GLM51: http://ms_uni41001:4000/v1/chat/completions
@@ -383,12 +333,6 @@ services:
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # ── R35.8: throttle aligned to 1.5s (same as 40001/40005) ──
-      # R35.7 data: throttle=2.0 had 3 ABORTs + avg TTFB=10s, while 40005
-      # throttle=1.5 had 0 ABORTs + avg TTFB=6.9s. Longer throttle didn't
-      # reduce 429, just increased latency. Align all proxies for consistency.
-      # NV glm-5.1 API unavailable (0% success, all timeout/DNS error).
-      # NV_FALLTHROUGH wastes 30~100s. Pure MS = instant.
       NV_NUM_KEYS: "0"
       NV_TIMEOUT: "20"
       NV_BASEURL: https://integrate.api.nvidia.com/v1
@@ -398,6 +342,7 @@ services:
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./logs/proxy40003:/app/logs
       - /etc/localtime:/etc/localtime:ro
@@ -407,14 +352,7 @@ services:
       - cc-net
     depends_on:
       - ms_uni41001
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-        reservations:
-          memory: 512M
-          cpus: "0.1"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -423,28 +361,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    logging: *id001
+    logging: *logging
 
-  # ─── R36: NV LiteLLM containers (41101-41105, per-key isolation) ───
-  # Each container: 1 NV key, 1 deployment, dedicated mihomo proxy port.
-  # NOTE: These containers are for monitoring/debugging only. NV API calls
-  # go through cc-proxy HTTPS CONNECT tunnel directly (LiteLLM v1.87 can't
-  # proxy via HTTPS). Proxy uses per-key proxy URL (NV_PROXY_URL_MAP).
+  # ─── R36: NV LiteLLM containers (41101-41105) ───
+  # Each: 1 NV key, 1 deployment, dedicated mihomo NV proxy port (different US IP per key).
+  # For monitoring/debugging only. Proxy calls NV API directly via HTTPS CONNECT tunnel.
+  # R36.1: Each container uses its own NV proxy port (7894-7899) for outbound NV calls.
+  #   This ensures each key appears from a different US IP to the NVIDIA API.
+
   ms_nv_41101:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41101
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
+      # R36.2: No DATABASE_URL — NV containers are monitoring-only, no need for DB persistence.
+      # LiteLLM without DATABASE_URL runs in-memory (no schema creation overhead, 30s startup).
+      STORE_MODEL_IN_DB: "False"
       NV_KEY1: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # R36.2: LiteLLM startup needs GitHub access (model cost map fetch) → use mihomo mixed port 7880.
+      # NV proxy ports (7894-7899) are only for cc-proxy HTTPS CONNECT tunnel calls, not for LiteLLM.
       HTTP_PROXY: http://host.docker.internal:7880
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-nv/config-k1.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -453,17 +395,7 @@ services:
       - 41101:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.25"
-        reservations:
-          memory: 256M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -472,7 +404,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
@@ -483,17 +415,17 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41102
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
+      STORE_MODEL_IN_DB: "False"
       NV_KEY2: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # R36.2: Use mihomo mixed port 7880 for GitHub access (not NV port 7895)
       HTTP_PROXY: http://host.docker.internal:7880
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-nv/config-k2.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -502,17 +434,7 @@ services:
       - 41102:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.25"
-        reservations:
-          memory: 256M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -521,7 +443,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
@@ -532,17 +454,17 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41103
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
+      STORE_MODEL_IN_DB: "False"
       NV_KEY3: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # R36.2: Use mihomo mixed port 7880 for GitHub access (not NV port 7896)
       HTTP_PROXY: http://host.docker.internal:7880
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-nv/config-k3.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -551,17 +473,7 @@ services:
       - 41103:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.25"
-        reservations:
-          memory: 256M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -570,7 +482,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
@@ -581,17 +493,17 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41104
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
+      STORE_MODEL_IN_DB: "False"
       NV_KEY4: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # R36.2: Use mihomo mixed port 7880 for GitHub access (not NV port 7897)
       HTTP_PROXY: http://host.docker.internal:7880
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-nv/config-k4.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -600,17 +512,7 @@ services:
       - 41104:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.25"
-        reservations:
-          memory: 256M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -619,7 +521,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
@@ -630,17 +532,17 @@ services:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41105
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv
+      STORE_MODEL_IN_DB: "False"
       NV_KEY5: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # R36.2: Use mihomo mixed port 7880 for GitHub access (not NV port 7899)
       HTTP_PROXY: http://host.docker.internal:7880
       HTTPS_PROXY: http://host.docker.internal:7880
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
+    <<: *host-access
     volumes:
       - ./litellm-nv/config-k5.yaml:/app/config.yaml:ro
       - /etc/localtime:/etc/localtime:ro
@@ -649,17 +551,7 @@ services:
       - 41105:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.25"
-        reservations:
-          memory: 256M
-          cpus: "0.05"
+    <<: *resource-1c1g
     healthcheck:
       test:
         - CMD-SHELL
@@ -668,7 +560,7 @@ services:
       timeout: 30s
       retries: 3
       start_period: 120s
-    logging: *id001
+    logging: *logging
     command:
       - --config
       - /app/config.yaml
