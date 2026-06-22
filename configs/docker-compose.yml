@@ -371,8 +371,11 @@ services:
       MODEL_INPUT_TOKEN_SAFETY_GLM51: "170000"
       NUM_KEYS: "7"
       NUM_VARIANTS_GLM51: "10"
-      MIN_OUTBOUND_INTERVAL_S: "2.0"
-      # ── R35.3: NV disabled on 40003 — same as 40001/40005 ──
+      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      # ── R35.8: throttle aligned to 1.5s (same as 40001/40005) ──
+      # R35.7 data: throttle=2.0 had 3 ABORTs + avg TTFB=10s, while 40005
+      # throttle=1.5 had 0 ABORTs + avg TTFB=6.9s. Longer throttle didn't
+      # reduce 429, just increased latency. Align all proxies for consistency.
       # NV glm-5.1 API unavailable (0% success, all timeout/DNS error).
       # NV_FALLTHROUGH wastes 30~100s. Pure MS = instant.
       NV_NUM_KEYS: "0"

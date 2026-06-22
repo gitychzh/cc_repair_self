@@ -571,6 +571,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                         streaming_input_tokens = pt
                                     if ct > 0:
                                         streaming_output_tokens = ct
+                                # R35.8: Extract finish_reason from stream chunks
+                                # Previously all metrics had finish_reason=null because
+                                # passthrough didn't parse this field. Now we capture it
+                                # for monitoring quality (stop/tool_calls/length).
+                                fr = data.get("choices", [{}])[0].get("finish_reason")
+                                if fr:
+                                    metrics["finish_reason"] = fr
                 except Exception:
                     pass  # Don't let metrics extraction break passthrough
 
