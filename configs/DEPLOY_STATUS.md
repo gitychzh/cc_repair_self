@@ -122,3 +122,6 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.5: hm-proxy cycling throttle exemption + cooldown restore + K5 proxy fix
 - R38.5 Round 2: UPSTREAM_TIMEOUT 60→45s + tier-skip when all keys cooling + nv_proxy_selector.sh→.py
 - R38.6: sock.settimeout() BEFORE getresponse() (致命bug修复: 之前在之后→650-770s无限read超时) + deepseek removed (30s timeout全失败) + TIER_TIMEOUT_BUDGET_S=90s + attempt HM_NUM_KEYS*2→HM_NUM_KEYS+2=7 + KEY_COOLDOWN 30→15 + MIN_OUTBOUND 3.5→1.5 + Connection:close
+- R38.5: hm-proxy cycling throttle exemption + cooldown restore + K5 proxy fix
+- R38.5 Round 2: UPSTREAM_TIMEOUT 60→45s + tier-skip when all keys cooling + nv_proxy_selector.sh→.py
+- R38.6: sock.settimeout() BEFORE getresponse() (致命bug修复: 之前在之后→650-770s无限read超时) + deepseek removed (30s timeout全失败) + TIER_TIMEOUT_BUDGET_S=90s + attempt HM_NUM_KEYS*2→HM_NUM_KEYS+2=7 + KEY_COOLDOWN 30→15 + MIN_OUTBOUND 3.5→1.5 + Connection:close
