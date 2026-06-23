@@ -7,7 +7,7 @@ model_list:
       model: openai/z-ai/glm-5.1
       api_key: os.environ/NV_KEY3
       api_base: os.environ/NV_BASEURL
-      timeout: 30
+      timeout: 60
       drop_params: true
     model_info:
       mode: chat
@@ -18,7 +18,7 @@ model_list:
       model: openai/moonshotai/kimi-k2.6
       api_key: os.environ/NV_KEY3
       api_base: os.environ/NV_BASEURL
-      timeout: 30
+      timeout: 60
       drop_params: true
     model_info:
       mode: chat
@@ -26,10 +26,10 @@ model_list:
 
   - model_name: nvdeepseek_k3
     litellm_params:
-      model: openai/deepseek-ai/deepseek-v4-flash
+      model: openai/deepseek-ai/deepseek-v4-pro
       api_key: os.environ/NV_KEY3
       api_base: os.environ/NV_BASEURL
-      timeout: 30
+      timeout: 60
       drop_params: true
     model_info:
       mode: chat
@@ -46,4 +46,4 @@ router_settings:
 general_settings:
   drop_params: true
   json_logs: true
-  request_timeout: 30
+  request_timeout: 60

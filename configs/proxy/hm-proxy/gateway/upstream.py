@@ -2,14 +2,15 @@
 """Upstream request executor for Hermes NV proxy — R38.3.
 
 R38.2: Three-tier fallback routing with per-tier persistent RR counters.
-R38.3: deepseek-v4-pro → deepseek-v4-flash (v4-pro broken on NV API).
+R38.3: Model suffix _hm → _nv (NV API vs MS API distinction).
+       deepseek-v4-pro restored (tested OK via direct/US proxy/SG proxy;
+       previous failures were transient mihomo proxy issues, not model itself).
        Added sock.settimeout() after conn.request() for read timeout
        (R36.2 lesson: HTTPConnection.timeout only controls connect, not read).
-       PROXY_TIMEOUT 300→120, UPSTREAM_TIMEOUT 60→30.
 
-Default tier: glm5.1_hm (5 keys, sequential RR from current position).
-If all 5 keys fail (429 or empty 200) → fallback to kimi_hm tier.
-If kimi tier also all-fail → fallback to deepseek_hm tier.
+Default tier: glm5.1_nv (5 keys, sequential RR from current position).
+If all 5 keys fail (429 or empty 200) → fallback to kimi_nv tier.
+If kimi tier also all-fail → fallback to deepseek_nv tier.
 If deepseek tier also all-fail → ABORT-NO-FALLBACK.
 
 Each tier continues from its current key position (not from k1).

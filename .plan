@@ -1,270 +1,81 @@
-# 部署计划：opc1 上的 5 NV LiteLLM + hm40006 Hermes 专用 proxy
+# R38.2: HM Proxy 三级 Fallback 路由重构
 
-## 目标
+## 需求
 
-在 opc1（本机）上新增：
-1. **5个 NV LiteLLM 容器**（41101-41105）— 每个容器 1 NV key + 4 个 model deployment（kimi/glm/deepseek/minimax）
-2. **1个 hm40006 proxy 容器**— Hermes 专用，顺序循环路由 kimi_nv1→kimi_nv2→...→kimi_nv5→kimi_nv1，持久化计数器（断电不归零）
+1. NV 模型从4个减为3个：glm5.1 / deepseek-v4-pro / kimi-k2.6（去掉 minimax）
+2. 默认 glm5.1 顺序路由 k1→k5，5个全 429 或空响应 → fallback kimi k1→k5 → fallback dsv4p k1→k5
+3. 所有 fallback 从当前位置继续（不是从 k1 重新开始）
+4. 日志详细记录 fallback 过程
 
-**关键设计要点**：
-- hm40006 直接调用 NV API（HTTPS CONNECT tunnel），不经 LiteLLM 容器转发
-- LiteLLM 41101-41105 仅用于监控/调试，和 opc2 一样
-- 每个容器通过不同 mihomo 端口出去（7894-7899），确保不同美国出口 IP
-- kimi 是首先测试的模型，但 config.yaml 里也配好 glm/deepseek/minimax
+## 改动清单
 
-## 链路图
+### 1. LiteLLM HM config (41101-41105) — 4dep→3dep
 
+每个 config-k*.yaml 删除 `nvminimax_kN` deployment，保留 3 个：nvglm5.1 / nvkimi / nvdeepseek
+
+### 2. config.py — 重构模型映射和 fallback 链
+
+新增：
+- `NV_MODEL_TIERS = ["glm5.1_hm", "kimi_hm", "deepseek_hm"]` — 按优先级
+- `DEFAULT_NV_MODEL = "glm5.1_hm"` — 默认从 glm5.1 开始（不再是 kimi）
+
+修改：
+- `NV_MODEL_IDS` 去掉 minimax_hm
+- `LITELLM_MODEL_MAP` 去掉 nvminimax
+- `MODEL_MAP` 去掉 minimax 相关映射，默认 model→glm5.1_hm
+- `MODEL_INPUT_TOKEN_SAFETY` 去掉 minimax_hm
+- RR counter 改为 per-tier：`hm_nv_glm5.1` / `hm_nv_kimi` / `hm_nv_deepseek`
+- `_next_hm_nv_key(tier_key)` 函数，per-tier 独立计数
+
+### 3. upstream.py — 重构为三级 fallback
+
+当前：固定1个模型循环5个key，5个全失败→all_keys_exhausted
+
+改为三级 fallback：
 ```
-Hermes agent → :40006 hm-proxy (PROXY_ROLE=passthrough, NV_NUM_KEYS=5)
-  → NV API direct (HTTPS CONNECT tunnel via per-key mihomo)
-    K1→7894→🇺🇸美国IP1
-    K2→7895→🇺🇸美国IP2
-    K3→7896→🇺🇸美国IP3
-    K4→7897→🇺🇸美国IP4
-    K5→7899→🇺🇸美国IP5
-  顺序循环: kimi_nv1→kimi_nv2→kimi_nv3→kimi_nv4→kimi_nv5→kimi_nv1...
-  持久化到 rr_counter.json (每次 increment 立即 atomic 落盘)
-
-41101-41105 (NV LiteLLM, monitoring only):
-  K1: nvkimi_k1 + nvglm5.1_k1 + nvminimax_k1 + nvdeepseek_k1
-  K2: nvkimi_k2 + nvglm5.1_k2 + nvminimax_k2 + nvdeepseek_k2
-  K3: nvkimi_k3 + nvglm5.1_k3 + nvminimax_k3 + nvdeepseek_k3
-  K4: nvkimi_k4 + nvglm5.1_k4 + nvminimax_k4 + nvdeepseek_k4
-  K5: nvkimi_k5 + nvglm5.1_k5 + nvminimax_k5 + nvdeepseek_k5
-```
-
-## 新文件列表
-
-### 1. `configs/litellm-nv-hm/config-k1.yaml` ~ `config-k5.yaml`
-每个容器配 4 个 deployment（1 NV key × 4 model）：
-
-```yaml
-# 41101: NV HM LiteLLM for Key1 (port 41101)
-model_list:
-  - model_name: nvkimi_k1
-    litellm_params:
-      model: openai/moonshotai/kimi-k2.6
-      api_key: os.environ/NV_KEY1
-      api_base: os.environ/NV_BASEURL
-      timeout: 60
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
-  - model_name: nvglm5.1_k1
-    litellm_params:
-      model: openai/z-ai/glm-5.1
-      api_key: os.environ/NV_KEY1
-      api_base: os.environ/NV_BASEURL
-      timeout: 60
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
-  - model_name: nvminimax_k1
-    litellm_params:
-      model: openai/minimaxai/minimax-m3
-      api_key: os.environ/NV_KEY1
-      api_base: os.environ/NV_BASEURL
-      timeout: 60
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
-  - model_name: nvdeepseek_k1
-    litellm_params:
-      model: openai/deepseek-ai/deepseek-v4-pro
-      api_key: os.environ/NV_KEY1
-      api_base: os.environ/NV_BASEURL
-      timeout: 60
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
-router_settings:
-  num_retries: 0
-  cooldown_time: 10
-  routing_strategy: simple-shuffle
-  ...
-
-general_settings:
-  drop_params: true
-  json_logs: true
-  request_timeout: 60
+execute_litellm_request(handler, oai_body, mapped_model, ...)
+  → 确定 start_tier（mapped_model 在 NV_MODEL_TIERS 中的位置）
+  → for tier in tiers[start_tier_idx:]:
+      result = _try_tier_keys(handler, oai_body, tier, ...)
+      if success and not empty_200: return result
+      # tier 全失败 → HM-FALLBACK 日志 → 继续下一个 tier
+  → 所有 tier 都失败 → all_keys_exhausted
 ```
 
-K2-K5 同结构，替换 K1→K2..K5, nvkimi_k1→nvkimi_k2..k5 等。
+`_try_tier_keys()`: 从当前 tier 的 RR counter 位置开始循环5个key
+- 429/500/502 → cycling to next key
+- 空200（choices=null/content=null/空choices）→ cycling to next key
 
-### 2. `configs/proxy/hm-proxy/` — 新 proxy 目录
-基于 passthrough-proxy 代码，但关键修改：
-- **PROXY_ROLE = "passthrough"**（只服务 /v1/chat/completions）
-- **NV-only routing**：不走 MS，只走 NV 5 key 顺序循环
-- **持久化循环计数器**：从 rr_counter.json 的 "hm_nv" key 读取当前位置，每次请求 increment+落盘
-- **NV_PROXY_URL_MAP**：per-key mihomo proxy（7894/7895/7896/7897/7899）
-- **NV_MODEL_IDS mapping**：
-  - kimi_hm → moonshotai/kimi-k2.6
-  - glm5.1_hm → z-ai/glm-5.1
-  - minimax_hm → minimaxai/minimax-m3
-  - deepseek_hm → deepseek-ai/deepseek-v4-pro
-- **MSG-FIX**（继承 passthrough 的 messages assistant→追加 user "Continue."）
-- **NV unsupported params strip**（thinking_budget/reasoning_effort/stream_options）
+**空200检测**：
+- Non-streaming: 读取 resp body，检查 `choices` 是否 null/空/content 是否 null
+- Streaming: Content-Length=0 判断（不读body避免破坏stream）
 
-hm-proxy 代码结构：
-- `Dockerfile` — 同 passthrough-proxy 模式
-- `gateway_main.py` — 入口
-- `gateway/app.py` — ThreadedHTTPServer
-- `gateway/config.py` — NV_NUM_KEYS=5, NV_MODEL_IDS dict, AGENT_SUFFIXES for _hm
-- `gateway/handlers.py` — /v1/chat/completions only, OpenAI passthrough + NV-only routing
-- `gateway/upstream.py` — 简化版：只有 NV 5 key 顺序循环（无 MS interleaving）
-- `gateway/logger.py` — 同 passthrough
-- `gateway/stream.py` — 同 passthrough（SSE buffer streaming）
-- `gateway/error_mapping.py` — OpenAI format errors
+### 4. handlers.py — 更新
 
-### 3. `configs/docker-compose.yml` 修改
-新增 7 个 service（5 NV LiteLLM + 1 hm-proxy + postgres litellm_nv_hm DB）：
+- mapped_model 用于确定 start_tier
+- `/health`: 显示 `hm_model_tiers` + `hm_default_model`
+- `/v1/models`: 只列3个模型 + aliases
 
-```yaml
-# hm40006: Hermes专用 NV proxy
-hm40006:
-  build:
-    context: ./proxy/hm-proxy
-    dockerfile: Dockerfile
-  container_name: hm40006
-  restart: unless-stopped
-  extra_hosts:
-    - "host.docker.internal:host-gateway"
-  environment:
-    PROXY_ROLE: passthrough
-    LISTEN_PORT: "40006"
-    PROXY_TIMEOUT: "300"
-    NV_NUM_KEYS: "5"
-    NV_TIMEOUT: "40"
-    NV_BASEURL: https://integrate.api.nvidia.com/v1
-    NV_KEY1: nvapi-...
-    NV_KEY2: nvapi-...
-    NV_KEY3: nvapi-...
-    NV_KEY4: nvapi-...
-    NV_KEY5: nvapi-...
-    NV_PROXY_URL_MAP: '{"0":"host.docker.internal:7894","1":"host.docker.internal:7895","2":"host.docker.internal:7896","3":"host.docker.internal:7897","4":"host.docker.internal:7899"}'
-    LOG_DIR: /app/logs
-    TZ: Asia/Shanghai
-  volumes:
-    - ./logs/proxy40006:/app/logs
-    - /etc/localtime:/etc/localtime:ro
-  ports:
-    - 40006:40006
-  networks:
-    - cc-net
-  deploy:
-    resources:
-      limits:
-        memory: 512M
-        cpus: "0.5"
-      reservations:
-        memory: 256M
-        cpus: "0.1"
+### 5. docker-compose.yml — 无改动，但 LiteLLM 需 restart（config.yaml 变了）
 
-# ms_nv_hm_41101~41105: NV LiteLLM (monitoring only)
-ms_nv_hm_41101:
-  image: litellm/litellm:v1.87.0
-  container_name: ms_nv_hm_41101
-  ...
-  environment:
-    LITELLM_MASTER_KEY: sk-litellm-local
-    DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
-    NV_KEY1: nvapi-...
-    NV_BASEURL: https://integrate.api.nvidia.com/v1
-    HTTPS_PROXY: http://host.docker.internal:7894  # per-key proxy!
-    ...
-  volumes:
-    - ./litellm-nv-hm/config-k1.yaml:/app/config.yaml:ro
-  ports:
-    - 41101:4000  # 注意：这和现有的 ms_uni41001 41001端口冲突！
+### 6. CLAUDE.md + DEPLOY_STATUS.md — 更新
 
-```
-
-**⚠️ 端口冲突问题**：现有 ms_uni41001 已经占用了 41001→4000。新 NV LiteLLM 容器不能用 41101-41105（因为 opc1 上没有这些端口被占用）。但为了与 opc2 保持命名一致，端口分配为 41101-41105→4000。
-
-需要确认：opc1 当前只有 41001 在跑，41101-41105 端口是空闲的。✅
-
-### 4. `configs/.env.template` 更新
-添加注释说明 NV HM keys（与现有 NV_KEY1-5 相同）
-
-### 5. mihomo 配置不变
-opc1 已经有 7894-7899 的 per-key NV proxy 配置，无需修改。
-
-### 6. postgres DB 扩展
-`POSTGRES_MULTIPLE_DATABASES` 添加 `litellm_nv_hm`（init-db.sh 自动创建）
-
-## hm-proxy 核心逻辑（upstream.py 简化版）
+## Per-tier RR counter 设计
 
 ```python
-def execute_nv_only_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Hermes专用：NV 5 key 顺序循环路由，持久化计数器"""
-    result = UpstreamResult()
-
-    # 从 rr_counter.json 读取 "hm_nv" counter
-    # counter % 5 → nv_key_idx
-    # 从当前位置开始，循环 K1→K2→K3→K4→K5→K1...
-
-    nv_model_id = NV_MODEL_IDS.get(mapped_model, "moonshotai/kimi-k2.6")
-    nv_body = _strip_nv_unsupported_params(oai_body)
-    nv_body["model"] = nv_model_id
-
-    start_key = _next_hm_nv_key()  # 持久化counter % 5
-
-    for attempt_idx in range(NV_NUM_KEYS):
-        nv_key_idx = (start_key + attempt_idx) % NV_NUM_KEYS
-        nv_key = NV_KEYS[nv_key_idx]
-        proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
-
-        conn, path = _make_nv_conn(NV_BASEURL, proxy_url, NV_TIMEOUT)
-        conn.request("POST", path + "/chat/completions", body=..., headers=...)
-        # R36.2 fix: sock.settimeout after request
-        conn.sock.settimeout(NV_TIMEOUT)
-        resp = conn.getresponse()
-
-        if resp.status >= 400:
-            # 429/500/502 → cycling to next NV key
-            continue
-        # success → return
-        result.success = True; result.resp = resp; result.conn = conn; ...
-        return result
-
-    # all 5 keys failed → return error
-    result.all_keys_exhausted = True; ...
-    return result
-
-def _next_hm_nv_key():
-    """顺序循环: 从当前位置开始，atomic落盘"""
-    with _hm_nv_lock:
-        counter = _vk_rr_counter.get("hm_nv", 0)
-        key_idx = counter % NV_NUM_KEYS
-        _vk_rr_counter["hm_nv"] = counter + 1
-        _save_rr_counter()  # atomic persist
+def _next_hm_nv_key(tier_key: str) -> int:
+    """Per-tier sequential RR: hm_nv_glm5.1 / hm_nv_kimi / hm_nv_deepseek"""
+    with _vk_rr_lock:
+        counter = _vk_rr_counter.get(tier_key, 0)
+        key_idx = counter % HM_NUM_KEYS
+        _vk_rr_counter[tier_key] = counter + 1
+        _save_rr_counter()
         return key_idx
 ```
 
-## 部署步骤
+## 测试
 
-1. 创建 configs/proxy/hm-proxy/ 目录和所有代码文件
-2. 创建 configs/litellm-nv-hm/ 目录和 config-k1~k5.yaml
-3. 修改 configs/docker-compose.yml 添加 7 个新 service
-4. 修改 configs/postgres/init-db.sh 添加 litellm_nv_hm DB
-5. 修改 configs/.env.template 添加说明
-6. 更新 CLAUDE.md 记录新架构
-7. 在 opc1 上 sync + deploy + smoke test
-8. Git push
-
-## 不影响现有框架的隔离措施
-
-- hm40006 是独立容器，独立端口，独立镜像
-- 41101-41105 是新容器名（ms_nv_hm_41101），与 opc2 的 ms_nv_41101 命名不同
-- postgres 新增 litellm_nv_hm DB，不影响 litellm_glm51
-- mihomo 7894-7899 已存在，不需要改
-- 40000 dispatcher 不路由到 40006（Hermes 直接连 40006）
-- hm-proxy 代码物理隔离在 configs/proxy/hm-proxy/，不影响其他 proxy
+1. `curl -s http://127.0.0.1:40006/health` — 确认 3 tier + glm5.1 default
+2. glm5.1 正常请求 — 返回 nvglm5.1_kN
+3. 请求 minimax — 应 fallback 到 glm5.1（不再有 minimax）
+4. 检查日志确认 fallback 过程被记录

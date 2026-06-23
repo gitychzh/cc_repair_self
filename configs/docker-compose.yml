@@ -405,8 +405,8 @@ services:
     environment:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
-      PROXY_TIMEOUT: "120"
-      UPSTREAM_TIMEOUT: "30"
+      PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)
