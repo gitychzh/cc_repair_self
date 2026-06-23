@@ -1,18 +1,21 @@
-# Deploy Status — opc_uname + opc2_uname (R38.4, 2026-06-23)
+# Deploy Status — opc_uname + opc2_uname (R38.6, 2026-06-23)
 
-## Architecture (R38.4)
+## Architecture (R38.6)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
-  → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
-      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-first + NV last-resort fallback)
-      └── FALLBACK → :40001 proxy (STABLE, pure MS, interval=1.5s)
+  → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
+      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-first + NV 3-tier last-resort fallback)
+      └── FALLBACK → :40001 proxy (STABLE, pure MS, Connection:close on all responses)
 
 :40005  cc-proxy → _cc /v1/messages → MS-first (ALL requests go to MS first)
   MS success → done (fast, ~9s avg)
-  MS all-429 → NV last-resort fallback (round-robin across 5 NV keys)
-  NV last-resort success → return (slow ~13-30s, but better than error)
-  NV last-resort fail → ABORT-NO-FALLBACK
+  MS all-429 → NV 3-tier last-resort fallback (R38.6: glm5.1→kimi→deepseek)
+    Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
+    Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-429/empty-200 →
+    Tier 3: deepseek (deepseek-ai/deepseek-v4-flash) → all 5 NV keys RR → all-fail → ABORT
+    per-tier persistent RR counter (nv_tier_rr_counter.json, not restarting from k1)
   NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
+  Connection:close on all proxy responses (prevents keep-alive BrokenPipe cascade)
 :40001  cc-proxy → _cc /v1/messages → pure MS glm5.1 v×k cycling (NV disabled, stable baseline)
 :40002  codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
 :40003  passthrough-proxy → _ol/_oc/_hm_ms → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled)
