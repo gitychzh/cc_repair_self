@@ -31,7 +31,7 @@ import threading
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "40006"))
 PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))
-UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))
+UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "45"))  # R38.5: 60→45 (NV/kimi/deepseek p95<30s)
 
 # ─── Proxy Role ────────────────────────────────────────────────────────────
 # "passthrough" — serves /v1/chat/completions (OpenAI format)

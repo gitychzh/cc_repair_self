@@ -411,6 +411,30 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
         tier_model = NV_MODEL_TIERS[tier_idx]
         is_first_tier = (tier_idx == start_tier_idx)
 
+        # R38.5 Tier Skip: if ALL keys in this tier are in cooldown,
+        # skip the entire tier immediately instead of wasting time
+        # trying each key (which just gets skipped individually).
+        # Data shows: "all keys in cooldown, breaking to fallback" takes 5ms,
+        # but first-request tier cycling still wastes ~10s per 429.
+        # With skip: 0ms overhead, directly to next tier.
+        all_cooling = all(is_key_cooling(tier_model, k) for k in range(HM_NUM_KEYS))
+        if all_cooling:
+            _log("HM-TIER-SKIP", f"tier={tier_model} all {HM_NUM_KEYS} keys in cooldown, "
+                                  f"skipping entire tier → next tier")
+            # Record as tier failure for metrics
+            all_tier_summaries.append({
+                "tier": tier_model,
+                "all_429": True,
+                "all_empty_200": False,
+                "num_attempts": 0,
+                "elapsed_ms": 0,
+                "skipped": True,
+            })
+            if not is_first_tier:
+                _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
+                                    f"falling back to {tier_model} (continuing from current position)")
+            continue
+
         if not is_first_tier:
             _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
                                 f"falling back to {tier_model} (continuing from current position)")

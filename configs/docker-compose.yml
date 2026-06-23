@@ -406,7 +406,7 @@ services:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
       PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "60"
+      UPSTREAM_TIMEOUT: "45"  # R38.5: 60→45 (NV p95<30s, kimi/deepseek p95<25s; reduce timeout waste)
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "2.0"  # R38.5: 1.5→2.0 (throttle only on first attempt; cycling exempt)
       KEY_COOLDOWN_S: "10.0"  # R38.5: per-key 429 cooldown base (exponential backoff, cap 30s)
