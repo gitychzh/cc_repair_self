@@ -82,7 +82,7 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: litellm
-      POSTGRES_MULTIPLE_DATABASES: litellm_glm51
+      POSTGRES_MULTIPLE_DATABASES: litellm_glm51 litellm_nv_hm
       TZ: Asia/Shanghai
     volumes:
       - cc_pgdata:/var/lib/postgresql/data
@@ -397,6 +397,8 @@ services:
   # R36.1: Each container uses its own NV proxy port (7894-7899) for outbound NV calls.
   #   This ensures each key appears from a different US IP to the NVIDIA API.
 
+  # ─── R36 NV LiteLLM containers (41201-41205, opc1 baseline monitoring) ───
+  # Port moved from 41101-41105 to 41201-41205 to free 41101-41105 for HM containers.
   ms_nv_41101:
     image: litellm/litellm:v1.87.0
     container_name: ms_nv_41101
@@ -420,7 +422,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-nv-k1:/app/logs
     ports:
-      - 41101:4000
+      - 41201:4000
     networks:
       - cc-net
     healthcheck:
@@ -458,7 +460,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-nv-k2:/app/logs
     ports:
-      - 41102:4000
+      - 41202:4000
     networks:
       - cc-net
     healthcheck:
@@ -496,7 +498,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-nv-k3:/app/logs
     ports:
-      - 41103:4000
+      - 41203:4000
     networks:
       - cc-net
     healthcheck:
@@ -534,7 +536,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-nv-k4:/app/logs
     ports:
-      - 41104:4000
+      - 41204:4000
     networks:
       - cc-net
     healthcheck:
@@ -572,9 +574,268 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - ./logs/litellm-nv-k5:/app/logs
     ports:
+      - 41205:4000
+    networks:
+      - cc-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging: *logging
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
+  # ─── R37: hm40006 — Hermes专用 NV proxy ───
+  # Hermes → 40006 → NV API direct (HTTPS CONNECT tunnel, per-key mihomo proxy)
+  # NV-only routing: 5 key sequential round-robin (k1→k2→k3→k4→k5→k1...)
+  # Persistent counter (rr_counter.json), MSG-FIX, NV unsupported params strip
+  # Physically isolated from cc/codex/passthrough — builds from proxy/hm-proxy/
+  hm40006:
+    build:
+      context: ./proxy/hm-proxy
+      dockerfile: Dockerfile
+    container_name: hm40006
+    restart: unless-stopped
+    environment:
+      PROXY_ROLE: passthrough
+      LISTEN_PORT: "40006"
+      PROXY_TIMEOUT: "300"
+      UPSTREAM_TIMEOUT: "60"
+      CHARS_PER_TOKEN_ESTIMATE: "3.0"
+      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      # R37: 5 NV keys for Hermes
+      NV_NUM_KEYS: "5"
+      NV_TIMEOUT: "40"
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      NV_KEY1: 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
+      NV_KEY2: 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
+      NV_KEY3: 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
+      NV_KEY4: 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
+      NV_KEY5: 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
+      NV_PROXY_URL: http://host.docker.internal:7894
+      NV_PROXY_URL_MAP: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895","2":"http://host.docker.internal:7896","3":"http://host.docker.internal:7897","4":"http://host.docker.internal:7899"}'
+      LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "7"
+      TZ: Asia/Shanghai
+    <<: *resource-1c1g-host
+    volumes:
+      - ./logs/proxy40006:/app/logs
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - 40006:40006
+    networks:
+      - cc-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:40006/health')" || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *logging
+
+  # ─── R37: NV HM LiteLLM containers (41101-41105 for opc1) ───
+  # Each: 1 NV key, 4 model deployments (kimi/glm/minimax/deepseek), per-key mihomo proxy.
+  # For monitoring/debugging only. hm40006 proxy calls NV API directly via HTTPS CONNECT tunnel.
+  # LiteLLM v1.87 doesn't support HTTPS_PROXY for NV API calls — these containers
+  # use the per-key mihomo proxy port for LiteLLM-level monitoring calls.
+  # NOTE: Port range 41101-41105 is shared with opc2's NV containers.
+  # opc1 uses ms_nv_hm_41101 naming to avoid collision.
+
+  ms_nv_hm_41101:
+    image: litellm/litellm:v1.87.0
+    container_name: ms_nv_hm_41101
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
+      NV_KEY1: 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
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      # LiteLLM startup needs GitHub access → use mihomo mixed port 7880
+      HTTP_PROXY: http://host.docker.internal:7880
+      HTTPS_PROXY: http://host.docker.internal:7880
+      NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
+      TZ: Asia/Shanghai
+    <<: *resource-1c2g-host
+    volumes:
+      - ./litellm-nv-hm/config-k1.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./logs/litellm-nv-hm-k1:/app/logs
+    ports:
+      - 41101:4000
+    networks:
+      - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging: *logging
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
+  ms_nv_hm_41102:
+    image: litellm/litellm:v1.87.0
+    container_name: ms_nv_hm_41102
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
+      NV_KEY2: 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
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      HTTP_PROXY: http://host.docker.internal:7880
+      HTTPS_PROXY: http://host.docker.internal:7880
+      NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
+      TZ: Asia/Shanghai
+    <<: *resource-1c2g-host
+    volumes:
+      - ./litellm-nv-hm/config-k2.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./logs/litellm-nv-hm-k2:/app/logs
+    ports:
+      - 41102:4000
+    networks:
+      - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging: *logging
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
+  ms_nv_hm_41103:
+    image: litellm/litellm:v1.87.0
+    container_name: ms_nv_hm_41103
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
+      NV_KEY3: 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
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      HTTP_PROXY: http://host.docker.internal:7880
+      HTTPS_PROXY: http://host.docker.internal:7880
+      NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
+      TZ: Asia/Shanghai
+    <<: *resource-1c2g-host
+    volumes:
+      - ./litellm-nv-hm/config-k3.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./logs/litellm-nv-hm-k3:/app/logs
+    ports:
+      - 41103:4000
+    networks:
+      - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging: *logging
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
+  ms_nv_hm_41104:
+    image: litellm/litellm:v1.87.0
+    container_name: ms_nv_hm_41104
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
+      NV_KEY4: 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
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      HTTP_PROXY: http://host.docker.internal:7880
+      HTTPS_PROXY: http://host.docker.internal:7880
+      NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
+      TZ: Asia/Shanghai
+    <<: *resource-1c2g-host
+    volumes:
+      - ./litellm-nv-hm/config-k4.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./logs/litellm-nv-hm-k4:/app/logs
+    ports:
+      - 41104:4000
+    networks:
+      - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+    logging: *logging
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+
+  ms_nv_hm_41105:
+    image: litellm/litellm:v1.87.0
+    container_name: ms_nv_hm_41105
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: sk-litellm-local
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
+      NV_KEY5: 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
+      NV_BASEURL: https://integrate.api.nvidia.com/v1
+      HTTP_PROXY: http://host.docker.internal:7880
+      HTTPS_PROXY: http://host.docker.internal:7880
+      NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
+      TZ: Asia/Shanghai
+    <<: *resource-1c2g-host
+    volumes:
+      - ./litellm-nv-hm/config-k5.yaml:/app/config.yaml:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./logs/litellm-nv-hm-k5:/app/logs
+    ports:
       - 41105:4000
     networks:
       - cc-net
+    depends_on:
+      cc_postgres:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD-SHELL
