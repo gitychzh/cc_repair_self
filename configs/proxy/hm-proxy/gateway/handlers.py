@@ -17,12 +17,10 @@ import socket
 import urllib.parse
 
 from .config import (
-    LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT, NV_NUM_KEYS, NV_ENABLED,
+    NV_NUM_KEYS, NV_ENABLED,
     NV_MODEL_IDS, DEFAULT_NV_MODEL, MODEL_MAP, detect_nv_model,
     PROXY_ROLE, LISTEN_PORT,
     MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
-    CHARS_PER_TOKEN_ESTIMATE,
-    MIN_OUTBOUND_INTERVAL_S,
 )
 from .logger import _log, _log_metrics, _log_error_detail
 from .upstream import execute_nv_request, UpstreamResult
