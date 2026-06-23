@@ -1,19 +1,20 @@
-# Deploy Status — opc_uname + opc2_uname (R38.6, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.7, 2026-06-24)
 
-## Architecture (R38.6)
+## Architecture (R38.7)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
-      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-first + NV 3-tier last-resort fallback)
+      ├── PRIMARY  → :40005 proxy (EXPERIMENT, MS-first + NV 2-tier last-resort fallback)
       └── FALLBACK → :40001 proxy (STABLE, pure MS, Connection:close on all responses)
 
 :40005  cc-proxy → _cc /v1/messages → MS-first (ALL requests go to MS first)
   MS success → done (fast, ~9s avg)
-  MS all-429 → NV 3-tier last-resort fallback (R38.6: glm5.1→kimi→deepseek)
+  MS all-429 → NV 2-tier last-resort fallback (R38.7: glm5.1→kimi, deepseek REMOVED)
     Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
-    Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-429/empty-200 →
-    Tier 3: deepseek (deepseek-ai/deepseek-v4-flash) → all 5 NV keys RR → all-fail → ABORT
-    per-tier persistent RR counter (nv_tier_rr_counter.json, not restarting from k1)
+    Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-fail → ABORT
+    per-tier persistent RR counter (not restarting from k1)
+    NV_TIER_TIMEOUT_BUDGET_S=90s caps total NV fallback time (prevents 450s catastrophic blocking)
+    Budget checked before each tier start and before each key attempt
   NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
   Connection:close on all proxy responses (prevents keep-alive BrokenPipe cascade)
 :40001  cc-proxy → _cc /v1/messages → pure MS glm5.1 v×k cycling (NV disabled, stable baseline)
@@ -24,9 +25,8 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
 :40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (2-tier fallback, per-tier 5-key RR)
-  R38.6: deepseek removed from fallback chain (NV API all 30s timeout)
+  R38.7: deepseek REMOVED from fallback chain (NV API all 30s+ timeout, zero success)
   默认 glm5.1_hm_nv → 全429/空200 → fallback kimi_hm_nv → 全失败 → ABORT-NO-FALLBACK
-  R38.6 CRITICAL: sock.settimeout() BEFORE getresponse() (was AFTER → infinite read timeout bug)
   TIER_TIMEOUT_BUDGET_S=90s caps per-tier cumulative time (prevents stacking)
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
