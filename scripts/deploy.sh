@@ -29,8 +29,8 @@ elif [[ "${SERVICE}" == "proxy40003" ]] || [[ "${SERVICE}" == "auth_to_api_40003
     echo "[1] Rebuilding 40003 proxy container (PROXY_ROLE=passthrough)..."
     DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40003
 elif [[ "${SERVICE}" == "proxy-all" ]]; then
-    echo "[1] Rebuilding all 3 proxy containers (40001 + 40002 + 40003)..."
-    DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002 auth_to_api_40003
+    echo "[1] Rebuilding all proxy containers (40001 + 40002 + 40003 + 40005 + hm40006)..."
+    DOCKER_BUILDKIT=0 docker compose up -d --build --force-recreate auth_to_api_40001 auth_to_api_40002 auth_to_api_40003 auth_to_api_40005 hm40006
 elif [[ "${SERVICE}" == "ms_uni41001" ]]; then
     echo "[1] Restarting ms_uni41001 (LiteLLM config changed)..."
     docker restart ms_uni41001
@@ -88,6 +88,21 @@ ISOLATION_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST 
     -d '{"model":"test","messages":[{"role":"user","content":"test"}],"max_tokens":50}')
 echo "  40001 /v1/chat/completions HTTP status: ${ISOLATION_RESULT} (expected: 404)"
 
+# R38.8: Test hm40006 (Hermes NV proxy) — critical for Hermes agent
+echo "  Testing hm40006 (Hermes NV proxy with kimi primary)..."
+HM_RESULT=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -X POST http://127.0.0.1:40006/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer sk-litellm-local" \
+    -d '{"model":"kimi_hm_nv","messages":[{"role":"user","content":"test"}],"max_tokens":10}')
+echo "  hm40006 HTTP status: ${HM_RESULT}"
+
+# R38.8: Test NV HM LiteLLM containers health
+echo "  Testing NV HM LiteLLM containers (41101-41105)..."
+for port in 41101 41102 41103 41104 41105; do
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:${port}/health/liveliness)
+    echo "  LiteLLM ${port} health: ${STATUS}"
+done
+
 echo ""
 if [[ "${GLM_RESULT}" == "200" ]]; then
     echo "=== CC proxy (40001) OK — glm5.1 working ==="
@@ -108,4 +123,9 @@ if [[ "${ISOLATION_RESULT}" == "404" ]]; then
     echo "=== Role isolation OK — 40001 correctly rejects /v1/chat/completions ==="
 else
     echo "=== WARNING — Role isolation may not be working (expected 404, got ${ISOLATION_RESULT}) ==="
+fi
+if [[ "${HM_RESULT}" == "200" ]]; then
+    echo "=== Hermes NV proxy (hm40006) OK — kimi_hm_nv working ==="
+else
+    echo "=== WARNING — hm40006 returned ${HM_RESULT}, Hermes may fail! ==="
 fi

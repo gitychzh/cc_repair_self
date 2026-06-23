@@ -261,10 +261,15 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                 # R38.8: Reset connection error counter — we got a real response (even if error)
                 consecutive_conn_err = 0
 
-                # Cycling errors: 429/500/502 → next key in same tier
-                should_cycle = resp.status in (429, 500, 502)
+                # Cycling errors: 429/408/500/502 → next key in same tier
+                # R38.8: Added 408 (LiteLLM timeout) — when NV API is slow, LiteLLM
+                # returns 408 Request Timeout. This should cycle to next key, not
+                # abort the entire tier. Previously 408 was treated as non-cycling
+                # → entire tier failed after just 1 key attempt (wasting 4 remaining keys).
+                should_cycle = resp.status in (429, 408, 500, 502)
                 if should_cycle:
                     cycle_reason = "429_nv_rate_limit" if resp.status == 429 else \
+                                   "408_litellm_timeout" if resp.status == 408 else \
                                    "500_nv_error" if resp.status == 500 else "502_nv_error"
                     key_cycle_attempts.append({
                         "tier": tier_model,

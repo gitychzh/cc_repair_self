@@ -25,12 +25,13 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   _hm_ms suffix for Hermes MS fallback endpoint (R38.4: _hm_ms = Hermes + ModelScope)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.8: 3-tier + conn-fast-break + startup-retry)
+:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.8: 3-tier + 408 cycling + kimi primary)
   R38.7: deepseek RESTORED as tier 3
   R38.8: depends_on condition:service_healthy (hm40006 waits for ALL 5 LiteLLM nv_hm healthy before starting)
-  R38.8: connection fast-break (2 consecutive conn errors → skip tier, prevents ConnectionRefused storm)
-  R38.8: startup retry (all tiers fail with conn errors only → wait 5s → retry once, handles transient LiteLLM restarts)
-  默认 glm5.1_hm_nv → 全429/空200 → kimi_hm_nv → deepseek_hm_nv → 全失败 → ABORT
+  R38.8: connection fast-break (2 consecutive conn errors → skip tier)
+  R38.8: 408 (LiteLLM timeout) 加入 cycling 错误列表 (was: 只 cycle 429/500/502 → 408立即返回错误)
+  R38.8: kimi_hm_nv 作为 primary tier (NV glm-5.1 极慢>60s; revert when glm5.1<20s)
+  默认 kimi_hm_nv → 失败 → glm5.1_hm_nv → deepseek_hm_nv → 全失败 → ABORT
   TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
@@ -39,7 +40,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   Connection:close on all requests (prevent BrokenPipe errors)
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
   nv_proxy_selector cron: */15 * * * * (ensures optimal node selection)
-  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (default=glm5.1_hm_nv)
+  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.8: default=kimi_hm_nv, fallback default_model=glm5.1_hm_ms)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
@@ -54,7 +55,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.8: 3-tier + conn-fast-break + startup-retry, depends_on healthy |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.8: kimi primary + 408 cycling + conn-fast-break, depends_on healthy |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
 | nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7894 proxy |
 | nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7895 proxy |

@@ -59,8 +59,10 @@ if HM_NUM_KEYS < 5:
 # R38.7 restoration: node reselection fixed the root cause. deepseek ~60% success rate
 # is acceptable as tier 3 — only tried when glm5.1+kimi both fail.
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# Priority order: glm5.1 (primary) → kimi (fallback 1) → deepseek (fallback 2)
-NV_MODEL_TIERS = ["glm5.1_hm_nv", "kimi_hm_nv", "deepseek_hm_nv"]
+# R38.8: kimi as primary (NV glm-5.1 currently >60s, unusable; kimi stable ~4s)
+#   REVERT WHEN: NV glm-5.1 latency returns to <20s (test with nv_proxy_selector.sh)
+# Priority order: kimi (primary) → glm5.1 (fallback 1) → deepseek (fallback 2)
+NV_MODEL_TIERS = ["kimi_hm_nv", "glm5.1_hm_nv", "deepseek_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -75,7 +77,7 @@ LITELLM_MODEL_MAP = {
     "deepseek_hm_nv": "nvdeepseek",
 }
 
-DEFAULT_NV_MODEL = "glm5.1_hm_nv"  # R38.4: _hm_nv dual suffix, glm5.1 as primary
+DEFAULT_NV_MODEL = "kimi_hm_nv"  # R38.8: kimi primary (glm5.1 NV极慢>k60s); revert when glm5.1<20s
 
 # ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
 # Maximum time to spend on ONE tier before giving up and moving to next tier.
