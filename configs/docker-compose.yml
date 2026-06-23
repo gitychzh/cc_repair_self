@@ -592,10 +592,10 @@ services:
       - --port
       - "4000"
 
-  # ─── R37: hm40006 — Hermes专用 NV proxy ───
-  # Hermes → 40006 → NV API direct (HTTPS CONNECT tunnel, per-key mihomo proxy)
-  # NV-only routing: 5 key sequential round-robin (k1→k2→k3→k4→k5→k1...)
-  # Persistent counter (rr_counter.json), MSG-FIX, NV unsupported params strip
+  # ─── R38: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
+  # Hermes → 40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
+  # 5-key sequential round-robin via LiteLLM containers, persistent counter
+  # MSG-FIX, LiteLLM handles drop_params for NV unsupported params
   # Physically isolated from cc/codex/passthrough — builds from proxy/hm-proxy/
   hm40006:
     build:
@@ -610,17 +610,13 @@ services:
       UPSTREAM_TIMEOUT: "60"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      # R37: 5 NV keys for Hermes
-      NV_NUM_KEYS: "5"
-      NV_TIMEOUT: "40"
-      NV_BASEURL: https://integrate.api.nvidia.com/v1
-      NV_KEY1: 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
-      NV_KEY2: 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
-      NV_KEY3: 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
-      NV_KEY4: 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
-      NV_KEY5: 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
-      NV_PROXY_URL: http://host.docker.internal:7894
-      NV_PROXY_URL_MAP: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895","2":"http://host.docker.internal:7896","3":"http://host.docker.internal:7897","4":"http://host.docker.internal:7899"}'
+      # R38: LiteLLM upstream URLs (container-to-container on cc-net)
+      HM_LITELLM_URL1: http://ms_nv_hm_41101:4000/v1
+      HM_LITELLM_URL2: http://ms_nv_hm_41102:4000/v1
+      HM_LITELLM_URL3: http://ms_nv_hm_41103:4000/v1
+      HM_LITELLM_URL4: http://ms_nv_hm_41104:4000/v1
+      HM_LITELLM_URL5: http://ms_nv_hm_41105:4000/v1
+      HM_LITELLM_KEY: sk-litellm-local
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
@@ -632,6 +628,12 @@ services:
       - 40006:40006
     networks:
       - cc-net
+    depends_on:
+      - ms_nv_hm_41101
+      - ms_nv_hm_41102
+      - ms_nv_hm_41103
+      - ms_nv_hm_41104
+      - ms_nv_hm_41105
     healthcheck:
       test:
         - CMD-SHELL
@@ -642,13 +644,13 @@ services:
       start_period: 15s
     logging: *logging
 
-  # ─── R37: NV HM LiteLLM containers (41101-41105 for opc1) ───
+  # ─── R38: NV HM LiteLLM containers (41101-41105) ───
+  # Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
   # Each: 1 NV key, 4 model deployments (kimi/glm/minimax/deepseek), per-key mihomo proxy.
-  # For monitoring/debugging only. hm40006 proxy calls NV API directly via HTTPS CONNECT tunnel.
-  # LiteLLM v1.87 doesn't support HTTPS_PROXY for NV API calls — these containers
-  # use the per-key mihomo proxy port for LiteLLM-level monitoring calls.
-  # NOTE: Port range 41101-41105 is shared with opc2's NV containers.
-  # opc1 uses ms_nv_hm_41101 naming to avoid collision.
+  # R38: HTTPS_PROXY changed from 7880(mixed) to per-key NV mihomo port (7894-7899)
+  #   for direct NV API routing. LiteLLM startup GitHub access also goes through these
+  #   ports (mihomo handles both US NV and general proxy).
+  # NOTE: Port range 41101-41105. opc1 uses ms_nv_hm_41101 naming.
 
   ms_nv_hm_41101:
     image: litellm/litellm:v1.87.0
@@ -659,9 +661,9 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
       NV_KEY1: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
-      # LiteLLM startup needs GitHub access → use mihomo mixed port 7880
-      HTTP_PROXY: http://host.docker.internal:7880
-      HTTPS_PROXY: http://host.docker.internal:7880
+      # R38: per-key mihomo NV proxy (7894=K1) — both NV API calls and GitHub startup
+      HTTP_PROXY: http://host.docker.internal:7894
+      HTTPS_PROXY: http://host.docker.internal:7894
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
     <<: *resource-1c2g-host
@@ -700,8 +702,9 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
       NV_KEY2: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
-      HTTP_PROXY: http://host.docker.internal:7880
-      HTTPS_PROXY: http://host.docker.internal:7880
+      # R38: per-key mihomo NV proxy (7895=K2) — both NV API calls and GitHub startup
+      HTTP_PROXY: http://host.docker.internal:7895
+      HTTPS_PROXY: http://host.docker.internal:7895
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
     <<: *resource-1c2g-host
@@ -740,8 +743,9 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
       NV_KEY3: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
-      HTTP_PROXY: http://host.docker.internal:7880
-      HTTPS_PROXY: http://host.docker.internal:7880
+      # R38: per-key mihomo NV proxy (7896=K3) — both NV API calls and GitHub startup
+      HTTP_PROXY: http://host.docker.internal:7896
+      HTTPS_PROXY: http://host.docker.internal:7896
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
     <<: *resource-1c2g-host
@@ -780,8 +784,9 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
       NV_KEY4: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
-      HTTP_PROXY: http://host.docker.internal:7880
-      HTTPS_PROXY: http://host.docker.internal:7880
+      # R38: per-key mihomo NV proxy (7897=K4) — both NV API calls and GitHub startup
+      HTTP_PROXY: http://host.docker.internal:7897
+      HTTPS_PROXY: http://host.docker.internal:7897
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
     <<: *resource-1c2g-host
@@ -820,8 +825,9 @@ services:
       DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_nv_hm
       NV_KEY5: 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
       NV_BASEURL: https://integrate.api.nvidia.com/v1
-      HTTP_PROXY: http://host.docker.internal:7880
-      HTTPS_PROXY: http://host.docker.internal:7880
+      # R38: per-key mihomo NV proxy (7899=K5) — both NV API calls and GitHub startup
+      HTTP_PROXY: http://host.docker.internal:7899
+      HTTPS_PROXY: http://host.docker.internal:7899
       NO_PROXY: localhost,127.0.0.1,cc_postgres,ms_uni41001
       TZ: Asia/Shanghai
     <<: *resource-1c2g-host

@@ -17,7 +17,7 @@ All error cycling and variant fallback remain unchanged.
 
 UpstreamResult is returned to handlers, which format the response per agent type:
   - CC (_cc): Anthropic format conversion
-  - OpenClaw/OpenCode/Hermes (_ol/_oc/_hm): OpenAI format passthrough
+  - OpenClaw/OpenCode (_ol/_oc): OpenAI format passthrough
   - Codex (_cx): Responses API format conversion (via codex module)
 """
 import json

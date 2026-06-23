@@ -76,14 +76,14 @@ SYNC_MAP=(
     "configs/litellm-nv/config-k4.yaml:litellm-nv/config-k4.yaml"
     "configs/litellm-nv/config-k5.yaml:litellm-nv/config-k5.yaml"
 
-    # R37: NV HM LiteLLM containers (41101-41105, 4 dep each: kimi/glm/minimax/deepseek)
+    # R38: NV HM LiteLLM (41101-41105, per-key mihomo proxy for NV API)
     "configs/litellm-nv-hm/config-k1.yaml:litellm-nv-hm/config-k1.yaml"
     "configs/litellm-nv-hm/config-k2.yaml:litellm-nv-hm/config-k2.yaml"
     "configs/litellm-nv-hm/config-k3.yaml:litellm-nv-hm/config-k3.yaml"
     "configs/litellm-nv-hm/config-k4.yaml:litellm-nv-hm/config-k4.yaml"
     "configs/litellm-nv-hm/config-k5.yaml:litellm-nv-hm/config-k5.yaml"
 
-    # R37: Hermes专用 NV proxy (hm40006)
+    # R38: Hermes NV proxy (hm40006) — external endpoint for Hermes agent
     "configs/proxy/hm-proxy/Dockerfile:proxy/hm-proxy/Dockerfile"
     "configs/proxy/hm-proxy/gateway_main.py:proxy/hm-proxy/gateway_main.py"
     "configs/proxy/hm-proxy/gateway/__init__.py:proxy/hm-proxy/gateway/__init__.py"

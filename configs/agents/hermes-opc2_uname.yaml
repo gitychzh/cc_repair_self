@@ -1,20 +1,38 @@
-# Hermes (opc2_uname) 配置模板 — 通过 passthrough proxy gateway (40003) 路由
-# R35.5: All agents route to glm5.1 backend (dsv4p delisted from ModelScope)
-# _key_changes: 1) base_url 从 40001→40003; 2) default 从 glm5.1_hm→glm5.1_hm (stays glm5.1); 3) context_length 保持 170000
-# 所有 OpenAI agent 必须通过 passthrough proxy gateway (40003)，不能直连 LiteLLM
-# 原因: LiteLLM 的 model_list 只有 v×k 路由名(glm5.1v1k1~v10k7)，没有 glm5.1 别名
-# Proxy gateway 做: model name映射(glm5.1_hm→glm5.1→v×k routing) + error cycling + variant fallback
-# Fallback功能暂时去掉
+# Hermes (opc2_uname) 参考配置模板 — R38
+#
+# ⚠️ 这是参考模板，不是 Hermes 的实际运行配置！
+# Hermes 实际配置在 ~/.hermes/config.yaml，由 Hermes 自己管理（hermes config edit / hermes config set）
+# cc-infra 只提供 API endpoint，不管理 Hermes 的 provider/fallback/routing。
+#
+# R38: Hermes 是独立全局安装的外部 app，不属于 cc-infra 项目。
+# cc-infra 提供两个 endpoint：
+#   - 40006: NV-only (kimi/glm/minimax/deepseek, 5 key sequential RR)
+#   - 40003: MS-only fallback (glm5.1_hm → glm5.1 → v×k routing)
+# Hermes 自己选择 primary/fallback provider。
+#
+# 当前 ~/.hermes/config.yaml 实际配置：
+#   model.base_url = http://127.0.0.1:40006/v1 (NV primary)
+#   model.default = kimi_hm
+#   fallback_providers = [litellm-local-ms] (MS fallback via 40003)
+#   model_aliases: kimi→40006, glm→40006, glm5.1→40006
 
 model:
-  base_url: http://127.0.0.1:40003/v1
-  default: glm5.1_hm
-  provider: proxy-gateway
+  base_url: http://127.0.0.1:40006/v1
+  default: kimi_hm
+  provider: litellm-nv-hm
   context_length: 170000
 providers:
-  proxy-gateway:
+  litellm-nv-hm:
+    api_key: sk-litellm-local
+    base_url: http://127.0.0.1:40006/v1
+    default_model: kimi_hm
+    name: NV HM Proxy (40006)
+    transport: openai_chat
+  litellm-local-ms:
     api_key: sk-litellm-local
     base_url: http://127.0.0.1:40003/v1
     default_model: glm5.1_hm
-    name: Proxy Gateway 40003 (Hermes → glm5.1)
+    name: MS Baseline (40003)
     transport: openai_chat
+fallback_providers:
+- litellm-local-ms

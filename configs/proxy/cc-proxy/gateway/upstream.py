@@ -19,7 +19,7 @@ R33.2: NV direct API — no NV LiteLLM containers. cc-proxy calls NVIDIA API dir
 
 UpstreamResult is returned to handlers, which format the response per agent type:
   - CC (_cc): Anthropic format conversion
-  - OpenClaw/OpenCode/Hermes (_ol/_oc/_hm): OpenAI format passthrough
+  - OpenClaw/OpenCode (_ol/_oc): OpenAI format passthrough
   - Codex (_cx): Responses API format conversion (via codex module)
 """
 import json

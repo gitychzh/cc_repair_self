@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""HTTP handler for Hermes NV proxy — R37.
+"""HTTP handler for Hermes NV proxy — R38.
 
+Routes through LiteLLM containers (41101-41105) instead of direct NV API tunnel.
 Only serves /v1/chat/completions (OpenAI format, Hermes agent).
 NV-only routing — no MS (ModelScope) interleaving.
 MSG-FIX: messages ending with assistant → append user "Continue."
-NV unsupported params strip.
+LiteLLM handles NV unsupported params strip (drop_params: true).
 """
 import http.server
 import json
@@ -17,13 +18,13 @@ import socket
 import urllib.parse
 
 from .config import (
-    NV_NUM_KEYS, NV_ENABLED,
+    HM_NUM_KEYS, HM_LITELLM_URLS,
     NV_MODEL_IDS, DEFAULT_NV_MODEL, MODEL_MAP, detect_nv_model,
     PROXY_ROLE, LISTEN_PORT,
     MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
 )
 from .logger import _log, _log_metrics, _log_error_detail
-from .upstream import execute_nv_request, UpstreamResult
+from .upstream import execute_litellm_request, UpstreamResult
 from .error_mapping import format_nv_all_keys_exhausted, format_nv_error_upstream
 
 
@@ -34,8 +35,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {
                 "status": "ok",
                 "proxy_role": PROXY_ROLE,
-                "nv_enabled": NV_ENABLED,
-                "nv_num_keys": NV_NUM_KEYS,
+                "hm_num_keys": HM_NUM_KEYS,
+                "hm_litellm_urls": len(HM_LITELLM_URLS),
                 "port": LISTEN_PORT,
             })
         elif parsed.path in ("/v1/models", "/models"):
@@ -110,9 +111,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Detect NV model from frontend model name
         mapped_model = detect_nv_model(request_model)
         nv_model_id = NV_MODEL_IDS.get(mapped_model, DEFAULT_NV_MODEL)
-        metrics["mapped_model"] = mapped_model
-
-        # Input chars estimation
+        metrics["mapped_model"] = mapped_model        # Input chars estimation
         json_chars = len(json.dumps(body))
         metrics["total_input_chars"] = json_chars
 
@@ -131,8 +130,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if is_stream and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
-        # ─── Execute NV-only request ───
-        result = execute_nv_request(self, body, mapped_model, request_id, metrics, t_start)
+        # ─── Execute request via LiteLLM ───
+        result = execute_litellm_request(self, body, mapped_model, request_id, metrics, t_start)
 
         if not result.success:
             # ─── Error handling ───

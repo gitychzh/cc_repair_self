@@ -7,7 +7,7 @@ Anthropic error types (for CC):
   - rate_limit_error → CC retries with backoff
   - api_error → CC retries (server error, recoverable)
 
-OpenAI error format (for OpenClaw/OpenCode/Hermes):
+OpenAI error format (for OpenClaw/OpenCode):
   - {"error": {"message": "...", "type": "...", "code": "..."}}
   - Types: rate_limit_error, invalid_request_error, server_error, authentication_error
   - Codes: "429", "400", "502", "401"

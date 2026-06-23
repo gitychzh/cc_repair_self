@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006).
+"""Configuration for Hermes NV proxy (hm40006) — R38.
 
-All configurable parameters are read from env vars with defaults.
-This proxy is NV-only — no MS (ModelScope) routing.
-Hermes agent uses OpenAI format (/v1/chat/completions).
+R38: hm40006 now routes through LiteLLM containers (41101-41105) instead of
+direct HTTPS CONNECT tunnel to NV API. Each LiteLLM container has its own
+per-key mihomo proxy (7894-7899) configured at the container level via
+HTTPS_PROXY env var, ensuring IP diversity.
 
-R37: 5 NV keys in sequential round-robin with persistent counter.
-Per-key proxy URL via NV_PROXY_URL_MAP for IP diversity.
+Chain: Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
+hm40006 does: model name mapping + 5-key sequential RR + MSG-FIX + throttle
+LiteLLM does: NV API call (with drop_params for unsupported params)
 """
 import os
 import sys
@@ -27,35 +29,22 @@ PROXY_ROLE = os.environ.get("PROXY_ROLE", "passthrough")
 # ─── Logging ──────────────────────────────────────────────────────────────
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 
-# ─── NV (NVIDIA) direct API tunnel ──────────────────────────────────────────
-NV_BASEURL = os.environ.get("NV_BASEURL", "https://integrate.api.nvidia.com/v1")
-NV_NUM_KEYS = int(os.environ.get("NV_NUM_KEYS", "5"))
-NV_KEYS = []
-for i in range(1, NV_NUM_KEYS + 1):
-    key = os.environ.get(f"NV_KEY{i}", "")
-    if key:
-        NV_KEYS.append(key)
-NV_TIMEOUT = int(os.environ.get("NV_TIMEOUT", "40"))
-NV_ENABLED = bool(NV_BASEURL and NV_KEYS)
+# ─── LiteLLM upstream URLs (R38) ───────────────────────────────────────────
+# 5 LiteLLM containers, each on its own port with per-key mihomo proxy
+# Key1 → 41101 (mihomo 7894), Key2 → 41102 (mihomo 7895), etc.
+HM_LITELLM_URLS = []
+for i in range(1, 6):
+    url = os.environ.get(f"HM_LITELLM_URL{i}", "")
+    if url:
+        HM_LITELLM_URLS.append(url)
+HM_NUM_KEYS = len(HM_LITELLM_URLS)  # Should be 5
+HM_LITELLM_KEY = os.environ.get("HM_LITELLM_KEY", "sk-litellm-local")
 
-# Per-key proxy URL map — each NV key routes through a different mihomo port
-# for IP diversity. Format: JSON {"0":"host.docker.internal:7894","1":"7895",...}
-NV_PROXY_URL_MAP_RAW = os.environ.get("NV_PROXY_URL_MAP", "")
-NV_PROXY_URL_MAP = {}
-if NV_PROXY_URL_MAP_RAW:
-    try:
-        NV_PROXY_URL_MAP = json.loads(NV_PROXY_URL_MAP_RAW)
-        # Ensure all values have http:// prefix
-        for k, v in NV_PROXY_URL_MAP.items():
-            if not v.startswith("http"):
-                NV_PROXY_URL_MAP[k] = f"http://{v}"
-    except json.JSONDecodeError:
-        print(f"[HM-CONFIG] WARN: NV_PROXY_URL_MAP parse error: {NV_PROXY_URL_MAP_RAW}", file=sys.stderr, flush=True)
-
-NV_PROXY_URL = os.environ.get("NV_PROXY_URL", "")  # Fallback single proxy
+if HM_NUM_KEYS < 5:
+    print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} LiteLLM URLs configured (expected 5)", file=sys.stderr, flush=True)
 
 # ─── NV model IDs on NVIDIA API ──────────────────────────────────────────────
-# 4 models available on NV integrate API, Hermes can choose by model name suffix
+# These map frontend model names to NV model IDs for LiteLLM config naming
 NV_MODEL_IDS = {
     "kimi_hm": "moonshotai/kimi-k2.6",
     "glm5.1_hm": "z-ai/glm-5.1",
@@ -63,7 +52,15 @@ NV_MODEL_IDS = {
     "deepseek_hm": "deepseek-ai/deepseek-v4-pro",
 }
 
-# Default model for Hermes (kimi first as requested)
+# LiteLLM model name pattern: nv{model_short}_k{N}
+# e.g. nvkimi_k1, nvglm5.1_k1, nvminimax_k1, nvdeepseek_k1
+LITELLM_MODEL_MAP = {
+    "kimi_hm": "nvkimi",
+    "glm5.1_hm": "nvglm5.1",
+    "minimax_hm": "nvminimax",
+    "deepseek_hm": "nvdeepseek",
+}
+
 DEFAULT_NV_MODEL = "moonshotai/kimi-k2.6"
 
 # ─── Agent suffix for Hermes ──────────────────────────────────────────────
@@ -73,7 +70,7 @@ AGENT_SUFFIXES = {
 DEFAULT_AGENT_SUFFIX = "_hm"
 
 # ─── Model name mapping ──────────────────────────────────────────────────
-# Frontend model names → NV model IDs
+# Frontend model names → internal NV model keys
 MODEL_MAP = {
     # Hermes suffix models
     "kimi_hm": "kimi_hm",
@@ -95,15 +92,23 @@ MODEL_MAP = {
 }
 
 def detect_nv_model(model_id: str) -> str:
-    """Detect NV model ID from frontend model name.
+    """Detect NV model key from frontend model name.
 
     Returns: internal NV model key (kimi_hm/glm5.1_hm/minimax_hm/deepseek_hm)
-    Falls back to DEFAULT_NV_MODEL.
+    Falls back to kimi_hm.
     """
     mapped = MODEL_MAP.get(model_id, None)
     if mapped and mapped in NV_MODEL_IDS:
         return mapped
     return "kimi_hm"  # Default = kimi
+
+def litellm_model_name(mapped_model: str, key_idx: int) -> str:
+    """Build LiteLLM model name for key_idx (0-based).
+
+    e.g. mapped_model="kimi_hm", key_idx=0 → "nvkimi_k1"
+    """
+    prefix = LITELLM_MODEL_MAP.get(mapped_model, "nvkimi")
+    return f"{prefix}_k{key_idx + 1}"
 
 # ─── Token estimation ──────────────────────────────────────────────────────
 CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.0"))
@@ -172,11 +177,11 @@ def _next_hm_nv_key() -> int:
     Persistent counter — restart/power loss does NOT reset position.
     Every increment is immediately atomic persisted to rr_counter.json.
 
-    Returns: 0-based key index (0..NV_NUM_KEYS-1)
+    Returns: 0-based key index (0..HM_NUM_KEYS-1)
     """
     with _vk_rr_lock:
         counter = _vk_rr_counter.get("hm_nv", 0)
-        key_idx = counter % NV_NUM_KEYS
+        key_idx = counter % HM_NUM_KEYS
         _vk_rr_counter["hm_nv"] = counter + 1
         _save_rr_counter()  # Immediate persist — survive power loss
         return key_idx
