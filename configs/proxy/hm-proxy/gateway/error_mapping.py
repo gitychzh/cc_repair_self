@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Error format conversion for Hermes NV proxy — OpenAI format — R38.6.
+"""Error format conversion for Hermes NV proxy — OpenAI format — R38.7.
 
+R38.7: deepseek restored as tier 3, 3-tier fallback chain.
 R38.4: _hm_nv dual suffix for model tiers.
 Handles multi-tier fallback failures with comprehensive error messages.
 """

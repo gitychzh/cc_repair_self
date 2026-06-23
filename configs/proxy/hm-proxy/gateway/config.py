@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """Configuration for Hermes NV proxy (hm40006) — R38.7.
 
-R38.7: 2-tier fallback (glm5.1→kimi, deepseek REMOVED).
-       Data evidence: 5/5 NV keys all 30s+ timeout on deepseek-v4-flash — zero success.
-R38.3→R38.4: Naming convention — dual suffix: agent_source + api_source.
-       _hm_nv = Hermes + NVIDIA API (40006 hm-proxy, routed via LiteLLM → mihomo → US proxy)
-       _hm_ms = Hermes + ModelScope API (40003 passthrough, ModelScope direct)
-       Other agents: _cc (CC+MS), _ol (OpenClaw+MS), _oc (OpenCode+MS), _cx (Codex+MS)
-       sock.settimeout() added for read timeout (R36.2 lesson applied to hm-proxy).
-
-Example: glm5.1_hm_nv (Hermes→NV), glm5.1_hm_ms (Hermes→MS) — explicit agent+API distinction.
-Hermes uses _hm_nv by default (primary=NV), falls back to _hm_ms via 40003 (MS).
+R38.7: 3-tier fallback restored (glm5.1→kimi→deepseek).
+       Data evidence: nv_proxy_selector reselected better nodes → deepseek 3/5 keys now
+       succeed (was 0/5 in R38.6 due to stale Hysteria2 nodes). Restoring as tier 3
+       gives an extra safety net when glm5.1+kimi both fail.
+       TIER_TIMEOUT_BUDGET_S 90→60s: glm5.1 avg=20.8s max=38.2s → 60s budget allows
+       1 timeout(45s) + 1 retry window(15s). 90s was too generous (2 timeouts wasted).
+R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:close.
+R38.3→R38.4: Dual suffix — _hm_nv (Hermes+NV) / _hm_ms (Hermes+MS).
 
 Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
 Chain: Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
-hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 2-tier fallback
-LiteLLM does: NV API call (with drop_params for unsupported params)
+hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
+LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s)
 """
 import os
 import sys
@@ -53,39 +51,40 @@ HM_LITELLM_KEY = os.environ.get("HM_LITELLM_KEY", "sk-litellm-local")
 if HM_NUM_KEYS < 5:
     print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} LiteLLM URLs configured (expected 5)", file=sys.stderr, flush=True)
 
-# ─── Three-tier fallback model chain (R38.2→R38.4) ─────────────────────────
+# ─── Three-tier fallback model chain (R38.2→R38.4→R38.7) ─────────────────────
+# R38.7: deepseek_hm_nv RESTORED as tier 3 fallback.
+# Data evidence: After nv_proxy_selector reselected better nodes, deepseek-v4-pro
+# succeeded on 3/5 ports (7894=1.3s, 7896=6.7s, 7897=3.4s) + 4/5 LiteLLM containers.
+# R38.6 removal was correct at the time (0/5 success due to stale Hysteria2 nodes).
+# R38.7 restoration: node reselection fixed the root cause. deepseek ~60% success rate
+# is acceptable as tier 3 — only tried when glm5.1+kimi both fail.
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# Priority order: glm5.1 (primary) → kimi (fallback 1)
-# R38.6: deepseek_hm_nv REMOVED from fallback chain.
-# Data evidence: 5/5 LiteLLM containers tested nvdeepseek_k1~k5 → all 30s timeout.
-# NV API deepseek-v4-pro is completely unreachable (30s+ timeout on every request).
-# Keeping deepseek in chain wasted 225s per request (5 keys × 45s) with zero success.
-# deepseek config entries preserved in NV_MODEL_IDS/LITELLM_MODEL_MAP for future re-enablement
-# if NV API restores deepseek-v4-pro availability.
-NV_MODEL_TIERS = ["glm5.1_hm_nv", "kimi_hm_nv"]
+# Priority order: glm5.1 (primary) → kimi (fallback 1) → deepseek (fallback 2)
+NV_MODEL_TIERS = ["glm5.1_hm_nv", "kimi_hm_nv", "deepseek_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
     "kimi_hm_nv": "moonshotai/kimi-k2.6",
-    "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",  # preserved but not in tiers
+    "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",
 }
 
 # LiteLLM model name pattern: nv{model_short}_k{N}
 LITELLM_MODEL_MAP = {
     "glm5.1_hm_nv": "nvglm5.1",
     "kimi_hm_nv": "nvkimi",
-    "deepseek_hm_nv": "nvdeepseek",  # preserved but not in tiers
+    "deepseek_hm_nv": "nvdeepseek",
 }
 
 DEFAULT_NV_MODEL = "glm5.1_hm_nv"  # R38.4: _hm_nv dual suffix, glm5.1 as primary
 
-# ─── Tier timeout budget (R38.6) ────────────────────────────────────────────
+# ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
 # Maximum time to spend on ONE tier before giving up and moving to next tier.
 # Prevents cumulative timeout stacking (5 keys × 45s = 225s worst case per tier).
-# Data: NV glm5.1 p95 < 30s, kimi p95 < 25s, direct test shows 2-5s success.
-# With sock.settimeout(45) now working correctly, 90s budget allows ~2 timeout retries
-# per tier, which is reasonable. If 2 keys timeout, the tier is likely broken anyway.
-TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "90"))
+# R38.7: 90→60s. Data: NV glm5.1 avg=20.8s max=38.2s. 60s budget allows:
+#   - 1 timeout (45s) + 1 retry window (15s) → 2nd key only needs 6-15s to succeed
+#   - If 1 key already timed out 45s, the tier is likely broken; 60s forces quick exit
+#   - 90s was too generous: 2 timeouts wasted 90s before budget kicked in
+TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "60"))
 
 # ─── Agent suffix ──────────────────────────────────────────────────────────
 # R38.4: Dual suffix — _hm_nv (Hermes + NV), _hm_ms (Hermes + MS)

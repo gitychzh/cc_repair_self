@@ -399,17 +399,15 @@ services:
     logging: *logging
 
 
-  # ─── R38.6: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
+  # ─── R38.7: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
   # Hermes → 40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
   # 5-key sequential round-robin via LiteLLM containers, persistent counter
   # MSG-FIX, LiteLLM handles drop_params for NV unsupported params
   # Physically isolated from cc/codex/passthrough — builds from proxy/hm-proxy/
-  # R38.6 critical fixes:
-  # - sock.settimeout() BEFORE getresponse() (was AFTER → caused infinite read timeout)
-  # - deepseek removed from fallback chain (NV API deepseek-v4-pro all 30s timeout, 5/5 fail)
-  # - Tier timeout budget (TIER_TIMEOUT_BUDGET_S=90s caps per-tier cumulative time)
-  # - Attempt range HM_NUM_KEYS*2=10 → HM_NUM_KEYS+2=7 (reduce worst case)
-  # - KEY_COOLDOWN_S 30→15, MIN_OUTBOUND_INTERVAL_S 3.5→1.5 (data-driven tuning)
+  # R38.7 changes (data-driven):
+  # - deepseek RESTORED as tier 3 fallback (3/5 ports succeed after nv_proxy_selector reselected nodes)
+  # - TIER_TIMEOUT_BUDGET_S 90→60s (glm5.1 avg=20.8s → 60s allows 1 timeout + 1 retry window)
+  # R38.6 critical fixes preserved: sock.settimeout() BEFORE getresponse(), Connection:close
   hm40006:
     build:
       context: ./proxy/hm-proxy
@@ -420,11 +418,11 @@ services:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
       PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "45"  # R38.5→R38.6: unchanged; NV glm5.1 p95<30s, kimi p95<25s; sock.settimeout now works correctly
-      TIER_TIMEOUT_BUDGET_S: "90"  # R38.6: per-tier cumulative time cap (5 keys × 45s worst → 90s budget stops early)
+      UPSTREAM_TIMEOUT: "45"  # unchanged; NV glm5.1 max=38.2s needs 45s buffer; sock.settimeout works correctly
+      TIER_TIMEOUT_BUDGET_S: "60"  # R38.7: 90→60 (glm5.1 avg=20.8s → 1 timeout(45s) + retry window(15s))
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MIN_OUTBOUND_INTERVAL_S: "1.5"  # R38.6: 3.5→1.5 (5 NV keys each independent RPM=1, throttle only prevents burst)
-      KEY_COOLDOWN_S: "15.0"  # R38.6: 30→15 (NV per-key 429 recovery ~15s, data from burst throttle pattern)
+      MIN_OUTBOUND_INTERVAL_S: "1.5"  # unchanged; 5 NV keys each independent RPM=1
+      KEY_COOLDOWN_S: "15.0"  # unchanged; NV per-key 429 recovery ~15s
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)
       HM_LITELLM_URL1: http://nv_hm_41101:4000/v1
       HM_LITELLM_URL2: http://nv_hm_41102:4000/v1

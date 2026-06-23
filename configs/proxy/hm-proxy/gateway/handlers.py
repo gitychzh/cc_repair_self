@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""HTTP handler for Hermes NV proxy — R38.4.
+"""HTTP handler for Hermes NV proxy — R38.7.
 
-Three-tier fallback: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv (R38.4: _hm_nv dual suffix).
+Three-tier fallback: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv (R38.7: deepseek restored).
 Per-tier 5-key sequential RR with persistent counters.
 MSG-FIX: messages ending with assistant → append user "Continue."
 LiteLLM handles NV unsupported params strip (drop_params: true).

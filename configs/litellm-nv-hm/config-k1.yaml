@@ -1,5 +1,6 @@
 # R38.2: NV HM LiteLLM container for Key1 (port 41101)
 # 3 deployments: nvglm5.1_k1, nvkimi_k1, nvdeepseek_k1
+# R38.7: timeout 60→35 (sync with hm-proxy UPSTREAM_TIMEOUT=45; avoids NV quota waste)
 # R38.2: Removed nvminimax_k1 (minimax removed from HM model tiers)
 model_list:
   - model_name: nvglm5.1_k1
@@ -7,7 +8,7 @@ model_list:
       model: openai/z-ai/glm-5.1
       api_key: os.environ/NV_KEY1
       api_base: os.environ/NV_BASEURL
-      timeout: 60
+      timeout: 35
       drop_params: true
     model_info:
       mode: chat
@@ -18,7 +19,7 @@ model_list:
       model: openai/moonshotai/kimi-k2.6
       api_key: os.environ/NV_KEY1
       api_base: os.environ/NV_BASEURL
-      timeout: 60
+      timeout: 35
       drop_params: true
     model_info:
       mode: chat
@@ -29,7 +30,7 @@ model_list:
       model: openai/deepseek-ai/deepseek-v4-pro
       api_key: os.environ/NV_KEY1
       api_base: os.environ/NV_BASEURL
-      timeout: 60
+      timeout: 35
       drop_params: true
     model_info:
       mode: chat
@@ -46,4 +47,4 @@ router_settings:
 general_settings:
   drop_params: true
   json_logs: true
-  request_timeout: 60
+  request_timeout: 35
