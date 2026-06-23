@@ -121,26 +121,33 @@ if not NV_PROXY_URL_MAP and NV_PROXY_URL:
 # Prevents JSON file from growing indefinitely. 1200000 ≈ 12 slots × 100000 cycles
 NV_MAX_CYCLE = int(os.environ.get("NV_MAX_CYCLE", "1200000"))
 
-# NV model IDs on NVIDIA API — R38.6: 3-tier fallback (glm5.1→kimi→deepseek)
+# NV model IDs on NVIDIA API — R38.7: 2-tier fallback (glm5.1→kimi, deepseek REMOVED)
 # When NV last-resort triggers (MS all-429), tries each tier in order.
 # Each tier tries all 5 NV keys (per-tier RR, persistent counter).
 # Tier all-429/empty-200 → next tier. All tiers fail → ABORT-NO-FALLBACK.
+# R38.7: NV_TIER_TIMEOUT_BUDGET_S caps total NV time at 90s (prevents 450s catastrophic blocking).
 NV_MODEL_IDS = {
     "glm5.1": "z-ai/glm-5.1",
 }
 
-# R38.6: NV 3-tier fallback model list per base model.
-# Tier order: original model → fallback1 → fallback2.
-# Each entry: (nvidia_api_model_id, tier_label)
-# Tested: kimi-k2.6 and deepseek-v4-flash both 200 OK on NV API (2026-06-23).
+# R38.6→R38.7: NV 2-tier fallback model list per base model.
+# deepseek-ai/deepseek-v4-flash REMOVED from NV fallback chain (R38.7).
+# Data evidence: 5/5 NV keys all 30s+ timeout on deepseek-v4-flash — zero success rate.
+# Keeping it wasted 225s per request with zero value.
+# deepseek config entry preserved in NV_MODEL_IDS for future re-enablement if NV API restores it.
 # Can be overridden via NV_FALLBACK_TIERS env var (JSON list of [model_id, label] pairs).
 _NV_FALLBACK_TIERS_DEFAULT = {
     "glm5.1": [
         ("z-ai/glm-5.1",          "glm5.1_nv"),    # Tier 1: original model
         ("moonshotai/kimi-k2.6",  "kimi_nv"),      # Tier 2: kimi fallback (tested OK)
-        ("deepseek-ai/deepseek-v4-flash", "deepseek_nv"),  # Tier 3: deepseek fallback (tested OK)
     ],
 }
+
+# R38.7: NV tier total timeout budget — prevents catastrophic cumulative timeouts.
+# Without this: 5 keys × 30s timeout × 3 tiers = 450s max blocking time.
+# With 90s budget: at most 3 keys × 30s in tier1 + 2-3 keys in tier2 before budget exhausts.
+# Budget is checked BEFORE each key attempt. Exhausted → ABORT immediately, no more tiers.
+NV_TIER_TIMEOUT_BUDGET_S = int(os.environ.get("NV_TIER_TIMEOUT_BUDGET_S", "90"))
 _nv_fallback_tiers_env = os.environ.get("NV_FALLBACK_TIERS", "")
 if _nv_fallback_tiers_env:
     try:

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006) — R38.3.
+"""Configuration for Hermes NV proxy (hm40006) — R38.7.
 
-R38.2: Three-tier fallback routing: glm5.1 → kimi → deepseek.
+R38.7: 2-tier fallback (glm5.1→kimi, deepseek REMOVED).
+       Data evidence: 5/5 NV keys all 30s+ timeout on deepseek-v4-flash — zero success.
 R38.3→R38.4: Naming convention — dual suffix: agent_source + api_source.
        _hm_nv = Hermes + NVIDIA API (40006 hm-proxy, routed via LiteLLM → mihomo → US proxy)
        _hm_ms = Hermes + ModelScope API (40003 passthrough, ModelScope direct)
        Other agents: _cc (CC+MS), _ol (OpenClaw+MS), _oc (OpenCode+MS), _cx (Codex+MS)
-       deepseek-v4-pro restored (tested via direct/US proxy/SG proxy — all OK;
-       previous failures were transient mihomo proxy connection issues, not model).
        sock.settimeout() added for read timeout (R36.2 lesson applied to hm-proxy).
 
 Example: glm5.1_hm_nv (Hermes→NV), glm5.1_hm_ms (Hermes→MS) — explicit agent+API distinction.
@@ -18,7 +17,7 @@ Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
 Chain: Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
-hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
+hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 2-tier fallback
 LiteLLM does: NV API call (with drop_params for unsupported params)
 """
 import os

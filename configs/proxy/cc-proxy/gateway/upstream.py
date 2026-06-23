@@ -36,7 +36,7 @@ from .config import (
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     NV_BASEURL, NV_NUM_KEYS, NV_KEYS, NV_PROXY_URL, NV_ENABLED, NV_MODEL_IDS,
     NV_TIMEOUT, NV_PROXY_URL_MAP,
-    NV_FALLBACK_TIERS,
+    NV_FALLBACK_TIERS, NV_TIER_TIMEOUT_BUDGET_S,
     MS_NV_TOTAL_SLOTS,
     _next_variant_key_pair, _next_nv_tier_key,
     throttle_outbound, MIN_OUTBOUND_INTERVAL_S,
@@ -410,11 +410,10 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
                          prior_cycle_attempts, is_stream, force_stream):
     """Try NV keys as last-resort fallback when ALL MS keys returned 429.
 
-    R38.6: 3-tier NV model fallback (glm5.1→kimi→deepseek).
-    When MS all-429 triggers NV last-resort:
-      - Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
-      - Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-429/empty-200 →
-      - Tier 3: deepseek (deepseek-ai/deepseek-v4-flash) → all 5 NV keys RR → all-fail → ABORT
+    R38.6→R38.7: 2-tier NV model fallback (glm5.1→kimi, deepseek REMOVED).
+    R38.7: NV_TIER_TIMEOUT_BUDGET_S prevents catastrophic cumulative timeouts.
+      Without budget: 5 keys × 30s × 3 tiers = 450s max blocking.
+      With 90s budget: at most ~3 key timeouts in tier1 + ~2-3 in tier2 before ABORT.
     Per-tier persistent RR counter (continues from last position, not restarting from k1).
     Each tier uses all 5 NV keys — same API key works for all NV models.
 
@@ -426,6 +425,7 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
     result = UpstreamResult()
     result.is_stream = is_stream
     all_nv_cycle_attempts = list(prior_cycle_attempts)
+    nv_budget_s = NV_TIER_TIMEOUT_BUDGET_S if NV_TIER_TIMEOUT_BUDGET_S > 0 else None
 
     # Get fallback tiers for this model
     tiers = NV_FALLBACK_TIERS.get(mapped_model, [])
@@ -438,10 +438,27 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
         tier_all_429 = True  # Track if all keys in this tier returned 429
         tier_all_transient_429 = True  # Track if all are transient (non-quota) 429
 
+        # R38.7: Check timeout budget before starting each tier
+        elapsed_s = time.time() - t_start
+        if nv_budget_s is not None and elapsed_s >= nv_budget_s:
+            _log("NV-BUDGET-EXHAUSTED", f"NV tier timeout budget ({nv_budget_s}s) exhausted after "
+                                         f"{int(elapsed_s)}s — skipping tier {tier_idx+1} ({tier_label}) "
+                                         f"and remaining tiers, ABORT immediately")
+            break  # Budget exhausted → no more tiers
+
         _log("NV-TIER", f"Tier {tier_idx+1}/{len(tiers)}: model={nv_api_model} label={tier_label} "
-                        f"(trying {NV_NUM_KEYS} keys with per-tier RR)")
+                        f"(trying {NV_NUM_KEYS} keys with per-tier RR, "
+                        f"budget_remaining={int(nv_budget_s - elapsed_s) if nv_budget_s else 'unlimited'}s)")
 
         for attempt_idx in range(NV_NUM_KEYS):
+            # R38.7: Check timeout budget before each key attempt
+            elapsed_s = time.time() - t_start
+            if nv_budget_s is not None and elapsed_s >= nv_budget_s:
+                _log("NV-BUDGET-EXHAUSTED", f"NV budget ({nv_budget_s}s) exhausted after {int(elapsed_s)}s "
+                                             f"during tier {tier_idx+1} ({tier_label}) attempt {attempt_idx+1} "
+                                             f"— stopping key cycling, ABORT")
+                break  # Budget exhausted → stop cycling keys
+
             # Per-tier persistent RR: continue from last position
             nv_key_idx = _next_nv_tier_key(mapped_model, tier_idx)
             nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)

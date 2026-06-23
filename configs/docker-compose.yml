@@ -240,10 +240,14 @@ services:
       NV_PROXY_URL: http://host.docker.internal:7894
       NV_PROXY_URL_MAP: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895","2":"http://host.docker.internal:7896","3":"http://host.docker.internal:7897","4":"http://host.docker.internal:7899"}'
       NV_MAX_CYCLE: "1200000"
-      # R38.6: NV 3-tier fallback models (glm5.1→kimi→deepseek) when NV last-resort triggers.
-      # Each tier tries all 5 NV keys with per-tier persistent RR. All keys fail → next tier.
-      # Format: JSON list of [nvidia_api_model_id, tier_label] pairs.
-      NV_FALLBACK_TIERS: '[["z-ai/glm-5.1","glm5.1_nv"],["moonshotai/kimi-k2.6","kimi_nv"],["deepseek-ai/deepseek-v4-flash","deepseek_nv"]]'
+      # R38.6→R38.7: NV 2-tier fallback (glm5.1→kimi). deepseek REMOVED from NV fallback chain.
+      # Data evidence (06-23): deepseek-ai/deepseek-v4-flash 5/5 keys all 30s+ timeout on NV API.
+      # Keeping deepseek wasted 225s per request (5 keys × 45s) with zero success.
+      # NV_TIER_TIMEOUT_BUDGET_S: total time budget for all NV tiers (R38.7).
+      # Prevents catastrophic cumulative timeouts: 5 keys × 30s × 3 tiers = 450s → now capped at 90s.
+      # Each tier gets a share of the remaining budget. Budget exhausted → ABORT immediately.
+      NV_FALLBACK_TIERS: '[["z-ai/glm-5.1","glm5.1_nv"],["moonshotai/kimi-k2.6","kimi_nv"]]'
+      NV_TIER_TIMEOUT_BUDGET_S: "90"
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
