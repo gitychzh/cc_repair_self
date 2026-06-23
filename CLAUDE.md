@@ -31,17 +31,17 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   也接受 _hm (glm5.1_hm) 作为 Hermes MS fallback endpoint
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy             → _hm /v1/chat/completions → LiteLLM 41101-41105 (5-key sequential RR)
+:40006  hm-proxy             → _hm /v1/chat/completions → LiteLLM 41101-41105 (3-tier fallback, per-tier 5-key RR)
+  默认 glm5.1_hm → 5 key sequential RR → 全429/空200 → fallback kimi_hm → 全429/空200 → fallback deepseek_hm → 全失败 → ABORT
+  fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
-  k1→41101(7894), k2→41102(7895), k3→41103(7896), k4→41104(7897), k5→41105(7899)
   LiteLLM 配置 drop_params=true 自动 strip NV unsupported params
   MSG-FIX: messages 以 assistant 结尾 → append user "Continue."
-  NV success → return; NV all fail → ABORT (Hermes 自己 fallback 到 40003 MS)
-  NV_MODEL_IDS: kimi_hm/glm5.1_hm/minimax_hm/deepseek_hm (4 NV models)
+  NV_MODEL_IDS: glm5.1_hm/kimi_hm/deepseek_hm (3 NV models, minimax removed R38.2)
   Hermes agent: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
-→ :41101-41105 LiteLLM ms_nv_hm_4110X (4 NV model dep each, per-key mihomo proxy → NV API)
+→ :41101-41105 LiteLLM ms_nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 (region-divided url-test, tolerance=0) → NVIDIA integrate API
 ```
 
@@ -54,7 +54,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 ## Agent Suffix System（R23.1, R29, R38）
 
 - **cc-infra 核心 suffix**：`glm5.1_cc`(Anthropic) / `glm5.1_cx`(Responses/Codex) / `glm5.1_ol`(OpenClaw) / `glm5.1_oc`(OpenCode)
-- **外部 app suffix**：`glm5.1_hm`(Hermes) — 仅在 40003(passthrough, MS fallback) 和 40006(hm-proxy, NV-only) 中生效。cc-proxy 和 codex-proxy 已移除 _hm（R38）。
+- **外部 app suffix**：`glm5.1_hm`(Hermes) / `kimi_hm` / `deepseek_hm` — 仅在 40003(passthrough, MS fallback) 和 40006(hm-proxy, NV 3-tier fallback) 中生效。cc-proxy 和 codex-proxy 已移除 _hm（R38）。minimax_hm 已移除（R38.2）。
 - 向后兼容：`glm5.1`=glm5.1_cc, `claude-opus-4-8`=glm5.1_cc, `glm5.1_ol`=glm5.1_ol
 
 ## Variant×Key 2D Round-Robin + Error Cycling（R21→R31.9）
@@ -164,7 +164,7 @@ configs/
   docker-compose.yml          # Docker 编排（R38.1: 13 containers, HM LiteLLM routes via hm40006）
   .env.template
   litellm-glm51/config.yaml   # 41001 LiteLLM（70 glm5.1 = 70 dep）
-  litellm-nv-hm/config-k1~k5.yaml # 41101-41105 NV HM LiteLLM（4 dep each, per-key mihomo proxy）
+  litellm-nv-hm/config-k1~k5.yaml # 41101-41105 NV HM LiteLLM（3 dep each: glm5.1/kimi/deepseek, per-key mihomo proxy）
   mihomo/config-opc_uname.yaml # opc_uname mihomo 代理配置（7894-7899=♻️US-NV-K1~K5, 7880=mixed）
   mihomo/config-opc2_uname.yaml # opc2_uname mihomo 配置
   postgres/init-db.sh

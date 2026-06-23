@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.1, 2026-06-23)
+# Deploy Status — opc_uname + opc2_uname (R38.2, 2026-06-23)
 
-## Architecture (R38.1)
+## Architecture (R38.2)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
@@ -20,19 +20,20 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   _hm suffix retained for Hermes MS fallback endpoint
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _hm /v1/chat/completions → LiteLLM 41101-41105 (5-key sequential RR)
+:40006  hm-proxy → _hm /v1/chat/completions → LiteLLM 41101-41105 (3-tier fallback, per-tier 5-key RR)
+  默认 glm5.1_hm → 全429/空200 → fallback kimi_hm → 全429/空200 → fallback deepseek_hm → 全失败 → ABORT
+  fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
-  k1→41101(7894), k2→41102(7895), k3→41103(7896), k4→41104(7897), k5→41105(7899)
   LiteLLM drop_params=true 自动 strip NV unsupported params
-  NV_MODEL_IDS: kimi_hm/glm5.1_hm/minimax_hm/deepseek_hm
+  NV_MODEL_IDS: glm5.1_hm/kimi_hm/deepseek_hm (3 models, minimax removed R38.2)
   Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
-→ :41101-41105 LiteLLM ms_nv_hm_4110X (4 NV model dep each, per-key mihomo proxy → NV API)
+→ :41101-41105 LiteLLM ms_nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API
 ```
 
-## Containers (R38.1: 7 core + 1 external + 5 HM LiteLLM = 13 total)
+## Containers (R38.2: 7 core + 1 external + 5 HM LiteLLM = 13 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
@@ -42,11 +43,11 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
 | hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | Routes to LiteLLM 41101-41105 → NV API |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
-| ms_nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | In-memory, per-key 7894 proxy → NV API |
-| ms_nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | In-memory, per-key 7895 proxy → NV API |
-| ms_nv_hm_41103 | :41103 | LiteLLM NV HM K3 | 1CPU/1GiB | In-memory, per-key 7896 proxy → NV API |
-| ms_nv_hm_41104 | :41104 | LiteLLM NV HM K4 | 1CPU/1GiB | In-memory, per-key 7897 proxy → NV API |
-| ms_nv_hm_41105 | :41105 | LiteLLM NV HM K5 | 1CPU/1GiB | In-memory, per-key 7899 proxy → NV API |
+| ms_nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7894 proxy |
+| ms_nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7895 proxy |
+| ms_nv_hm_41103 | :41103 | LiteLLM NV HM K3 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7896 proxy |
+| ms_nv_hm_41104 | :41104 | LiteLLM NV HM K4 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7897 proxy |
+| ms_nv_hm_41105 | :41105 | LiteLLM NV HM K5 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7899 proxy |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
 ## R38 Changes (opc_uname, 2026-06-23) — Hermes 重新工程化
@@ -105,3 +106,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R37: Hermes专用 NV proxy hm40006 + 5 NV HM LiteLLM (41101-41105, DATABASE_URL bug, not working)
 - R38: Hermes 重新工程化 — hm40006 路由到 LiteLLM 41101-41105 + per-key mihomo + STORE_MODEL_IN_DB=False + 清理 _hm suffix
 - R38.1: 清除冗余 ms_nv_41101-41105 monitoring 容器（5个，功能完全被 HM 容器覆盖），18→13容器
+- R38.2: HM 3-tier fallback — minimax removed, glm5.1_hm(primary)→kimi_hm→deepseek_hm, per-tier persistent RR counter, empty-200 detection, fallback从当前位置继续

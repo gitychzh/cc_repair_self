@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""HTTP handler for Hermes NV proxy — R38.
+"""HTTP handler for Hermes NV proxy — R38.2.
 
-Routes through LiteLLM containers (41101-41105) instead of direct NV API tunnel.
-Only serves /v1/chat/completions (OpenAI format, Hermes agent).
-NV-only routing — no MS (ModelScope) interleaving.
+Three-tier fallback: glm5.1 → kimi → deepseek (R38.2).
+Per-tier 5-key sequential RR with persistent counters.
 MSG-FIX: messages ending with assistant → append user "Continue."
 LiteLLM handles NV unsupported params strip (drop_params: true).
+Minimax removed from model tiers.
 """
 import http.server
 import json
@@ -19,7 +19,8 @@ import urllib.parse
 
 from .config import (
     HM_NUM_KEYS, HM_LITELLM_URLS,
-    NV_MODEL_IDS, DEFAULT_NV_MODEL, MODEL_MAP, detect_nv_model,
+    NV_MODEL_IDS, NV_MODEL_TIERS, DEFAULT_NV_MODEL, MODEL_MAP,
+    detect_nv_model, get_tier_index,
     PROXY_ROLE, LISTEN_PORT,
     MODEL_INPUT_TOKEN_SAFETY, DEFAULT_CONTEXT_FALLBACK,
 )
@@ -37,6 +38,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "proxy_role": PROXY_ROLE,
                 "hm_num_keys": HM_NUM_KEYS,
                 "hm_litellm_urls": len(HM_LITELLM_URLS),
+                "hm_model_tiers": NV_MODEL_TIERS,
+                "hm_default_model": DEFAULT_NV_MODEL,
                 "port": LISTEN_PORT,
             })
         elif parsed.path in ("/v1/models", "/models"):
@@ -70,7 +73,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_openai_nv(self):
         """Handle OpenAI-format requests from Hermes agent.
 
-        NV-only routing: 5 key sequential round-robin with persistent counter.
+        R38.2: Three-tier fallback: glm5.1 → kimi → deepseek.
         MSG-FIX: if messages ends with assistant role, append user "Continue."
         """
         t_start = time.time()
@@ -108,15 +111,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["request_model"] = request_model
         metrics["stream"] = is_stream
 
-        # Detect NV model from frontend model name
+        # Detect NV model from frontend model name → determines start tier
         mapped_model = detect_nv_model(request_model)
-        nv_model_id = NV_MODEL_IDS.get(mapped_model, DEFAULT_NV_MODEL)
-        metrics["mapped_model"] = mapped_model        # Input chars estimation
+        metrics["mapped_model"] = mapped_model
+        metrics["start_tier_idx"] = get_tier_index(mapped_model)
+
+        # Input chars estimation
         json_chars = len(json.dumps(body))
         metrics["total_input_chars"] = json_chars
 
-        _log("REQ", f"model={request_model}→{mapped_model}→{nv_model_id} stream={is_stream} "
-                    f"msgs={len(body.get('messages',[]))} agent=_hm")
+        _log("REQ", f"model={request_model}→{mapped_model}→tier_idx={metrics['start_tier_idx']} "
+                    f"stream={is_stream} msgs={len(body.get('messages',[]))} agent=_hm")
 
         # ─── MSG-FIX (R35.10) ───
         messages = body.get("messages", [])
@@ -130,17 +135,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if is_stream and "stream_options" not in body:
             body["stream_options"] = {"include_usage": True}
 
-        # ─── Execute request via LiteLLM ───
+        # ─── Execute request via LiteLLM with three-tier fallback ───
         result = execute_litellm_request(self, body, mapped_model, request_id, metrics, t_start)
 
         if not result.success:
             # ─── Error handling ───
             if result.all_keys_exhausted:
+                # All tiers failed
                 metrics["status"] = 429 if result.all_429 else 502
-                metrics["error_type"] = "all_nv_keys_exhausted"
+                metrics["error_type"] = "all_tiers_exhausted"
                 metrics["duration_ms"] = result.elapsed_ms
-                metrics["key_cycle_attempts"] = len(result.key_cycle_attempts)
-                metrics["key_cycle_details"] = result.key_cycle_attempts
+                metrics["total_cycle_attempts"] = len(result.key_cycle_attempts)
+                metrics["tiers_tried"] = result.fallback_tiers_used
+                metrics["tier_summaries"] = result.tier_attempts
                 _log_metrics(metrics)
 
                 error_payload, client_status = format_nv_all_keys_exhausted(result, mapped_model, request_model)
@@ -150,7 +157,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(client_status, error_payload, extra_headers=extra_hdrs)
                 return
             else:
-                # Non-cycling upstream error
+                # Non-cycling upstream error (400, 401, 403 etc)
                 error_json = result.final_error_json
                 resp_status = result.final_resp_status
                 error_payload, client_status = format_nv_error_upstream(error_json, request_model, resp_status)
@@ -170,16 +177,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         conn = result.conn
         metrics["nv_key_idx"] = result.nv_key_idx
         metrics["litellm_model"] = result.nv_model_label
+        metrics["tier_model"] = result.tier_model
+        metrics["fallback_tiers_used"] = result.fallback_tiers_used
         if result.key_cycle_attempts:
             metrics["key_cycle_429s_before_success"] = len(result.key_cycle_attempts)
             metrics["key_cycle_details"] = result.key_cycle_attempts
+        if result.fallback_tiers_used and len(result.fallback_tiers_used) > 1:
+            metrics["fallback_occurred"] = True
+
+        # Check if body was already cached by _check_empty_200
+        cached_body = getattr(resp, '_hm_cached_body', None)
 
         if is_stream:
             self._stream_openai_passthrough(resp, conn, metrics, t_start, request_model)
         else:
-            # Non-stream: read response, pass through as-is
+            # Non-stream: use cached body if available (from empty-200 check), else read
             ttfb_start = time.time()
-            resp_body = resp.read()
+            if cached_body is not None:
+                resp_body = cached_body
+            else:
+                resp_body = resp.read()
             metrics["status"] = 200
             metrics["duration_ms"] = int((time.time() - t_start) * 1000)
             metrics["ttfb_ms"] = int((ttfb_start - t_start) * 1000)
@@ -316,9 +333,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── /v1/models ───
     def _proxy_models(self):
-        """Return OpenAI-format model list for Hermes."""
+        """Return OpenAI-format model list for Hermes (3 models + aliases)."""
         all_models = []
-        for model_key, nv_model_id in NV_MODEL_IDS.items():
+        # Primary tier models
+        for model_key in NV_MODEL_TIERS:
+            nv_model_id = NV_MODEL_IDS[model_key]
             context_len = MODEL_INPUT_TOKEN_SAFETY.get(model_key, DEFAULT_CONTEXT_FALLBACK)
             all_models.append({
                 "id": model_key,
@@ -328,7 +347,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "context_length": context_len,
             })
         # Also include aliases from MODEL_MAP
-        seen = set(NV_MODEL_IDS.keys())
+        seen = set(NV_MODEL_TIERS)
         for alias, mapped in MODEL_MAP.items():
             if alias not in seen and mapped in NV_MODEL_IDS:
                 seen.add(alias)

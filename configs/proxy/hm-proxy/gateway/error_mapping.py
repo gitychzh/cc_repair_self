@@ -1,42 +1,50 @@
 #!/usr/bin/env python3
-"""Error format conversion for Hermes NV proxy — OpenAI format only.
+"""Error format conversion for Hermes NV proxy — OpenAI format — R38.2.
 
-Hermes uses OpenAI format (/v1/chat/completions), so errors must be:
-  {"error": {"message": "...", "type": "...", "code": "..."}}
-
-Mapping:
-  - All NV 429 → rate_limit_error + code "429" (agent retries with backoff)
-  - NV timeout/connection error → server_error + code "502" (agent retries)
-  - 400 Unsupported parameter → server_error + code "400" (recoverable by strip+retry)
-  - 400 input overflow → invalid_request_error + code "400" (agent stops, not retry)
-  - 400 inappropriate content → invalid_request_error + code "400" (always rejected)
-  - 401/403 auth → authentication_error + code "401"/"403"
-  - Everything else → server_error
+R38.2: Updated to handle multi-tier fallback failures.
+Comprehensive error messages showing which tiers were tried and why each failed.
 """
 import json
 
 
 def format_nv_all_keys_exhausted(result, mapped_model, request_model):
-    """Format all NV keys exhausted error as OpenAI error format."""
-    nv_cycled = ', '.join(['k' + str(a.get('nv_key_idx', 0)+1) for a in result.key_cycle_attempts])
+    """Format all-tiers-exhausted error as OpenAI error format (R38.2).
+
+    Includes detailed info about which tiers were tried and their failure types.
+    """
+    tiers_tried = result.fallback_tiers_used or []
+    tier_summaries = result.tier_attempts or []
+
+    # Build per-tier failure summary
+    tier_details = []
+    for ts in tier_summaries:
+        tier_name = ts.get("tier", "?")
+        n = ts.get("num_attempts", 0)
+        if ts.get("all_429"):
+            tier_details.append(f"{tier_name}: {n}×429")
+        elif ts.get("all_empty_200"):
+            tier_details.append(f"{tier_name}: {n}×empty200")
+        else:
+            tier_details.append(f"{tier_name}: {n}×mixed")
+
+    tier_str = ", ".join(tier_details) if tier_details else "unknown"
+
+    # Classify overall error type
     if result.all_429:
         return {
             "error": {
-                "message": f"All {len(result.key_cycle_attempts)} NV API keys returned 429 errors "
-                           f"for model {mapped_model}. Please retry in a few seconds. "
-                           f"NV keys cycled: {nv_cycled}",
+                "message": f"All NV API tiers exhausted for {mapped_model}. "
+                           f"Tiers tried: [{tier_str}]. Please retry in a few seconds.",
                 "type": "rate_limit_error",
                 "code": "429",
             }
         }, 429
     else:
-        failure_types = [a.get("error_type", "429") for a in result.key_cycle_attempts]
-        timeout_keys = [f"k{a.get('nv_key_idx',0)+1}" for a in result.key_cycle_attempts if a.get("error_type") == "NVSocketTimeout"]
         return {
             "error": {
-                "message": f"All {len(result.key_cycle_attempts)} NV API keys failed for model {mapped_model} "
-                           f"after {result.elapsed_ms/1000:.1f}s. Failure types: {failure_types}. "
-                           f"Timeout keys: {timeout_keys}. Please retry — upstream may recover.",
+                "message": f"All NV API tiers failed for {mapped_model} "
+                           f"after {result.elapsed_ms/1000:.1f}s. "
+                           f"Tiers tried: [{tier_str}]. Please retry — upstream may recover.",
                 "type": "server_error",
                 "code": "502",
             }

@@ -1,17 +1,7 @@
-# R37: NV HM LiteLLM container for Key5 (port 41105)
-# 4 deployments: nvkimi_k5, nvglm5.1_k5, nvminimax_k5, nvdeepseek_k5
+# R38.2: NV HM LiteLLM container for Key5 (port 41105)
+# 3 deployments: nvglm5.1_k5, nvkimi_k5, nvdeepseek_k5
+# R38.2: Removed nvminimax_k5 (minimax removed from HM model tiers)
 model_list:
-  - model_name: nvkimi_k5
-    litellm_params:
-      model: openai/moonshotai/kimi-k2.6
-      api_key: os.environ/NV_KEY5
-      api_base: os.environ/NV_BASEURL
-      timeout: 60
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
   - model_name: nvglm5.1_k5
     litellm_params:
       model: openai/z-ai/glm-5.1
@@ -23,9 +13,9 @@ model_list:
       mode: chat
       max_tokens: 131072
 
-  - model_name: nvminimax_k5
+  - model_name: nvkimi_k5
     litellm_params:
-      model: openai/minimaxai/minimax-m3
+      model: openai/moonshotai/kimi-k2.6
       api_key: os.environ/NV_KEY5
       api_base: os.environ/NV_BASEURL
       timeout: 60

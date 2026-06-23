@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.
+"""Upstream request executor for Hermes NV proxy — R38.2.
 
-R38: Routes through LiteLLM containers (41101-41105) instead of direct
-HTTPS CONNECT tunnel to NV API. Each LiteLLM container has its own per-key
-mihomo proxy (7894-7899) configured at container level via HTTPS_PROXY env var.
+R38.2: Three-tier fallback routing with per-tier persistent RR counters.
+Default tier: glm5.1_hm (5 keys, sequential RR from current position).
+If all 5 keys fail (429 or empty 200) → fallback to kimi_hm tier.
+If kimi tier also all-fail → fallback to deepseek_hm tier.
+If deepseek tier also all-fail → ABORT-NO-FALLBACK.
+
+Each tier continues from its current key position (not from k1).
+Empty 200 detection: choices=null, content=null, empty choices list.
 
 Chain: hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
-hm40006 does: model name mapping + 5-key sequential RR + MSG-FIX + throttle
-LiteLLM does: NV API call (with drop_params for unsupported params)
-
-5-key sequential round-robin with persistent counter.
-On 429/500/502: cycle to next LiteLLM container.
-All 5 containers exhausted → return error to Hermes.
 """
 import json
 import http.client
@@ -21,12 +20,13 @@ import urllib.parse
 
 from .config import (
     HM_LITELLM_URLS, HM_NUM_KEYS, HM_LITELLM_KEY,
-    NV_MODEL_IDS, DEFAULT_NV_MODEL, detect_nv_model, litellm_model_name,
+    NV_MODEL_IDS, NV_MODEL_TIERS, DEFAULT_NV_MODEL, detect_nv_model,
+    get_tier_index, litellm_model_name,
     UPSTREAM_TIMEOUT,
     _next_hm_nv_key,
     throttle_outbound,
 )
-from .logger import _log
+from .logger import _log, _log_metrics, _log_error_detail
 
 
 class UpstreamResult:
@@ -36,67 +36,138 @@ class UpstreamResult:
         # Success fields
         self.resp = None
         self.conn = None
-        self.nv_model_label = ""
+        self.tier_model = ""
         self.nv_key_idx = 0
+        self.nv_model_label = ""
         self.is_stream = False
         self.key_cycle_attempts = []
         self.upstream_type = "nv_litellm"
+        self.tier_attempts = []  # R38.2: per-tier attempt summary
+        self.fallback_tiers_used = []  # R38.2: which tiers were tried
         # Error fields
         self.all_keys_exhausted = False
         self.all_429 = False
+        self.empty_200 = False
         self.elapsed_ms = 0
         self.final_error_json = None
         self.final_resp_status = 0
 
 
 def _make_litellm_conn(litellm_url, timeout=UPSTREAM_TIMEOUT):
-    """Create HTTPConnection to LiteLLM container.
-
-    LiteLLM containers are on the cc-net Docker network, accessible by
-    container name (e.g. ms_nv_hm_41101) on port 4000.
-    """
+    """Create HTTPConnection to LiteLLM container."""
     parsed = urllib.parse.urlparse(litellm_url)
     host = parsed.hostname
     port = parsed.port or 4000
     path_prefix = parsed.path.rstrip("/")
-
     conn = http.client.HTTPConnection(host, port, timeout=timeout)
     return conn, path_prefix
 
 
-def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NV request via LiteLLM containers with 5-key sequential RR.
+def _check_empty_200(resp, key_idx, tier_model, is_stream):
+    """Check if a 200 response is actually empty (no real content).
 
-    R38: Sequential cycling k1→k2→k3→k4→k5→k1...
-    Counter is persistent (rr_counter.json "hm_nv" key).
-    Each key routes to its own LiteLLM container with per-key mihomo proxy.
+    NV API can return 200 with null choices, null content, or empty response.
+    These are treated as failures and trigger key cycling or fallback.
 
-    On 429/500/502: cycle to next LiteLLM container.
-    All 5 containers exhausted → return error to Hermes.
+    For streaming: don't read body (would break stream). Use Content-Length=0
+    as a hint. Stream empty content will be caught in SSE parsing.
+    For non-streaming: read body and check choices/content.
+
+    Returns: True if empty 200, False if valid response.
+    On valid non-stream: sets resp_body on the resp object for later use.
+    """
+    content_length_str = resp.getheader("Content-Length", "-1")
+    transfer_encoding = resp.getheader("Transfer-Encoding", "")
+
+    if is_stream:
+        # Streaming: can't read body. Content-Length=0 is a strong signal.
+        if content_length_str == "0":
+            _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 Content-Length:0 (stream)")
+            return True
+        # Otherwise trust the response — stream will naturally end if empty
+        return False
+
+    # Non-streaming: read and inspect body
+    resp_body = resp.read()
+    # Store body on resp for later retrieval (avoid double-read)
+    resp._hm_cached_body = resp_body
+
+    if not resp_body or len(resp_body) == 0:
+        _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 empty body (0 bytes)")
+        return True
+
+    try:
+        oai_resp = json.loads(resp_body)
+    except (json.JSONDecodeError, ValueError):
+        # Can't parse as JSON — could be garbage, treat as empty
+        _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 unparseable body ({len(resp_body)}b)")
+        return True
+
+    choices = oai_resp.get("choices")
+    # choices is None/null → empty
+    if choices is None:
+        _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 choices=null")
+        return True
+    # choices is empty list → empty
+    if isinstance(choices, list) and len(choices) == 0:
+        _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 choices=[] (empty)")
+        return True
+    # choices[0] is null → empty
+    if isinstance(choices, list) and choices[0] is None:
+        _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 choices[0]=null")
+        return True
+    # choices[0].message.content is null → empty
+    if isinstance(choices, list) and len(choices) > 0:
+        msg = choices[0].get("message")
+        if msg is None:
+            _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 message=null")
+            return True
+        content = msg.get("content")
+        if content is None:
+            _log("HM-EMPTY-200", f"k{key_idx+1} ({tier_model}) → 200 content=null")
+            return True
+
+    # Valid response with real content
+    return False
+
+
+def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
+                   is_stream, prior_cycle_attempts):
+    """Try all 5 keys within one tier, starting from current RR position.
+
+    On 429/500/502: cycle to next key within same tier.
+    On empty 200: cycle to next key within same tier.
+    On other error: report immediately (no cycling).
+
+    Returns: UpstreamResult
+      - success=True: valid response found
+      - success=False, empty_200=True: all keys returned empty 200
+      - success=False, all_429=True: all keys returned 429
+      - success=False: mixed failures within tier
     """
     result = UpstreamResult()
-    result.is_stream = oai_body.get("stream", False)
+    result.is_stream = is_stream
+    result.tier_model = tier_model
+    key_cycle_attempts = list(prior_cycle_attempts)
 
-    # Build LiteLLM request body — replace model name
-    litellm_body = dict(oai_body)
+    nv_model_id = NV_MODEL_IDS[tier_model]
+    _log("HM-TIER", f"Starting tier={tier_model} model={nv_model_id} "
+                    f"(position from rr_counter)")
 
-    # Get starting key from persistent counter
-    start_key_idx = _next_hm_nv_key()
-    key_cycle_attempts = []
-
-    _log("HM-RR", f"start_key=k{start_key_idx+1} model={mapped_model} "
-                  f"(HM_NUM_KEYS={HM_NUM_KEYS}, sequential round-robin via LiteLLM)")
+    # Get starting key from per-tier persistent counter
+    start_key_idx = _next_hm_nv_key(tier_model)
 
     for attempt_idx in range(HM_NUM_KEYS):
         key_idx = (start_key_idx + attempt_idx) % HM_NUM_KEYS
         litellm_url = HM_LITELLM_URLS[key_idx]
-        nv_model_label = f"nvk{key_idx+1}"
+        model_label = litellm_model_name(tier_model, key_idx)
 
-        # Set model name for this LiteLLM container: e.g. nvkimi_k1
-        litellm_body["model"] = litellm_model_name(mapped_model, key_idx)
+        # Build LiteLLM request body
+        litellm_body = dict(oai_body)
+        litellm_body["model"] = model_label
 
-        _log("HM-LITELLM", f"attempt {attempt_idx+1}/{HM_NUM_KEYS}: k{key_idx+1} "
-                            f"→ {litellm_url} model={litellm_body['model']}")
+        _log("HM-KEY", f"tier={tier_model} attempt {attempt_idx+1}/{HM_NUM_KEYS}: "
+                       f"k{key_idx+1} → {litellm_url} model={model_label}")
 
         litellm_data = json.dumps(litellm_body).encode("utf-8")
         headers_out = {
@@ -121,20 +192,21 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
                 conn.close()
                 err_str = json.dumps(error_json)
 
-                # Cycling errors: 429/500/502 → next LiteLLM container
+                # Cycling errors: 429/500/502 → next key in same tier
                 should_cycle = resp.status in (429, 500, 502)
                 if should_cycle:
                     cycle_reason = "429_nv_rate_limit" if resp.status == 429 else \
                                    "500_nv_error" if resp.status == 500 else "502_nv_error"
                     key_cycle_attempts.append({
+                        "tier": tier_model,
                         "nv_key_idx": key_idx,
-                        "litellm_model": nv_model_label,
+                        "litellm_model": model_label,
                         "error_body": err_str[:500],
                         "error_type": cycle_reason,
                         "upstream_type": "nv_litellm",
                     })
-                    _log("HM-CYCLE", f"LiteLLM k{key_idx+1} ({nv_model_label}) → {resp.status} "
-                                      f"({cycle_reason}), cycling to next")
+                    _log("HM-CYCLE", f"tier={tier_model} k{key_idx+1} ({model_label}) → "
+                                     f"{resp.status} ({cycle_reason}), cycling to next key")
                     continue
 
                 # Non-cycling error → report
@@ -144,28 +216,55 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
                 result.elapsed_ms = int((time.time() - t_start) * 1000)
                 return result
 
-            # ─── LiteLLM Success ───
+            # ─── 200 response — check for empty ───
+            is_empty = _check_empty_200(resp, key_idx, tier_model, is_stream)
+
+            if is_empty:
+                # Empty 200 → treat as failure, cycle to next key
+                key_cycle_attempts.append({
+                    "tier": tier_model,
+                    "nv_key_idx": key_idx,
+                    "litellm_model": model_label,
+                    "error_type": "empty_200",
+                    "upstream_type": "nv_litellm",
+                })
+                _log("HM-EMPTY-CYCLE", f"tier={tier_model} k{key_idx+1} empty 200, cycling to next key")
+                # Close connection for empty response
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                continue
+
+            # ─── Valid success response ───
             result.success = True
             result.resp = resp
             result.conn = conn
-            result.nv_model_label = nv_model_label
+            result.tier_model = tier_model
             result.nv_key_idx = key_idx
+            result.nv_model_label = model_label
             result.key_cycle_attempts = key_cycle_attempts
+            result.fallback_tiers_used = [tier_model]
             metrics["upstream_type"] = "nv_litellm"
+            metrics["tier_model"] = tier_model
             metrics["nv_key_idx"] = key_idx
-            metrics["litellm_model"] = nv_model_label
+            metrics["litellm_model"] = model_label
             if key_cycle_attempts:
                 metrics["key_cycle_429s_before_success"] = len(key_cycle_attempts)
                 metrics["key_cycle_details"] = key_cycle_attempts
-                _log("HM-SUCCESS", f"LiteLLM k{key_idx+1} succeeded after {len(key_cycle_attempts)} cycle attempts")
+                _log("HM-SUCCESS", f"tier={tier_model} k{key_idx+1} succeeded after "
+                                    f"{len(key_cycle_attempts)} cycle attempts")
+            else:
+                _log("HM-SUCCESS", f"tier={tier_model} k{key_idx+1} succeeded on first attempt")
             return result
 
         except socket.timeout as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("HM-TIMEOUT", f"LiteLLM k{key_idx+1} timeout after {elapsed_ms}ms")
+            _log("HM-TIMEOUT", f"tier={tier_model} k{key_idx+1} timeout after {elapsed_ms}ms")
             key_cycle_attempts.append({
+                "tier": tier_model,
                 "nv_key_idx": key_idx,
-                "litellm_model": nv_model_label,
+                "litellm_model": model_label,
                 "error_type": "LiteLLMTimeout",
                 "elapsed_ms": elapsed_ms,
                 "upstream_type": "nv_litellm",
@@ -174,10 +273,11 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
 
         except (ConnectionRefusedError, http.client.RemoteDisconnected) as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("HM-CONN", f"LiteLLM k{key_idx+1} connection error: {e}")
+            _log("HM-CONN", f"tier={tier_model} k{key_idx+1} connection error: {e}")
             key_cycle_attempts.append({
+                "tier": tier_model,
                 "nv_key_idx": key_idx,
-                "litellm_model": nv_model_label,
+                "litellm_model": model_label,
                 "error_type": f"LiteLLM{type(e).__name__}",
                 "elapsed_ms": elapsed_ms,
                 "upstream_type": "nv_litellm",
@@ -187,10 +287,11 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
         except Exception as e:
             error_class = type(e).__name__
             elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("HM-ERR", f"LiteLLM k{key_idx+1} {error_class}: {e}")
+            _log("HM-ERR", f"tier={tier_model} k{key_idx+1} {error_class}: {e}")
             key_cycle_attempts.append({
+                "tier": tier_model,
                 "nv_key_idx": key_idx,
-                "litellm_model": nv_model_label,
+                "litellm_model": model_label,
                 "error": str(e)[:200],
                 "error_type": f"LiteLLM{error_class}",
                 "elapsed_ms": elapsed_ms,
@@ -198,13 +299,144 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
             })
             continue
 
-    # All LiteLLM containers exhausted
+    # ─── All keys in this tier exhausted ───
+    # Classify: all 429, all empty 200, or mixed
+    tier_attempts = [a for a in key_cycle_attempts if a.get("tier") == tier_model]
+    all_429 = all(a.get("error_type") == "429_nv_rate_limit" for a in tier_attempts)
+    all_empty = all(a.get("error_type") == "empty_200" for a in tier_attempts)
+
     result.all_keys_exhausted = True
-    result.all_429 = all(
-        a.get("error_type") == "429_nv_rate_limit"
-        for a in key_cycle_attempts
-    )
+    result.all_429 = all_429
+    result.empty_200 = all_empty
     result.key_cycle_attempts = key_cycle_attempts
     result.elapsed_ms = int((time.time() - t_start) * 1000)
-    _log("HM-ALL-FAIL", f"All {HM_NUM_KEYS} LiteLLM containers exhausted, elapsed={result.elapsed_ms}ms")
+
+    fail_summary = f"429={sum(1 for a in tier_attempts if a.get('error_type')=='429_nv_rate_limit')}, " \
+                   f"empty200={sum(1 for a in tier_attempts if a.get('error_type')=='empty_200')}, " \
+                   f"timeout={sum(1 for a in tier_attempts if 'Timeout' in a.get('error_type',''))}, " \
+                   f"other={sum(1 for a in tier_attempts if a.get('error_type') not in ('429_nv_rate_limit','empty_200') and 'Timeout' not in a.get('error_type',''))}"
+    _log("HM-TIER-FAIL", f"tier={tier_model} all {HM_NUM_KEYS} keys failed: {fail_summary}, "
+                          f"elapsed={result.elapsed_ms}ms")
+
+    # Log error detail for tier failure
+    _log_error_detail({
+        "request_id": request_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "error_subcategory": f"tier_{tier_model}_all_keys_failed",
+        "tier_model": tier_model,
+        "tier_attempts": tier_attempts,
+        "all_429": all_429,
+        "all_empty_200": all_empty,
+        "elapsed_ms": result.elapsed_ms,
+    })
+
     return result
+
+
+def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
+    """Execute NV request via LiteLLM with three-tier fallback (R38.2).
+
+    R38.2: Tier chain: glm5.1_hm → kimi_hm → deepseek_hm
+    - mapped_model determines starting tier (default: glm5.1_hm)
+    - Each tier tries 5 keys with per-tier persistent RR counter
+    - On tier all-fail: fallback to next tier (from current position)
+    - All 3 tiers fail: ABORT-NO-FALLBACK
+    """
+    # Determine starting tier
+    start_tier_idx = get_tier_index(mapped_model)
+    is_stream = oai_body.get("stream", False)
+
+    _log("HM-REQ", f"mapped_model={mapped_model} start_tier={NV_MODEL_TIERS[start_tier_idx]} "
+                   f"stream={is_stream} tier_chain={NV_MODEL_TIERS[start_tier_idx:]}")
+
+    all_attempts = []
+    all_tier_summaries = []
+    fallback_tiers_used = []
+
+    for tier_idx in range(start_tier_idx, len(NV_MODEL_TIERS)):
+        tier_model = NV_MODEL_TIERS[tier_idx]
+        is_first_tier = (tier_idx == start_tier_idx)
+
+        if not is_first_tier:
+            _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
+                                f"falling back to {tier_model} (continuing from current position)")
+
+        tier_result = _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
+                                     is_stream, all_attempts)
+
+        if tier_result.success and not tier_result.empty_200:
+            # ─── Success at this tier ───
+            # Merge tier summary info
+            tier_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, tier_idx + 1)]
+            if not is_first_tier:
+                _log("HM-FALLBACK-SUCCESS", f"Success on fallback tier {tier_model} after "
+                                            f"primary {NV_MODEL_TIERS[start_tier_idx]} failed "
+                                            f"(tried tiers: {tier_result.fallback_tiers_used})")
+                metrics["fallback_from"] = NV_MODEL_TIERS[tier_idx - 1]
+                metrics["fallback_to"] = tier_model
+            # Update metrics with tier info
+            metrics["tier_model"] = tier_result.tier_model
+            metrics["fallback_tiers_used"] = tier_result.fallback_tiers_used
+            return tier_result
+
+        # ─── Tier all-failed: record and try next ───
+        tier_attempts = [a for a in tier_result.key_cycle_attempts
+                         if a.get("tier") == tier_model or a not in all_attempts]
+        all_tier_summaries.append({
+            "tier": tier_model,
+            "all_429": tier_result.all_429,
+            "all_empty_200": tier_result.empty_200,
+            "num_attempts": len(tier_attempts),
+            "elapsed_ms": tier_result.elapsed_ms,
+        })
+        all_attempts = list(tier_result.key_cycle_attempts)
+
+        # Close any remaining connections from failed tier
+        if tier_result.conn:
+            try:
+                tier_result.conn.close()
+            except Exception:
+                pass
+
+    # ─── All 3 tiers exhausted ───
+    _log("HM-ALL-TIERS-FAIL", f"All {len(NV_MODEL_TIERS)-start_tier_idx} tiers failed "
+                               f"(tiers tried: {NV_MODEL_TIERS[start_tier_idx:]}), "
+                               f"elapsed={int((time.time() - t_start) * 1000)}ms, ABORT-NO-FALLBACK")
+
+    # Determine overall classification
+    has_429 = any(s.get("all_429") for s in all_tier_summaries)
+    has_empty = any(s.get("all_empty_200") for s in all_tier_summaries)
+
+    final_result = UpstreamResult()
+    final_result.success = False
+    final_result.all_keys_exhausted = True
+    final_result.all_429 = has_429 and not has_empty  # Pure 429 if no empty 200
+    final_result.empty_200 = has_empty
+    final_result.key_cycle_attempts = all_attempts
+    final_result.tier_attempts = all_tier_summaries
+    final_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, len(NV_MODEL_TIERS))]
+    final_result.elapsed_ms = int((time.time() - t_start) * 1000)
+    final_result.final_resp_status = 429 if has_429 else 502
+
+    # Log comprehensive error detail
+    _log_error_detail({
+        "request_id": request_id,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "error_subcategory": "all_tiers_failed",
+        "start_tier": NV_MODEL_TIERS[start_tier_idx],
+        "tiers_tried": NV_MODEL_TIERS[start_tier_idx:],
+        "tier_summaries": all_tier_summaries,
+        "total_attempts": len(all_attempts),
+        "elapsed_ms": final_result.elapsed_ms,
+    })
+
+    _log_metrics({
+        "request_id": request_id,
+        "error_subcategory": "all_tiers_failed",
+        "start_tier": NV_MODEL_TIERS[start_tier_idx],
+        "tiers_tried": final_result.fallback_tiers_used,
+        "total_cycle_attempts": len(all_attempts),
+        "elapsed_ms": final_result.elapsed_ms,
+    })
+
+    return final_result
