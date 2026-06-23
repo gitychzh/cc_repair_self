@@ -6,7 +6,7 @@
 # 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 glm5.1 v×k (pure MS)
 # 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
 # 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
-# 41101-41105: ms_nv_hm_4110X LiteLLM (4 NV model dep each, per-key mihomo proxy → NV API)
+# 41101-41105: ms_nv_hm_4110X LiteLLM (3 NV model dep each, per-key mihomo proxy → NV API)
 #
 # Port assignments: 41001=LiteLLM MS, 41101-41105=LiteLLM NV HM, 40000=dispatcher,
 #   40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough), 40005=proxy(cc-experiment), 40006=hm-proxy
@@ -51,7 +51,7 @@ x-resource-1c1g: &resource-1c1g
         cpus: "0.1"
 
 x-resource-1c2g-host: &resource-1c2g-host
-  # LiteLLM containers: ms_uni41001 (70 dep) + ms_nv_hm_41101-41105 (4 dep each).
+  # LiteLLM containers: ms_uni41001 (70 dep) + ms_nv_hm_41101-41105 (3 dep each).
   # 1GiB sufficient (actual usage ~500MiB after model cost map loads).
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -405,8 +405,8 @@ services:
     environment:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
-      PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "60"
+      PROXY_TIMEOUT: "120"
+      UPSTREAM_TIMEOUT: "30"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)

@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.2.
+"""Upstream request executor for Hermes NV proxy — R38.3.
 
 R38.2: Three-tier fallback routing with per-tier persistent RR counters.
+R38.3: deepseek-v4-pro → deepseek-v4-flash (v4-pro broken on NV API).
+       Added sock.settimeout() after conn.request() for read timeout
+       (R36.2 lesson: HTTPConnection.timeout only controls connect, not read).
+       PROXY_TIMEOUT 300→120, UPSTREAM_TIMEOUT 60→30.
+
 Default tier: glm5.1_hm (5 keys, sequential RR from current position).
 If all 5 keys fail (429 or empty 200) → fallback to kimi_hm tier.
 If kimi tier also all-fail → fallback to deepseek_hm tier.
@@ -182,6 +187,12 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             throttle_outbound()
             conn.request("POST", litellm_path, body=litellm_data, headers=headers_out)
             resp = conn.getresponse()
+            # R38.3: Set socket read timeout AFTER request
+            # HTTPConnection.timeout only controls connect (TCP+SSL), not getresponse() read.
+            # Must set sock.settimeout() to enforce read-side deadline.
+            # R36.2 critical fix applied to hm-proxy.
+            if conn.sock:
+                conn.sock.settimeout(UPSTREAM_TIMEOUT)
 
             if resp.status >= 400:
                 error_body = resp.read()

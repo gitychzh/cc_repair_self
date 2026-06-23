@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006) — R38.2.
+"""Configuration for Hermes NV proxy (hm40006) — R38.3.
 
 R38.2: Three-tier fallback routing: glm5.1 → kimi → deepseek.
+R38.3: deepseek-v4-pro → deepseek-v4-flash (v4-pro completely broken on NV API, 0% success).
+       PROXY_TIMEOUT 300→120, UPSTREAM_TIMEOUT 60→30 (reduce wasted time on failures).
+       Added sock.settimeout() for read timeout (R36.2 lesson applied to hm-proxy).
+
 Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
-Minimax removed from model tiers.
 
 Chain: Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
 hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
@@ -20,8 +23,8 @@ import threading
 # ─── Network ──────────────────────────────────────────────────────────────
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "40006"))
-PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "300"))
-UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))
+PROXY_TIMEOUT = int(os.environ.get("PROXY_TIMEOUT", "120"))
+UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "30"))
 
 # ─── Proxy Role ────────────────────────────────────────────────────────────
 # "passthrough" — serves /v1/chat/completions (OpenAI format)
@@ -52,7 +55,7 @@ NV_MODEL_TIERS = ["glm5.1_hm", "kimi_hm", "deepseek_hm"]
 NV_MODEL_IDS = {
     "glm5.1_hm": "z-ai/glm-5.1",
     "kimi_hm": "moonshotai/kimi-k2.6",
-    "deepseek_hm": "deepseek-ai/deepseek-v4-pro",
+    "deepseek_hm": "deepseek-ai/deepseek-v4-flash",
 }
 
 # LiteLLM model name pattern: nv{model_short}_k{N}
@@ -86,8 +89,8 @@ MODEL_MAP = {
     # Fallback tier 2
     "deepseek_hm": "deepseek_hm",
     "deepseek": "deepseek_hm",
-    "deepseek-v4-pro": "deepseek_hm",
-    "deepseek-ai/deepseek-v4-pro": "deepseek_hm",
+    "deepseek-v4-flash": "deepseek_hm",
+    "deepseek-ai/deepseek-v4-flash": "deepseek_hm",
 }
 
 def detect_nv_model(model_id: str) -> str:

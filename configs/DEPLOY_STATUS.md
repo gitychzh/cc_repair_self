@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.2, 2026-06-23)
+# Deploy Status — opc_uname + opc2_uname (R38.3, 2026-06-23)
 
-## Architecture (R38.2)
+## Architecture (R38.3)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
@@ -25,15 +25,16 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
   LiteLLM drop_params=true 自动 strip NV unsupported params
-  NV_MODEL_IDS: glm5.1_hm/kimi_hm/deepseek_hm (3 models, minimax removed R38.2)
-  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml
+  NV_MODEL_IDS: glm5.1_hm/kimi_hm/deepseek_hm (3 models, minimax removed R38.2, dsv4-pro→dsv4-flash R38.3)
+  HM PROXY_TIMEOUT=120, UPSTREAM_TIMEOUT=30 (R38.3 缩短，减少失败浪费)
+  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (default=glm5.1_hm R38.3)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM ms_nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API
 ```
 
-## Containers (R38.2: 7 core + 1 external + 5 HM LiteLLM = 13 total)
+## Containers (R38.3: 7 core + 1 external + 5 HM LiteLLM = 13 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
@@ -107,3 +108,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38: Hermes 重新工程化 — hm40006 路由到 LiteLLM 41101-41105 + per-key mihomo + STORE_MODEL_IN_DB=False + 清理 _hm suffix
 - R38.1: 清除冗余 ms_nv_41101-41105 monitoring 容器（5个，功能完全被 HM 容器覆盖），18→13容器
 - R38.2: HM 3-tier fallback — minimax removed, glm5.1_hm(primary)→kimi_hm→deepseek_hm, per-tier persistent RR counter, empty-200 detection, fallback从当前位置继续
+- R38.3: 数据驱动优化 — Hermes default kimi→glm5.1, deepseek-v4-pro→v4-flash(0%→可用), PROXY_TIMEOUT 300→120, UPSTREAM_TIMEOUT 60→30, sock.settimeout()读超时修复, LiteLLM timeout 60→30
