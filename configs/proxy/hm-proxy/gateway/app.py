@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hermes NV proxy entry point — ThreadedHTTPServer startup — R38.3."""
+"""Hermes NV proxy entry point — ThreadedHTTPServer startup — R38.4."""
 import os
 import sys
 from http.server import ThreadingHTTPServer

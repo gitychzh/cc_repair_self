@@ -10,12 +10,12 @@ R23 refactoring: handlers.py is now a slim dispatcher that delegates:
 R29: PROXY_ROLE determines which endpoints this proxy serves:
   - "cc"          → /v1/messages only (Anthropic format, CC)
   - "codex"       → /v1/responses only (Responses API, Codex)
-  - "passthrough" → /v1/chat/completions only (OpenAI format, _ol/_oc/_hm)
+  - "passthrough" → /v1/chat/completions only (OpenAI format, _ol/_oc/_hm_ms)
 
 Three proxy containers each serve their own role:
   40001 (cc):          CC → Anthropic format → glm5.1 v×k cycling
   40002 (codex):       Codex → Responses API → glm5.1 v×k cycling
-  40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → glm5.1 v×k cycling
+  40003 (passthrough): _ol/_oc/_hm_ms → OpenAI passthrough → glm5.1 v×k cycling
 """
 import http.server
 import json
@@ -69,7 +69,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     self._proxy_models()  # Fallback for non-Anthropic clients on CC port
             elif PROXY_ROLE == "passthrough":
-                # Passthrough proxy: OpenAI-format models (for _ol/_oc/_hm)
+                # Passthrough proxy: OpenAI-format models (for _ol/_oc/_hm_ms)
                 self._proxy_models()
             elif PROXY_ROLE == "codex":
                 # Codex proxy: OpenAI-format models (Codex checks /v1/models)
@@ -379,7 +379,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, anth_response)
             conn.close()
 
-    # ─── /v1/chat/completions — OpenAI format request (_ol/_oc/_hm) ───
+    # ─── /v1/chat/completions — OpenAI format request (_ol/_oc/_hm_ms) ───
     def _handle_openai_with_cycling(self):
         """Handle OpenAI-format requests from OpenClaw/OpenCode/Hermes.
 
@@ -691,7 +691,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         R29: Shows models appropriate for this proxy's role:
           cc: glm5.1_cc + backward compat aliases
           codex: glm5.1_cx + backward compat aliases
-          passthrough: glm5.1_ol/glm5.1_oc/glm5.1_hm
+          passthrough: glm5.1_ol/glm5.1_oc/glm5.1_hm_ms
         """
         all_models = []
         seen_ids = set()

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.3.
+"""Upstream request executor for Hermes NV proxy — R38.4.
 
 R38.2: Three-tier fallback routing with per-tier persistent RR counters.
-R38.3: Model suffix _hm → _nv (NV API vs MS API distinction).
+R38.3→R38.4: Dual suffix convention: _hm_nv = Hermes+NV, _hm_ms = Hermes+MS.
        deepseek-v4-pro restored (tested OK via direct/US proxy/SG proxy;
        previous failures were transient mihomo proxy issues, not model itself).
        Added sock.settimeout() after conn.request() for read timeout
        (R36.2 lesson: HTTPConnection.timeout only controls connect, not read).
 
-Default tier: glm5.1_nv (5 keys, sequential RR from current position).
-If all 5 keys fail (429 or empty 200) → fallback to kimi_nv tier.
-If kimi tier also all-fail → fallback to deepseek_nv tier.
+Default tier: glm5.1_hm_nv (5 keys, sequential RR from current position).
+If all 5 keys fail (429 or empty 200) → fallback to kimi_hm_nv tier.
+If kimi tier also all-fail → fallback to deepseek_hm_nv tier.
 If deepseek tier also all-fail → ABORT-NO-FALLBACK.
 
 Each tier continues from its current key position (not from k1).
@@ -346,10 +346,10 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
 
 def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NV request via LiteLLM with three-tier fallback (R38.2).
+    """Execute NV request via LiteLLM with three-tier fallback (R38.4).
 
-    R38.2: Tier chain: glm5.1_hm → kimi_hm → deepseek_hm
-    - mapped_model determines starting tier (default: glm5.1_hm)
+    R38.4: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
+    - mapped_model determines starting tier (default: glm5.1_hm_nv)
     - Each tier tries 5 keys with per-tier persistent RR counter
     - On tier all-fail: fallback to next tier (from current position)
     - All 3 tiers fail: ABORT-NO-FALLBACK

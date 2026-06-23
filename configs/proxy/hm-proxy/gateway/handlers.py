@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""HTTP handler for Hermes NV proxy — R38.3.
+"""HTTP handler for Hermes NV proxy — R38.4.
 
-Three-tier fallback: glm5.1_nv → kimi_nv → deepseek_nv (R38.3: _nv suffix).
+Three-tier fallback: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv (R38.4: _hm_nv dual suffix).
 Per-tier 5-key sequential RR with persistent counters.
 MSG-FIX: messages ending with assistant → append user "Continue."
 LiteLLM handles NV unsupported params strip (drop_params: true).
@@ -68,11 +68,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-    # ─── /v1/chat/completions — OpenAI format (Hermes / _nv) ───
+    # ─── /v1/chat/completions — OpenAI format (Hermes / _hm_nv) ───
     def _handle_openai_nv(self):
         """Handle OpenAI-format requests from Hermes agent.
 
-        R38.3: Three-tier fallback: glm5.1_nv → kimi_nv → deepseek_nv.
+        R38.4: Three-tier fallback: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv.
         MSG-FIX: if messages ends with assistant role, append user "Continue."
         """
         t_start = time.time()
@@ -84,7 +84,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "proxy_role": PROXY_ROLE,
             "request_model": "?",
             "mapped_model": "?",
-            "agent_type": "_nv",
+            "agent_type": "_hm_nv",
             "stream": False,
             "total_input_chars": 0,
             "ttfb_ms": None,
@@ -120,7 +120,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         metrics["total_input_chars"] = json_chars
 
         _log("REQ", f"model={request_model}→{mapped_model}→tier_idx={metrics['start_tier_idx']} "
-                    f"stream={is_stream} msgs={len(body.get('messages',[]))} agent=_nv")
+                    f"stream={is_stream} msgs={len(body.get('messages',[]))} agent=_hm_nv")
 
         # ─── MSG-FIX (R35.10) ───
         messages = body.get("messages", [])

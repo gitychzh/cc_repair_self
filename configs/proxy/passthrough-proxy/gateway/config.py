@@ -27,7 +27,7 @@ UPSTREAM_TIMEOUT = int(os.environ.get("UPSTREAM_TIMEOUT", "60"))  # R27: Per-key
 # Each proxy container serves a specific role:
 #   "cc"          → only /v1/messages (Anthropic format, CC), upstream=glm5.1
 #   "codex"       → only /v1/responses (Responses API, Codex), upstream=glm5.1
-#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm), upstream=glm5.1
+#   "passthrough" → only /v1/chat/completions (OpenAI format, _ol/_oc/_hm_ms), upstream=glm5.1
 # This determines which endpoints to serve and which backend model to default to.
 PROXY_ROLE = os.environ.get("PROXY_ROLE", "cc")
 
@@ -107,12 +107,12 @@ DEFAULT_UPSTREAM_MODEL = ROLE_DEFAULT_UPSTREAM.get(PROXY_ROLE, "glm5.1")
 # R35: All suffixes route to glm5.1 backend (dsv4p fully removed)
 # "_cc" → Anthropic format, backend=glm5.1 (CC only, proxy 40001)
 # "_cx" → Responses API format, backend=glm5.1 (Codex only, proxy 40002)
-# "_ol/_oc/_hm" → OpenAI format, backend=glm5.1 (OpenAI agents, proxy 40003)
+# "_ol/_oc/_hm_ms" → OpenAI format, backend=glm5.1 (OpenAI agents, proxy 40003)
 AGENT_SUFFIXES = {
     "_cc": {"name": "Claude Code", "format": "anthropic", "backend": "glm5.1"},
     "_ol": {"name": "OpenClaw",    "format": "openai",    "backend": "glm5.1"},
     "_oc": {"name": "OpenCode",    "format": "openai",    "backend": "glm5.1"},
-    "_hm": {"name": "Hermes",      "format": "openai",    "backend": "glm5.1"},
+    "_hm_ms": {"name": "HermesMS", "format": "openai",    "backend": "glm5.1"},
     "_cx": {"name": "Codex",       "format": "responses", "backend": "glm5.1"},
 }
 DEFAULT_AGENT_SUFFIX = "_cc"  # backward compat: no suffix = CC (Anthropic format)
@@ -129,7 +129,7 @@ def detect_agent_type(model_id):
     Returns:
         (base_model, agent_suffix, response_format)
         base_model: backend model name ("glm5.1")
-        agent_suffix: "_cc", "_ol", "_oc", "_hm" or DEFAULT_AGENT_SUFFIX
+        agent_suffix: "_cc", "_ol", "_oc", "_hm_ms" or DEFAULT_AGENT_SUFFIX
         response_format: "anthropic", "openai" or "responses"
 
     Examples:
@@ -181,8 +181,9 @@ MODEL_MAP = {
     "glm5.1_ol": "glm5.1",
     # OpenCode (_oc) — OpenAI format, backend=glm5.1
     "glm5.1_oc": "glm5.1",
-    # Hermes (_hm) — OpenAI format, backend=glm5.1
-    "glm5.1_hm": "glm5.1",
+    # Hermes (_hm_ms) — OpenAI format, backend=glm5.1 (Hermes MS fallback)
+    "glm5.1_hm_ms": "glm5.1",
+    "glm5.1_hm": "glm5.1",      # backward compat: old _hm alias → _hm_ms
 
     # ─── Backward compat: no suffix = CC (Anthropic format) ───
     "glm5.1": "glm5.1", "glm-5.1": "glm5.1", "zhipuai/glm-5.1": "glm5.1",

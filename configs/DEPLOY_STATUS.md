@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.3, 2026-06-23)
+# Deploy Status — opc_uname + opc2_uname (R38.4, 2026-06-23)
 
-## Architecture (R38.3)
+## Architecture (R38.4)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
@@ -15,31 +15,31 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
 :40001  cc-proxy → _cc /v1/messages → pure MS glm5.1 v×k cycling (NV disabled, stable baseline)
 :40002  codex-proxy → _cx /v1/responses → Responses→Chat 转换 → MS glm5.1 v×k cycling
-:40003  passthrough-proxy → _ol/_oc/_hm → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled)
+:40003  passthrough-proxy → _ol/_oc/_hm_ms → OpenAI passthrough → MS glm5.1 v×k cycling (NV disabled)
   MSG-FIX: messages以assistant结尾→auto-append user "Continue."
-  _hm suffix retained for Hermes MS fallback endpoint
+  _hm_ms suffix for Hermes MS fallback endpoint (R38.4: _hm_ms = Hermes + ModelScope)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _nv /v1/chat/completions → LiteLLM 41101-41105 (3-tier fallback, per-tier 5-key RR)
-  默认 glm5.1_nv → 全429/空200 → fallback kimi_nv → 全429/空200 → fallback deepseek_nv → 全失败 → ABORT
+:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (3-tier fallback, per-tier 5-key RR)
+  默认 glm5.1_hm_nv → 全429/空200 → fallback kimi_hm_nv → 全429/空200 → fallback deepseek_hm_nv → 全失败 → ABORT
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
   LiteLLM drop_params=true 自动 strip NV unsupported params
-  NV_MODEL_IDS: glm5.1_nv/kimi_nv/deepseek_nv (3 models, _hm→_nv suffix R38.3, deepseek-v4-pro restored)
-  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (default=glm5.1_nv R38.3)
+  NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3 models, _hm_nv dual suffix R38.4, deepseek-v4-pro restored)
+  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (default=glm5.1_hm_nv R38.4)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM ms_nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API
 ```
 
-## Containers (R38.3: 7 core + 1 external + 5 HM LiteLLM = 13 total)
+## Containers (R38.4: 7 core + 1 external + 5 HM LiteLLM = 13 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
 | auth_to_api_40001 | :40001 | Proxy(cc,STABLE) | 1CPU/1GiB | Pure MS, NV_NUM_KEYS=0 |
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
-| auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm suffix for Hermes fallback |
+| auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
 | hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | Routes to LiteLLM 41101-41105 → NV API |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
@@ -108,3 +108,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.1: 清除冗余 ms_nv_41101-41105 monitoring 容器（5个，功能完全被 HM 容器覆盖），18→13容器
 - R38.2: HM 3-tier fallback — minimax removed, glm5.1_hm(primary)→kimi_hm→deepseek_hm, per-tier persistent RR counter, empty-200 detection, fallback从当前位置继续
 - R38.3: Model suffix _hm→_nv (NV vs MS distinction), Hermes default→glm5.1_nv, deepseek-v4-pro restored (verified via direct/US/SG proxy), sock.settimeout()读超时修复, RR counter migration _hm→_nv keys, backward compat _hm→_nv aliases
+- R38.4: Dual suffix convention: _hm_nv(Hermes+NV) / _hm_ms(Hermes+MS), _nv→_hm_nv in hm-proxy, _hm→_hm_ms in passthrough-proxy, RR counter migration nv_→hm_nv_, opc_uname disk cleanup (80GB Hermes JIT .so cache removed)

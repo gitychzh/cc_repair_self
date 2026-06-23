@@ -20,7 +20,7 @@ R34.1: NV direct API — no NV LiteLLM containers. Passthrough-proxy calls NVIDI
 
 UpstreamResult is returned to handlers, which format the response per agent type:
   - CC (_cc): Anthropic format conversion
-  - OpenClaw/OpenCode/Hermes (_ol/_oc/_hm): OpenAI format passthrough
+  - OpenClaw/OpenCode/Hermes (_ol/_oc/_hm_ms): OpenAI format passthrough
   - Codex (_cx): Responses API format conversion (via codex module)
 """
 import json
