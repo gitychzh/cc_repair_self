@@ -6,7 +6,7 @@
 # 40003 (passthrough): _ol/_oc/_hm → OpenAI passthrough → 41001 glm5.1 v×k (pure MS)
 # 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
 # 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
-# 41101-41105: ms_nv_hm_4110X LiteLLM (3 NV model dep each, per-key mihomo proxy → NV API)
+# 41101-41105: nv_hm_4110X LiteLLM (3 NV model dep each, per-key mihomo proxy → NV API)
 #
 # Port assignments: 41001=LiteLLM MS, 41101-41105=LiteLLM NV HM, 40000=dispatcher,
 #   40001=proxy(cc), 40002=proxy(codex), 40003=proxy(passthrough), 40005=proxy(cc-experiment), 40006=hm-proxy
@@ -51,7 +51,7 @@ x-resource-1c1g: &resource-1c1g
         cpus: "0.1"
 
 x-resource-1c2g-host: &resource-1c2g-host
-  # LiteLLM containers: ms_uni41001 (70 dep) + ms_nv_hm_41101-41105 (3 dep each).
+  # LiteLLM containers: ms_uni41001 (70 dep) + nv_hm_41101-41105 (3 dep each).
   # 1GiB sufficient (actual usage ~500MiB after model cost map loads).
   extra_hosts:
     - "host.docker.internal:host-gateway"
@@ -410,11 +410,11 @@ services:
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)
-      HM_LITELLM_URL1: http://ms_nv_hm_41101:4000/v1
-      HM_LITELLM_URL2: http://ms_nv_hm_41102:4000/v1
-      HM_LITELLM_URL3: http://ms_nv_hm_41103:4000/v1
-      HM_LITELLM_URL4: http://ms_nv_hm_41104:4000/v1
-      HM_LITELLM_URL5: http://ms_nv_hm_41105:4000/v1
+      HM_LITELLM_URL1: http://nv_hm_41101:4000/v1
+      HM_LITELLM_URL2: http://nv_hm_41102:4000/v1
+      HM_LITELLM_URL3: http://nv_hm_41103:4000/v1
+      HM_LITELLM_URL4: http://nv_hm_41104:4000/v1
+      HM_LITELLM_URL5: http://nv_hm_41105:4000/v1
       HM_LITELLM_KEY: sk-litellm-local
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
@@ -428,11 +428,11 @@ services:
     networks:
       - cc-net
     depends_on:
-      - ms_nv_hm_41101
-      - ms_nv_hm_41102
-      - ms_nv_hm_41103
-      - ms_nv_hm_41104
-      - ms_nv_hm_41105
+      - nv_hm_41101
+      - nv_hm_41102
+      - nv_hm_41103
+      - nv_hm_41104
+      - nv_hm_41105
     healthcheck:
       test:
         - CMD-SHELL
@@ -449,11 +449,11 @@ services:
   # R38: HTTPS_PROXY changed from 7880(mixed) to per-key NV mihomo port (7894-7899)
   #   for direct NV API routing. LiteLLM startup GitHub access also goes through these
   #   ports (mihomo handles both US NV and general proxy).
-  # NOTE: Port range 41101-41105. opc1 uses ms_nv_hm_41101 naming.
+  # NOTE: Port range 41101-41105. opc1 uses nv_hm_41101 naming.
 
-  ms_nv_hm_41101:
+  nv_hm_41101:
     image: litellm/litellm:v1.87.0
-    container_name: ms_nv_hm_41101
+    container_name: nv_hm_41101
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -493,9 +493,9 @@ services:
       - --port
       - "4000"
 
-  ms_nv_hm_41102:
+  nv_hm_41102:
     image: litellm/litellm:v1.87.0
-    container_name: ms_nv_hm_41102
+    container_name: nv_hm_41102
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -533,9 +533,9 @@ services:
       - --port
       - "4000"
 
-  ms_nv_hm_41103:
+  nv_hm_41103:
     image: litellm/litellm:v1.87.0
-    container_name: ms_nv_hm_41103
+    container_name: nv_hm_41103
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -573,9 +573,9 @@ services:
       - --port
       - "4000"
 
-  ms_nv_hm_41104:
+  nv_hm_41104:
     image: litellm/litellm:v1.87.0
-    container_name: ms_nv_hm_41104
+    container_name: nv_hm_41104
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
@@ -613,9 +613,9 @@ services:
       - --port
       - "4000"
 
-  ms_nv_hm_41105:
+  nv_hm_41105:
     image: litellm/litellm:v1.87.0
-    container_name: ms_nv_hm_41105
+    container_name: nv_hm_41105
     restart: unless-stopped
     environment:
       LITELLM_MASTER_KEY: sk-litellm-local
