@@ -8,10 +8,11 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
       └── FALLBACK → :40001 proxy (STABLE, pure MS, Connection:close on all responses)
 
 :40005  cc-proxy → _cc /v1/messages → MS-first (ALL requests go to MS first)
-  MS success → done (fast, ~9s avg)
-  MS all-429 → NV 2-tier last-resort fallback (R38.7: glm5.1→kimi, deepseek REMOVED)
+  MS success → done (fast, ~2.3s avg)
+  MS all-429 → NV 3-tier last-resort fallback (R38.8: glm5.1→kimi→deepseek, all restored)
     Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
-    Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-fail → ABORT
+    Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-fail →
+    Tier 3: deepseek-v4-pro (deepseek-ai/deepseek-v4-pro) → all-fail → ABORT
     per-tier persistent RR counter (not restarting from k1)
     NV_TIER_TIMEOUT_BUDGET_S=90s caps total NV fallback time
     R38.8: NV conn-fast-break (2 consecutive connection errors → skip to next tier)
@@ -134,3 +135,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.8: hm40006 Connection refused storm fix — depends_on service_healthy + conn-fast-break(2 consecutive errors→skip tier) + startup-retry(wait 5s retry once for transient restarts) + cc-proxy NV conn-fast-break
 - R38.8: mihomo nv-us-provider health-check url changed from gstatic→NV API /v1/models — root cause: gstatic alive nodes may be dead to NV API; NV API health-check detects dead nodes within 180s
 - R38.8: nv_proxy_selector.py rewritten to read mihomo API latency data (no self-testing) — execution <1s (was 30-60s), cron */3 (was */15)
+- R38.8: deepseek-v4-pro RESTORED as cc-proxy(40005) NV tier 3 fallback (tested OK: avg 1-3s, 100% success rate; R38.6 removed was deepseek-v4-flash, different model)
