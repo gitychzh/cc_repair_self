@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Error format conversion for Hermes NV proxy — OpenAI format — R38.5.
+"""Error format conversion for Hermes NV proxy — OpenAI format — R38.6.
 
 R38.4: _hm_nv dual suffix for model tiers.
 Handles multi-tier fallback failures with comprehensive error messages.

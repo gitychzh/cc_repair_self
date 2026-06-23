@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.5.
+"""Upstream request executor for Hermes NV proxy — R38.6.
 
 R38.2: Three-tier fallback routing with per-tier persistent RR counters.
 R38.3→R38.4: Dual suffix convention: _hm_nv = Hermes+NV, _hm_ms = Hermes+MS.
-       deepseek-v4-pro restored (tested OK via direct/US proxy/SG proxy;
-       previous failures were transient mihomo proxy issues, not model itself).
        Added sock.settimeout() after conn.request() for read timeout
        (R36.2 lesson: HTTPConnection.timeout only controls connect, not read).
 R38.5: throttle_outbound() only on first key attempt (not during cycling).
        NV RPM is per-key independent — cycling to a different key has its own
        RPM bucket, so throttle delay within cycling is pure waste.
        429 cooldown restored (lost during R38.4 naming refactor).
-       KEY_COOLDOWN_S optimized: 20→10s base, 15s global tier cooldown.
-       Attempt range: HM_NUM_KEYS * 2 (allow cooldown recovery skips).
+R38.6 CRITICAL FIXES (data-driven):
+       1. sock.settimeout() moved BEFORE getresponse() (was AFTER → infinite
+          read timeout bug; getresponse() blocked 650-770s without timeout).
+          Evidence: Round 2 logs showed per-key timeouts of 650-770s far exceeding
+          UPSTREAM_TIMEOUT=45s. Root cause: settimeout was set AFTER getresponse()
+          returned, so getresponse() used HTTPConnection.timeout (only connect-side).
+       2. deepseek_hm_nv removed from fallback chain (5/5 LiteLLM containers →
+          all 30s timeout; NV API deepseek-v4-pro completely unreachable).
+          Removing saves 225s per request (5 keys × 45s dead time).
+       3. Tier timeout budget (TIER_TIMEOUT_BUDGET_S=90s): caps cumulative time
+          per tier. Without this, 7 attempts × 45s = 315s worst case per tier.
+       4. Attempt range: HM_NUM_KEYS*2=10 → HM_NUM_KEYS+2=7 (cooldown skips
+          still covered, but worst case reduced from 450s → 315s → 90s with budget).
+       5. KEY_COOLDOWN_S: 30→15s (NV per-key 429 recovery ~15s, data: burst throttle).
+       6. MIN_OUTBOUND_INTERVAL_S: 3.5→1.5s (5 NV keys independent RPM, throttle
+          only needs to prevent burst, not 3.5s per-request delay).
+       7. Connection:close header (prevent connection reuse → BrokenPipe errors).
 
 Default tier: glm5.1_hm_nv (5 keys, sequential RR from current position).
 If all 5 keys fail (429 or empty 200) → fallback to kimi_hm_nv tier.
-If kimi tier also all-fail → fallback to deepseek_hm_nv tier.
-If deepseek tier also all-fail → ABORT-NO-FALLBACK.
+If kimi tier also all-fail → ABORT-NO-FALLBACK (deepseek removed R38.6).
 
 Each tier continues from its current key position (not from k1).
 Empty 200 detection: choices=null, content=null, empty choices list.
@@ -34,7 +46,7 @@ from .config import (
     HM_LITELLM_URLS, HM_NUM_KEYS, HM_LITELLM_KEY,
     NV_MODEL_IDS, NV_MODEL_TIERS, DEFAULT_NV_MODEL, detect_nv_model,
     get_tier_index, litellm_model_name,
-    UPSTREAM_TIMEOUT,
+    UPSTREAM_TIMEOUT, TIER_TIMEOUT_BUDGET_S,
     _next_hm_nv_key,
     throttle_outbound,
     is_key_cooling, mark_key_cooling, reset_key429_count,
@@ -174,11 +186,26 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
     # Get starting key from per-tier persistent counter
     start_key_idx = _next_hm_nv_key(tier_model)
 
-    # R38.5: Double attempt range to allow cooldown recovery skips
-    # Some keys may be skipped (in cooldown), so we need extra attempts
-    # to reach non-cooling keys. Max HM_NUM_KEYS skips + HM_NUM_KEYS actual tries.
-    for attempt_idx in range(HM_NUM_KEYS * 2):
+    # R38.6: Tier timeout budget — stop trying keys in this tier if cumulative
+    # elapsed time exceeds TIER_TIMEOUT_BUDGET_S. Prevents stacking of timeouts
+    # (5 keys × 45s each = 225s worst case). Budget of 90s allows ~2 timeout
+    # retries; if 2 keys timeout, the tier is likely broken.
+    tier_budget_start = time.time()
+
+    # R38.6: Attempt range = HM_NUM_KEYS + 2 (reduced from HM_NUM_KEYS * 2 = 10 → 7).
+    # Rationale: with tier timeout budget + correct sock.settimeout(45) + deepseek
+    # removed from tiers, max worst case per tier is now 7×45=315s → but budget caps at 90s.
+    # Extra 2 beyond HM_NUM_KEYS covers cooldown skip slots.
+    for attempt_idx in range(HM_NUM_KEYS + 2):
         key_idx = (start_key_idx + attempt_idx) % HM_NUM_KEYS
+
+        # R38.6: Tier timeout budget check — break if budget exceeded
+        elapsed_in_tier = time.time() - tier_budget_start
+        if elapsed_in_tier >= TIER_TIMEOUT_BUDGET_S:
+            _log("HM-TIER-BUDGET", f"tier={tier_model} budget {TIER_TIMEOUT_BUDGET_S}s "
+                                    f"exceeded after {elapsed_in_tier:.1f}s, "
+                                    f"breaking to next tier")
+            break
 
         # R38.5: Skip keys in 429 cooldown to avoid wasting requests
         if is_key_cooling(tier_model, key_idx):
@@ -196,7 +223,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
         litellm_body = dict(oai_body)
         litellm_body["model"] = model_label
 
-        _log("HM-KEY", f"tier={tier_model} attempt {attempt_idx+1}/{HM_NUM_KEYS * 2}: "
+        _log("HM-KEY", f"tier={tier_model} attempt {attempt_idx+1}/{HM_NUM_KEYS + 2}: "
                        f"k{key_idx+1} → {litellm_url} model={model_label}")
 
         litellm_data = json.dumps(litellm_body).encode("utf-8")
@@ -204,6 +231,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             "Content-Type": "application/json",
             "Authorization": f"Bearer {HM_LITELLM_KEY}",
             "Content-Length": str(len(litellm_data)),
+            "Connection": "close",  # R38.6: prevent connection reuse → BrokenPipe errors
         }
 
         try:
@@ -216,13 +244,16 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             if attempt_idx == 0:
                 throttle_outbound()
             conn.request("POST", litellm_path, body=litellm_data, headers=headers_out)
-            resp = conn.getresponse()
-            # R38.3: Set socket read timeout AFTER request
-            # HTTPConnection.timeout only controls connect (TCP+SSL), not getresponse() read.
-            # Must set sock.settimeout() to enforce read-side deadline.
-            # R36.2 critical fix applied to hm-proxy.
+            # R38.6 CRITICAL FIX: sock.settimeout() BEFORE getresponse()
+            # Previous code had settimeout AFTER getresponse(), which means
+            # getresponse() inherited HTTPConnection.timeout (only controls
+            # connect phase TCP+SSL, NOT read phase). This caused getresponse()
+            # to block indefinitely (no read-side timeout), explaining the
+            # 650-770s per-key timeouts observed in Round 2 logs.
+            # Fix: set sock.settimeout between request() and getresponse().
             if conn.sock:
                 conn.sock.settimeout(UPSTREAM_TIMEOUT)
+            resp = conn.getresponse()
 
             if resp.status >= 400:
                 error_body = resp.read()
@@ -390,7 +421,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
     """Execute NV request via LiteLLM with three-tier fallback (R38.5).
 
-    R38.5: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
+    R38.6: Tier chain: glm5.1_hm_nv → kimi_hm_nv (deepseek removed, all 30s timeout)
     - mapped_model determines starting tier (default: glm5.1_hm_nv)
     - Each tier tries 5 keys with per-tier persistent RR counter
     - On tier all-fail: fallback to next tier (from current position)

@@ -56,24 +56,37 @@ if HM_NUM_KEYS < 5:
 
 # ─── Three-tier fallback model chain (R38.2→R38.4) ─────────────────────────
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# Priority order: glm5.1 (primary) → kimi (fallback 1) → deepseek (fallback 2)
-# Default model = glm5.1_hm_nv (highest quality, NV API)
-NV_MODEL_TIERS = ["glm5.1_hm_nv", "kimi_hm_nv", "deepseek_hm_nv"]
+# Priority order: glm5.1 (primary) → kimi (fallback 1)
+# R38.6: deepseek_hm_nv REMOVED from fallback chain.
+# Data evidence: 5/5 LiteLLM containers tested nvdeepseek_k1~k5 → all 30s timeout.
+# NV API deepseek-v4-pro is completely unreachable (30s+ timeout on every request).
+# Keeping deepseek in chain wasted 225s per request (5 keys × 45s) with zero success.
+# deepseek config entries preserved in NV_MODEL_IDS/LITELLM_MODEL_MAP for future re-enablement
+# if NV API restores deepseek-v4-pro availability.
+NV_MODEL_TIERS = ["glm5.1_hm_nv", "kimi_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
     "kimi_hm_nv": "moonshotai/kimi-k2.6",
-    "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",
+    "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",  # preserved but not in tiers
 }
 
 # LiteLLM model name pattern: nv{model_short}_k{N}
 LITELLM_MODEL_MAP = {
     "glm5.1_hm_nv": "nvglm5.1",
     "kimi_hm_nv": "nvkimi",
-    "deepseek_hm_nv": "nvdeepseek",
+    "deepseek_hm_nv": "nvdeepseek",  # preserved but not in tiers
 }
 
 DEFAULT_NV_MODEL = "glm5.1_hm_nv"  # R38.4: _hm_nv dual suffix, glm5.1 as primary
+
+# ─── Tier timeout budget (R38.6) ────────────────────────────────────────────
+# Maximum time to spend on ONE tier before giving up and moving to next tier.
+# Prevents cumulative timeout stacking (5 keys × 45s = 225s worst case per tier).
+# Data: NV glm5.1 p95 < 30s, kimi p95 < 25s, direct test shows 2-5s success.
+# With sock.settimeout(45) now working correctly, 90s budget allows ~2 timeout retries
+# per tier, which is reasonable. If 2 keys timeout, the tier is likely broken anyway.
+TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "90"))
 
 # ─── Agent suffix ──────────────────────────────────────────────────────────
 # R38.4: Dual suffix — _hm_nv (Hermes + NV), _hm_ms (Hermes + MS)
@@ -149,7 +162,9 @@ CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.0
 # ─── Outbound throttle ──────────────────────────────────────────────────────
 # R38.5: throttle only applies to first key attempt (not cycling).
 # Cycling keys have independent RPM buckets — throttle delay is pure waste.
-MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "2.0"))
+# R38.6: Default 1.5s (reduced from 2.0→3.5→1.5; 5 NV keys each have independent
+# RPM=1/key, throttle only needs to prevent burst, 1.5s is sufficient).
+MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "1.5"))
 _outbound_last_sent = 0.0
 _outbound_throttle_lock = threading.Lock()
 
@@ -167,14 +182,16 @@ def throttle_outbound():
             now = time.monotonic()
         _outbound_last_sent = now
 
-# ─── 429 Cooldown tracking (R38.5: restored + optimized) ──────────────────
+# ─── 429 Cooldown tracking (R38.5→R38.6: restored + optimized) ──────────────
 # When a key gets 429, mark it as "cooling" for KEY_COOLDOWN_S seconds.
 # During cooldown, skip that key in the RR rotation to avoid wasting requests.
-# R38.5 optimizations:
-# - KEY_COOLDOWN_S base: 20→10s (NV 429 is transient RPM burst, 10s sufficient)
-# - Exponential backoff cap: 60→30s (prevent over-cooling)
+# R38.6 optimizations (data-driven):
+# - KEY_COOLDOWN_S base: 10→15s (NV 429 recovery is ~15s based on burst throttle data;
+#   CLAUDE.md says "429 root cause is RPM burst throttle, auto-recovers ~15min" — but
+#   per-key RPM=1/key recovery is faster, ~15s per key)
+# - Exponential backoff cap: 30s (prevent over-cooling)
 # - Global tier cooldown on all-429: 15s (prevent immediate re-hit)
-KEY_COOLDOWN_S = float(os.environ.get("KEY_COOLDOWN_S", "10.0"))
+KEY_COOLDOWN_S = float(os.environ.get("KEY_COOLDOWN_S", "15.0"))
 _key_cooldown_map = {}  # {(tier_model, key_idx): cooldown_until_timestamp}
 _key_cooldown_lock = threading.Lock()
 

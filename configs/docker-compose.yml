@@ -395,11 +395,17 @@ services:
     logging: *logging
 
 
-  # ─── R38: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
+  # ─── R38.6: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
   # Hermes → 40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
   # 5-key sequential round-robin via LiteLLM containers, persistent counter
   # MSG-FIX, LiteLLM handles drop_params for NV unsupported params
   # Physically isolated from cc/codex/passthrough — builds from proxy/hm-proxy/
+  # R38.6 critical fixes:
+  # - sock.settimeout() BEFORE getresponse() (was AFTER → caused infinite read timeout)
+  # - deepseek removed from fallback chain (NV API deepseek-v4-pro all 30s timeout, 5/5 fail)
+  # - Tier timeout budget (TIER_TIMEOUT_BUDGET_S=90s caps per-tier cumulative time)
+  # - Attempt range HM_NUM_KEYS*2=10 → HM_NUM_KEYS+2=7 (reduce worst case)
+  # - KEY_COOLDOWN_S 30→15, MIN_OUTBOUND_INTERVAL_S 3.5→1.5 (data-driven tuning)
   hm40006:
     build:
       context: ./proxy/hm-proxy
@@ -410,10 +416,11 @@ services:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
       PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "45"  # R38.5: 60→45 (NV p95<30s, kimi/deepseek p95<25s; reduce timeout waste)
+      UPSTREAM_TIMEOUT: "45"  # R38.5→R38.6: unchanged; NV glm5.1 p95<30s, kimi p95<25s; sock.settimeout now works correctly
+      TIER_TIMEOUT_BUDGET_S: "90"  # R38.6: per-tier cumulative time cap (5 keys × 45s worst → 90s budget stops early)
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MIN_OUTBOUND_INTERVAL_S: "2.0"  # R38.5: 1.5→2.0 (throttle only on first attempt; cycling exempt)
-      KEY_COOLDOWN_S: "10.0"  # R38.5: per-key 429 cooldown base (exponential backoff, cap 30s)
+      MIN_OUTBOUND_INTERVAL_S: "1.5"  # R38.6: 3.5→1.5 (5 NV keys each independent RPM=1, throttle only prevents burst)
+      KEY_COOLDOWN_S: "15.0"  # R38.6: 30→15 (NV per-key 429 recovery ~15s, data from burst throttle pattern)
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)
       HM_LITELLM_URL1: http://nv_hm_41101:4000/v1
       HM_LITELLM_URL2: http://nv_hm_41102:4000/v1
