@@ -69,13 +69,6 @@ SYNC_MAP=(
     "configs/proxy/passthrough-proxy/gateway/logger.py:proxy/passthrough-proxy/gateway/logger.py"
     "configs/proxy/passthrough-proxy/gateway/codex.py:proxy/passthrough-proxy/gateway/codex.py"
 
-    # NV LiteLLM containers (R36: 41101-41105, 1 key each)
-    "configs/litellm-nv/config-k1.yaml:litellm-nv/config-k1.yaml"
-    "configs/litellm-nv/config-k2.yaml:litellm-nv/config-k2.yaml"
-    "configs/litellm-nv/config-k3.yaml:litellm-nv/config-k3.yaml"
-    "configs/litellm-nv/config-k4.yaml:litellm-nv/config-k4.yaml"
-    "configs/litellm-nv/config-k5.yaml:litellm-nv/config-k5.yaml"
-
     # R38: NV HM LiteLLM (41101-41105, per-key mihomo proxy for NV API)
     "configs/litellm-nv-hm/config-k1.yaml:litellm-nv-hm/config-k1.yaml"
     "configs/litellm-nv-hm/config-k2.yaml:litellm-nv-hm/config-k2.yaml"

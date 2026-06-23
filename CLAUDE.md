@@ -42,7 +42,6 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope
 → :41101-41105 LiteLLM ms_nv_hm_4110X (4 NV model dep each, per-key mihomo proxy → NV API)
-→ :41201-41205 LiteLLM ms_nv_4110X (1 NV key each, in-memory 1GiB, monitoring only, 7880 mixed proxy)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 (region-divided url-test, tolerance=0) → NVIDIA integrate API
 ```
 
@@ -87,8 +86,8 @@ CC 收到 429 会自动退避重试，对用户透明（"7key 全 429 你无感�
 | **rpm=1 per deployment** | 每个 deployment 限速 1 RPM，**绝对禁止修改** |
 | frontend model_name | `glm5.1_cc`/`glm5.1_ol`/`glm5.1_oc`/`glm5.1_cx` + 向后兼容（`glm5.1_hm` 仅 40003/40006） |
 | LiteLLM model_name | `glm5.1v1k1`~`glm5.1v10k7` |
-| Docker containers | `ms_uni41001`, `cc_postgres`, `ms_nv_41101-41105`, `ms_nv_hm_41101-41105`, `auth_to_api_40000/40001/40002/40003/40005`, `hm40006` |
-| port assignments | 40000=dispatcher, 40001=cc(stable), 40002=codex, 40003=passthrough, 40005=cc(experiment/NV), 40006=hm-proxy(external endpoint for Hermes, routes via LiteLLM 41101-41105), 41001=LiteLLM MS, 41101-41105=LiteLLM NV HM, 41201-41205=LiteLLM NV K1-K5, 7894-7899=mihomo NV proxy |
+| Docker containers | `ms_uni41001`, `cc_postgres`, `ms_nv_hm_41101-41105`, `auth_to_api_40000/40001/40002/40003/40005`, `hm40006` |
+| port assignments | 40000=dispatcher, 40001=cc(stable), 40002=codex, 40003=passthrough, 40005=cc(experiment/NV), 40006=hm-proxy(external endpoint for Hermes, routes via LiteLLM 41101-41105), 41001=LiteLLM MS, 41101-41105=LiteLLM NV HM, 7894-7899=mihomo NV proxy |
 | PROXY_ROLE per container | 40001/40005=cc, 40002=codex, 40003=passthrough, 40006=passthrough(hm-proxy)，不可混淆 |
 | NV proxy ports | 7894-7899（mihomo ♻️US-NV-K1~K5, type:select + nv_proxy_selector.sh 延迟排序选top5），NV_PROXY_URL_MAP per-key |
 
@@ -162,10 +161,9 @@ CC 收到 429 会自动退避重试，对用户透明（"7key 全 429 你无感�
 
 ```
 configs/
-  docker-compose.yml          # Docker 编排（R38: 17 containers, HM LiteLLM routes via hm40006）
+  docker-compose.yml          # Docker 编排（R38.1: 13 containers, HM LiteLLM routes via hm40006）
   .env.template
   litellm-glm51/config.yaml   # 41001 LiteLLM（70 glm5.1 = 70 dep）
-  litellm-nv/config-k1~k5.yaml # 41201-41205 NV LiteLLM（1 dep each, in-memory 1GiB, monitoring only）
   litellm-nv-hm/config-k1~k5.yaml # 41101-41105 NV HM LiteLLM（4 dep each, per-key mihomo proxy）
   mihomo/config-opc_uname.yaml # opc_uname mihomo 代理配置（7894-7899=♻️US-NV-K1~K5, 7880=mixed）
   mihomo/config-opc2_uname.yaml # opc2_uname mihomo 配置

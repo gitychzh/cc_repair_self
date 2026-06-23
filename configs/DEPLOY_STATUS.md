@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38, 2026-06-23)
+# Deploy Status — opc_uname + opc2_uname (R38.1, 2026-06-23)
 
-## Architecture (R38)
+## Architecture (R38.1)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Content-Length fix, PROXY_TIMEOUT deadline)
@@ -29,11 +29,10 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM ms_nv_hm_4110X (4 NV model dep each, per-key mihomo proxy → NV API)
-→ :41201-41205 LiteLLM ms_nv_4110X (1 NV key each, in-memory 1GiB, monitoring only, 7880 mixed proxy)
 → :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API
 ```
 
-## Containers (R38: 7 core + 1 external + 5 HM LiteLLM)
+## Containers (R38.1: 7 core + 1 external + 5 HM LiteLLM = 13 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
@@ -48,11 +47,6 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | ms_nv_hm_41103 | :41103 | LiteLLM NV HM K3 | 1CPU/1GiB | In-memory, per-key 7896 proxy → NV API |
 | ms_nv_hm_41104 | :41104 | LiteLLM NV HM K4 | 1CPU/1GiB | In-memory, per-key 7897 proxy → NV API |
 | ms_nv_hm_41105 | :41105 | LiteLLM NV HM K5 | 1CPU/1GiB | In-memory, per-key 7899 proxy → NV API |
-| ms_nv_41101 | :41201 | LiteLLM NV K1 | 1CPU/1GiB | In-memory, 7880 proxy, monitoring |
-| ms_nv_41102 | :41202 | LiteLLM NV K2 | 1CPU/1GiB | In-memory, 7880 proxy, monitoring |
-| ms_nv_41103 | :41203 | LiteLLM NV K3 | 1CPU/1GiB | In-memory, 7880 proxy, monitoring |
-| ms_nv_41104 | :41204 | LiteLLM NV K4 | 1CPU/1GiB | In-memory, 7880 proxy, monitoring |
-| ms_nv_41105 | :41205 | LiteLLM NV K5 | 1CPU/1GiB | In-memory, 7880 proxy, monitoring |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
 ## R38 Changes (opc_uname, 2026-06-23) — Hermes 重新工程化
@@ -110,3 +104,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R36.5: MS-first + NV last-resort (NV alternating 纯负优化 → 56% throughput reduction)
 - R37: Hermes专用 NV proxy hm40006 + 5 NV HM LiteLLM (41101-41105, DATABASE_URL bug, not working)
 - R38: Hermes 重新工程化 — hm40006 路由到 LiteLLM 41101-41105 + per-key mihomo + STORE_MODEL_IN_DB=False + 清理 _hm suffix
+- R38.1: 清除冗余 ms_nv_41101-41105 monitoring 容器（5个，功能完全被 HM 容器覆盖），18→13容器
