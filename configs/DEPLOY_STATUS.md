@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.7, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.8, 2026-06-24)
 
-## Architecture (R38.7)
+## Architecture (R38.8)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
@@ -13,7 +13,8 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
     Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
     Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-fail → ABORT
     per-tier persistent RR counter (not restarting from k1)
-    NV_TIER_TIMEOUT_BUDGET_S=90s caps total NV fallback time (prevents 450s catastrophic blocking)
+    NV_TIER_TIMEOUT_BUDGET_S=90s caps total NV fallback time
+    R38.8: NV conn-fast-break (2 consecutive connection errors → skip to next tier)
     Budget checked before each tier start and before each key attempt
   NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
   Connection:close on all proxy responses (prevents keep-alive BrokenPipe cascade)
@@ -24,17 +25,20 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   _hm_ms suffix for Hermes MS fallback endpoint (R38.4: _hm_ms = Hermes + ModelScope)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.7: 3-tier fallback restored)
-  R38.7: deepseek RESTORED as tier 3 (3/5 ports succeed after nv_proxy_selector node reselection)
+:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.8: 3-tier + conn-fast-break + startup-retry)
+  R38.7: deepseek RESTORED as tier 3
+  R38.8: depends_on condition:service_healthy (hm40006 waits for ALL 5 LiteLLM nv_hm healthy before starting)
+  R38.8: connection fast-break (2 consecutive conn errors → skip tier, prevents ConnectionRefused storm)
+  R38.8: startup retry (all tiers fail with conn errors only → wait 5s → retry once, handles transient LiteLLM restarts)
   默认 glm5.1_hm_nv → 全429/空200 → kimi_hm_nv → deepseek_hm_nv → 全失败 → ABORT
-  TIER_TIMEOUT_BUDGET_S=60s (R38.7: 90→60, glm5.1 avg=20.8s → 1 timeout+1 retry)
+  TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
-  LiteLLM timeout=35s (R38.7: 60→35, sync with hm-proxy UPSTREAM_TIMEOUT=45s)
+  LiteLLM timeout=35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s)
   LiteLLM drop_params=true 自动 strip NV unsupported params
   Connection:close on all requests (prevent BrokenPipe errors)
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
-  nv_proxy_selector cron: */15 * * * * (R38.7: ensures optimal node selection)
+  nv_proxy_selector cron: */15 * * * * (ensures optimal node selection)
   Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (default=glm5.1_hm_nv)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
@@ -50,7 +54,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.7: 3-tier restored (deepseek tier3), budget 60s, LiteLLM timeout 35s |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.8: 3-tier + conn-fast-break + startup-retry, depends_on healthy |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
 | nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7894 proxy |
 | nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7895 proxy |
@@ -124,3 +128,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.5: hm-proxy cycling throttle exemption + cooldown restore + K5 proxy fix
 - R38.5 Round 2: UPSTREAM_TIMEOUT 60→45s + tier-skip when all keys cooling + nv_proxy_selector.sh→.py
 - R38.7: deepseek RESTORED as tier 3 (nv_proxy_selector节点重选后3/5端口成功) + TIER_TIMEOUT_BUDGET_S 90→60s + LiteLLM timeout 60→35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s) + nv_proxy_selector cron */15
+- R38.8: hm40006 Connection refused storm fix — depends_on service_healthy + conn-fast-break(2 consecutive errors→skip tier) + startup-retry(wait 5s retry once for transient restarts) + cc-proxy NV conn-fast-break
