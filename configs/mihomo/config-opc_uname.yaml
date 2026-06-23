@@ -36,9 +36,9 @@ listeners:
   port: 7893
   proxy: ♻️US自动
   type: mixed
-# ── R36.3: NV per-key proxy — script selects top5 by nvidia latency ──
+# ── R38.8: NV per-key proxy — script reads mihomo health-check data ──
 # All 5 groups are type:select, managed by nv_proxy_selector.sh
-# Script tests all US nodes against NV API /v1/models, picks lowest latency top5
+# Script reads mihomo API NV latency data (health-check url = NV API), picks lowest latency top5
 # Each K gets a different node → different exit IP → IP diversity by latency ranking
 - listen: 0.0.0.0
   name: nv-us-k1
@@ -138,10 +138,10 @@ proxy-groups:
   type: select
   use:
   - pq-provider
-# ── R36.3: 5 NV proxy groups — type:select, managed by script ──
-# Script (nv_proxy_selector.sh) tests all US nodes against NV API /v1/models,
-# ranks by latency, assigns top5 to K1-K5. No url-test auto-switching.
-# This ensures: lowest latency + no overlap + script full control.
+# ── R38.8: 5 NV proxy groups — type:select, managed by script ──
+# Script reads mihomo API NV latency data (from health-check url = NV API /v1/models),
+# ranks by delay, assigns top5 to K1-K5. health-check url = NV API (not gstatic).
+# This ensures: NV-specific latency data + alive detection + no overlap + script control.
 - name: ♻️US-NV-K1
   proxies: []
   type: select
@@ -169,14 +169,15 @@ proxy-groups:
   - nv-us-provider
 proxy-providers:
   nv-us-provider:
-    # R36.4: Must filter to US nodes only — NV inference requires US exit IP.
-    # 日本节点 GET /v1/models works (metadata), but POST inference times out from JP IP.
-    # Filter keeps only US nodes; nv_proxy_selector.sh selects top5 by latency within US pool.
+    # R38.8: health-check url changed from gstatic to NV API /v1/models
+    # Root cause: gstatic alive nodes may be dead to NV API (delay=0, nv_alive=False)
+    # Now mihomo kernel tests NV API directly every 180s → dead nodes detected within 3min
     filter: 美国
     health-check:
       enable: true
-      interval: 300
-      url: http://www.gstatic.com/generate_204
+      interval: 180
+      timeout: 5000
+      url: https://integrate.api.nvidia.com/v1/models
     interval: 3600
     path: /home/opc_uname/.config/mihomo/nv-us-provider.yaml
     type: http

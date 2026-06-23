@@ -39,12 +39,14 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   LiteLLM drop_params=true 自动 strip NV unsupported params
   Connection:close on all requests (prevent BrokenPipe errors)
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
-  nv_proxy_selector cron: */15 * * * * (ensures optimal node selection)
+  R38.8: mihomo health-check url = NV API /v1/models (not gstatic) → dead nodes detected within 3min
+  R38.8: nv_proxy_selector reads mihomo API data (no self-testing), */3 cron, execution <1s
+  nv_proxy_selector cron: */3 * * * * (R38.8: from */15, script now <1s, no self-testing)
   Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.8: default=kimi_hm_nv, fallback default_model=glm5.1_hm_ms)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
-→ :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API
+→ :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API (health-check url = NV API, interval=180s)
 ```
 
 ## Containers (R38.4: 7 core + 1 external + 5 HM LiteLLM = 13 total)
@@ -130,3 +132,5 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.5 Round 2: UPSTREAM_TIMEOUT 60→45s + tier-skip when all keys cooling + nv_proxy_selector.sh→.py
 - R38.7: deepseek RESTORED as tier 3 (nv_proxy_selector节点重选后3/5端口成功) + TIER_TIMEOUT_BUDGET_S 90→60s + LiteLLM timeout 60→35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s) + nv_proxy_selector cron */15
 - R38.8: hm40006 Connection refused storm fix — depends_on service_healthy + conn-fast-break(2 consecutive errors→skip tier) + startup-retry(wait 5s retry once for transient restarts) + cc-proxy NV conn-fast-break
+- R38.8: mihomo nv-us-provider health-check url changed from gstatic→NV API /v1/models — root cause: gstatic alive nodes may be dead to NV API; NV API health-check detects dead nodes within 180s
+- R38.8: nv_proxy_selector.py rewritten to read mihomo API latency data (no self-testing) — execution <1s (was 30-60s), cron */3 (was */15)
