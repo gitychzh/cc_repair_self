@@ -442,11 +442,16 @@ services:
     networks:
       - cc-net
     depends_on:
-      - nv_hm_41101
-      - nv_hm_41102
-      - nv_hm_41103
-      - nv_hm_41104
-      - nv_hm_41105
+      nv_hm_41101:
+        condition: service_healthy
+      nv_hm_41102:
+        condition: service_healthy
+      nv_hm_41103:
+        condition: service_healthy
+      nv_hm_41104:
+        condition: service_healthy
+      nv_hm_41105:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD-SHELL

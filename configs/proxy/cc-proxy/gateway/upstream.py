@@ -437,6 +437,12 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
         tier_cycle_attempts = []
         tier_all_429 = True  # Track if all keys in this tier returned 429
         tier_all_transient_429 = True  # Track if all are transient (non-quota) 429
+        # R38.8: Connection error fast-break counter for NV last-resort.
+        # If 2+ consecutive keys hit connection errors (ConnectionRefusedError,
+        # gaierror, socket.error), the mihomo proxy layer is unreachable —
+        # break to next tier instead of wasting time on remaining keys.
+        consecutive_nv_conn_err = 0
+        NV_CONN_ERR_FAST_BREAK = 2
 
         # R38.7: Check timeout budget before starting each tier
         elapsed_s = time.time() - t_start
@@ -472,6 +478,7 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
 
             if nv_result.success and not nv_result.empty_200:
                 # Tier succeeded — merge all cycle attempts for logging
+                consecutive_nv_conn_err = 0  # R38.8: reset — we got a real response
                 nv_result.key_cycle_attempts = all_nv_cycle_attempts + tier_cycle_attempts + nv_result.key_cycle_attempts
                 _log("NV-LAST-RESORT-SUCCESS", f"NV Tier {tier_idx+1} ({tier_label}) k{nv_key_idx+1} succeeded "
                                                f"as last-resort after MS all-429 "
@@ -482,6 +489,32 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
             fail_status = nv_result.final_resp_status
             is_429 = fail_status == 429
             is_transient_429 = is_429 and not nv_result.empty_200
+
+            # R38.8: Detect connection errors for fast-break.
+            # Connection errors: status=0 (no HTTP response), empty_200=False
+            is_conn_err = (fail_status == 0 and not nv_result.empty_200)
+            if is_conn_err:
+                consecutive_nv_conn_err += 1
+                if consecutive_nv_conn_err >= NV_CONN_ERR_FAST_BREAK:
+                    _log("NV-CONN-BREAK", f"NV Tier {tier_idx+1} ({tier_label}) "
+                                          f"{consecutive_nv_conn_err} consecutive connection errors "
+                                          f"→ fast-break to next tier (elapsed={int((time.time()-t_start)*1000)}ms)")
+                    tier_cycle_attempts.append({
+                        "nv_key_idx": nv_key_idx,
+                        "litellm_model": nv_model_label,
+                        "nv_api_model": nv_api_model,
+                        "tier_idx": tier_idx,
+                        "tier_label": tier_label,
+                        "error_type": "nv_connection_fast_break",
+                        "error_status": fail_status,
+                        "empty_200": nv_result.empty_200,
+                        "elapsed_ms": nv_result.elapsed_ms,
+                        "upstream_type": "nv",
+                        "nv_proxy_url": nv_proxy_url,
+                    })
+                    break  # Fast-break to next tier
+            else:
+                consecutive_nv_conn_err = 0  # Reset on non-connection error
 
             if not is_429:
                 tier_all_429 = False

@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.7.
+"""Upstream request executor for Hermes NV proxy — R38.8.
 
 R38.7: 3-tier fallback restored (glm5.1→kimi→deepseek).
        Data: nv_proxy_selector reselected nodes → deepseek 3/5 ports succeed now
-       (was 0/5 in R38.6 due to stale Hysteria2 nodes). Restored as safety net.
-       TIER_TIMEOUT_BUDGET_S 90→60s: glm5.1 avg=20.8s → 60s budget allows
-       1 timeout(45s) + 1 retry window(15s). Faster tier switching on failures.
+       TIER_TIMEOUT_BUDGET_S 90→60s.
+R38.8 NEW: Connection refused fast-break + startup retry.
+       1. Consecutive 2+ ConnectionRefusedError/gaierror within same tier →
+          fast-break to next tier (skip cycling all 7 keys, saves 3-10s per tier).
+       2. If all tiers fail with ONLY connection errors (not 429/timeout/empty200),
+          wait 5s and retry once (handles LiteLLM restart transient).
+       3. docker-compose hm40006 depends_on now uses condition: service_healthy.
 R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:close.
 R38.5: throttle_outbound() only on first key attempt (not during cycling).
 R38.2→R38.4: Per-tier persistent RR counters, dual suffix convention.
 
 Default tier: glm5.1_hm_nv (5 keys, sequential RR from current position).
 If all 5 keys fail → fallback to kimi_hm_nv tier.
-If kimi tier also all-fail → fallback to deepseek_hm_nv tier (R38.7 restored).
+If kimi tier also all-fail → fallback to deepseek_hm_nv tier.
 If deepseek tier also all-fail → ABORT-NO-FALLBACK.
 
 Each tier continues from its current key position (not from k1).
@@ -176,6 +180,13 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
     # + 1 retry window(15s); if 1 key already timed out, the tier is likely broken.
     tier_budget_start = time.time()
 
+    # R38.8: Connection refused fast-break counter.
+    # If 2+ consecutive keys hit ConnectionRefusedError or gaierror, the
+    # LiteLLM layer is unreachable — break to next tier immediately instead
+    # of cycling all 7 keys (each attempt adds 1-3s delay with zero value).
+    consecutive_conn_err = 0
+    CONN_ERR_FAST_BREAK = 2
+
     # R38.7: Attempt range = HM_NUM_KEYS + 2 (reduced from HM_NUM_KEYS * 2 = 10 → 7).
     # Rationale: with tier timeout budget(60s) + correct sock.settimeout(45), max worst
     # case per tier is now 7×45=315s → but budget caps at 60s. Extra 2 covers cooldown skips.
@@ -247,6 +258,9 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                 conn.close()
                 err_str = json.dumps(error_json)
 
+                # R38.8: Reset connection error counter — we got a real response (even if error)
+                consecutive_conn_err = 0
+
                 # Cycling errors: 429/500/502 → next key in same tier
                 should_cycle = resp.status in (429, 500, 502)
                 if should_cycle:
@@ -296,6 +310,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                 continue
 
             # ─── Valid success response ───
+            consecutive_conn_err = 0  # R38.8: reset — we got a real response
             result.success = True
             result.resp = resp
             result.conn = conn
@@ -335,6 +350,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
         except (ConnectionRefusedError, http.client.RemoteDisconnected) as e:
             elapsed_ms = int((time.time() - t_start) * 1000)
             _log("HM-CONN", f"tier={tier_model} k{key_idx+1} connection error: {e}")
+            consecutive_conn_err += 1  # R38.8: track consecutive connection errors
             key_cycle_attempts.append({
                 "tier": tier_model,
                 "nv_key_idx": key_idx,
@@ -343,12 +359,37 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                 "elapsed_ms": elapsed_ms,
                 "upstream_type": "nv_litellm",
             })
+            # R38.8: Connection refused fast-break — if 2+ consecutive keys
+            # can't even connect, the LiteLLM layer is unreachable. Break
+            # to next tier instead of wasting time on remaining keys.
+            if consecutive_conn_err >= CONN_ERR_FAST_BREAK:
+                _log("HM-CONN-BREAK", f"tier={tier_model} {consecutive_conn_err} consecutive "
+                                       f"connection errors → fast-break to next tier "
+                                       f"(elapsed={elapsed_ms}ms)")
+                break
             continue
 
         except Exception as e:
             error_class = type(e).__name__
             elapsed_ms = int((time.time() - t_start) * 1000)
             _log("HM-ERR", f"tier={tier_model} k{key_idx+1} {error_class}: {e}")
+            # R38.8: gaierror (DNS failure) also counts as connection error for fast-break
+            if "gaierror" in error_class.lower() or "socket" in error_class.lower():
+                consecutive_conn_err += 1
+                if consecutive_conn_err >= CONN_ERR_FAST_BREAK:
+                    _log("HM-CONN-BREAK", f"tier={tier_model} {consecutive_conn_err} consecutive "
+                                           f"DNS/socket errors → fast-break to next tier "
+                                           f"(elapsed={elapsed_ms}ms)")
+                    key_cycle_attempts.append({
+                        "tier": tier_model,
+                        "nv_key_idx": key_idx,
+                        "litellm_model": model_label,
+                        "error": str(e)[:200],
+                        "error_type": f"LiteLLM{error_class}",
+                        "elapsed_ms": elapsed_ms,
+                        "upstream_type": "nv_litellm",
+                    })
+                    break
             key_cycle_attempts.append({
                 "tier": tier_model,
                 "nv_key_idx": key_idx,
@@ -402,13 +443,15 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
 
 def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NV request via LiteLLM with three-tier fallback (R38.7).
+    """Execute NV request via LiteLLM with three-tier fallback (R38.8).
 
-    R38.7: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv (3-tier restored)
+    R38.8: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
     - mapped_model determines starting tier (default: glm5.1_hm_nv)
     - Each tier tries 5 keys with per-tier persistent RR counter
     - On tier all-fail: fallback to next tier (from current position)
-    - All 3 tiers fail: ABORT-NO-FALLBACK
+    - All tiers fail: ABORT-NO-FALLBACK
+    - R38.8: If all tiers fail with ONLY connection errors (not 429/timeout),
+      wait 5s and retry once (handles LiteLLM restart transient).
     """
     # Determine starting tier
     start_tier_idx = get_tier_index(mapped_model)
@@ -417,92 +460,113 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
     _log("HM-REQ", f"mapped_model={mapped_model} start_tier={NV_MODEL_TIERS[start_tier_idx]} "
                    f"stream={is_stream} tier_chain={NV_MODEL_TIERS[start_tier_idx:]}")
 
-    all_attempts = []
-    all_tier_summaries = []
-    fallback_tiers_used = []
+    # R38.8: Allow one startup retry if all tiers fail with only connection errors
+    for retry_idx in range(2):
+        all_attempts = []
+        all_tier_summaries = []
+        fallback_tiers_used = []
 
-    for tier_idx in range(start_tier_idx, len(NV_MODEL_TIERS)):
-        tier_model = NV_MODEL_TIERS[tier_idx]
-        is_first_tier = (tier_idx == start_tier_idx)
+        for tier_idx in range(start_tier_idx, len(NV_MODEL_TIERS)):
+            tier_model = NV_MODEL_TIERS[tier_idx]
+            is_first_tier = (tier_idx == start_tier_idx)
 
-        # R38.5 Tier Skip: if ALL keys in this tier are in cooldown,
-        # skip the entire tier immediately instead of wasting time
-        # trying each key (which just gets skipped individually).
-        # Data shows: "all keys in cooldown, breaking to fallback" takes 5ms,
-        # but first-request tier cycling still wastes ~10s per 429.
-        # With skip: 0ms overhead, directly to next tier.
-        all_cooling = all(is_key_cooling(tier_model, k) for k in range(HM_NUM_KEYS))
-        if all_cooling:
-            _log("HM-TIER-SKIP", f"tier={tier_model} all {HM_NUM_KEYS} keys in cooldown, "
-                                  f"skipping entire tier → next tier")
-            # Record as tier failure for metrics
-            all_tier_summaries.append({
-                "tier": tier_model,
-                "all_429": True,
-                "all_empty_200": False,
-                "num_attempts": 0,
-                "elapsed_ms": 0,
-                "skipped": True,
-            })
+            # R38.5 Tier Skip: if ALL keys in this tier are in cooldown,
+            # skip the entire tier immediately instead of wasting time
+            all_cooling = all(is_key_cooling(tier_model, k) for k in range(HM_NUM_KEYS))
+            if all_cooling:
+                _log("HM-TIER-SKIP", f"tier={tier_model} all {HM_NUM_KEYS} keys in cooldown, "
+                                      f"skipping entire tier → next tier")
+                all_tier_summaries.append({
+                    "tier": tier_model,
+                    "all_429": True,
+                    "all_empty_200": False,
+                    "num_attempts": 0,
+                    "elapsed_ms": 0,
+                    "skipped": True,
+                })
+                if not is_first_tier:
+                    _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
+                                        f"falling back to {tier_model} (continuing from current position)")
+                continue
+
             if not is_first_tier:
                 _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
                                     f"falling back to {tier_model} (continuing from current position)")
-            continue
 
-        if not is_first_tier:
-            _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
-                                f"falling back to {tier_model} (continuing from current position)")
+            tier_result = _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
+                                         is_stream, all_attempts)
 
-        tier_result = _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
-                                     is_stream, all_attempts)
+            if tier_result.success and not tier_result.empty_200:
+                # ─── Success at this tier ───
+                tier_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, tier_idx + 1)]
+                if not is_first_tier:
+                    _log("HM-FALLBACK-SUCCESS", f"Success on fallback tier {tier_model} after "
+                                                f"primary {NV_MODEL_TIERS[start_tier_idx]} failed "
+                                                f"(tried tiers: {tier_result.fallback_tiers_used})")
+                    metrics["fallback_from"] = NV_MODEL_TIERS[tier_idx - 1]
+                    metrics["fallback_to"] = tier_model
+                metrics["tier_model"] = tier_result.tier_model
+                metrics["fallback_tiers_used"] = tier_result.fallback_tiers_used
+                if retry_idx > 0:
+                    _log("HM-STARTUP-RETRY-SUCCESS", f"Startup retry #{retry_idx} succeeded "
+                                                    f"after initial connection failure")
+                    metrics["startup_retry"] = retry_idx
+                return tier_result
 
-        if tier_result.success and not tier_result.empty_200:
-            # ─── Success at this tier ───
-            # Merge tier summary info
-            tier_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, tier_idx + 1)]
-            if not is_first_tier:
-                _log("HM-FALLBACK-SUCCESS", f"Success on fallback tier {tier_model} after "
-                                            f"primary {NV_MODEL_TIERS[start_tier_idx]} failed "
-                                            f"(tried tiers: {tier_result.fallback_tiers_used})")
-                metrics["fallback_from"] = NV_MODEL_TIERS[tier_idx - 1]
-                metrics["fallback_to"] = tier_model
-            # Update metrics with tier info
-            metrics["tier_model"] = tier_result.tier_model
-            metrics["fallback_tiers_used"] = tier_result.fallback_tiers_used
-            return tier_result
+            # ─── Tier all-failed: record and try next ───
+            tier_attempts = [a for a in tier_result.key_cycle_attempts
+                             if a.get("tier") == tier_model or a not in all_attempts]
+            all_tier_summaries.append({
+                "tier": tier_model,
+                "all_429": tier_result.all_429,
+                "all_empty_200": tier_result.empty_200,
+                "num_attempts": len(tier_attempts),
+                "elapsed_ms": tier_result.elapsed_ms,
+            })
+            all_attempts = list(tier_result.key_cycle_attempts)
 
-        # ─── Tier all-failed: record and try next ───
-        tier_attempts = [a for a in tier_result.key_cycle_attempts
-                         if a.get("tier") == tier_model or a not in all_attempts]
-        all_tier_summaries.append({
-            "tier": tier_model,
-            "all_429": tier_result.all_429,
-            "all_empty_200": tier_result.empty_200,
-            "num_attempts": len(tier_attempts),
-            "elapsed_ms": tier_result.elapsed_ms,
-        })
-        all_attempts = list(tier_result.key_cycle_attempts)
+            # Close any remaining connections from failed tier
+            if tier_result.conn:
+                try:
+                    tier_result.conn.close()
+                except Exception:
+                    pass
 
-        # Close any remaining connections from failed tier
-        if tier_result.conn:
-            try:
-                tier_result.conn.close()
-            except Exception:
-                pass
+        # ─── All tiers exhausted ───
+        _log("HM-ALL-TIERS-FAIL", f"All {len(NV_MODEL_TIERS)-start_tier_idx} tiers failed "
+                                   f"(tiers tried: {NV_MODEL_TIERS[start_tier_idx:]}), "
+                                   f"elapsed={int((time.time() - t_start) * 1000)}ms, ABORT-NO-FALLBACK "
+                                   f"(R38.8: 3-tier + conn-fast-break + startup retry)")
 
-    # ─── All 3 tiers exhausted ───
-    _log("HM-ALL-TIERS-FAIL", f"All {len(NV_MODEL_TIERS)-start_tier_idx} tiers failed "
-                               f"(tiers tried: {NV_MODEL_TIERS[start_tier_idx:]}), "
-                               f"elapsed={int((time.time() - t_start) * 1000)}ms, ABORT-NO-FALLBACK (R38.7: 3-tier restored)")
+        # Determine overall classification
+        has_429 = any(s.get("all_429") for s in all_tier_summaries)
+        has_empty = any(s.get("all_empty_200") for s in all_tier_summaries)
 
-    # Determine overall classification
+        # R38.8: Check if ALL failures were connection errors (not 429/timeout/empty200)
+        # This indicates a LiteLLM startup transient — worth retrying after a short wait.
+        all_conn_err = not has_429 and not has_empty and all(
+            ("Conn" in a.get("error_type", "") or "gai" in a.get("error_type", "").lower() or
+             "socket" in a.get("error_type", "").lower())
+            for a in all_attempts if a.get("upstream_type") == "nv_litellm"
+        ) and len(all_attempts) > 0
+
+        if all_conn_err and retry_idx == 0:
+            _log("HM-STARTUP-RETRY", f"All tiers failed with only connection errors "
+                                     f"(LiteLLM likely restarting). Waiting 5s before retry...")
+            time.sleep(5)
+            continue  # Retry the entire request
+
+        # No retry or retry also failed — return final result
+        break
+
+    # Build final result
     has_429 = any(s.get("all_429") for s in all_tier_summaries)
     has_empty = any(s.get("all_empty_200") for s in all_tier_summaries)
 
     final_result = UpstreamResult()
     final_result.success = False
     final_result.all_keys_exhausted = True
-    final_result.all_429 = has_429 and not has_empty  # Pure 429 if no empty 200
+    final_result.all_429 = has_429 and not has_empty
     final_result.empty_200 = has_empty
     final_result.key_cycle_attempts = all_attempts
     final_result.tier_attempts = all_tier_summaries
@@ -520,6 +584,7 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
         "tier_summaries": all_tier_summaries,
         "total_attempts": len(all_attempts),
         "elapsed_ms": final_result.elapsed_ms,
+        "startup_retry_attempted": retry_idx > 0,
     })
 
     _log_metrics({
@@ -529,6 +594,7 @@ def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics
         "tiers_tried": final_result.fallback_tiers_used,
         "total_cycle_attempts": len(all_attempts),
         "elapsed_ms": final_result.elapsed_ms,
+        "startup_retry_attempted": retry_idx > 0,
     })
 
     return final_result
