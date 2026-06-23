@@ -147,7 +147,9 @@ def litellm_model_name(mapped_model: str, key_idx: int) -> str:
 CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.0"))
 
 # ─── Outbound throttle ──────────────────────────────────────────────────────
-MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "1.5"))
+# R38.5: throttle only applies to first key attempt (not cycling).
+# Cycling keys have independent RPM buckets — throttle delay is pure waste.
+MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "2.0"))
 _outbound_last_sent = 0.0
 _outbound_throttle_lock = threading.Lock()
 
@@ -164,6 +166,50 @@ def throttle_outbound():
             time.sleep(wait)
             now = time.monotonic()
         _outbound_last_sent = now
+
+# ─── 429 Cooldown tracking (R38.5: restored + optimized) ──────────────────
+# When a key gets 429, mark it as "cooling" for KEY_COOLDOWN_S seconds.
+# During cooldown, skip that key in the RR rotation to avoid wasting requests.
+# R38.5 optimizations:
+# - KEY_COOLDOWN_S base: 20→10s (NV 429 is transient RPM burst, 10s sufficient)
+# - Exponential backoff cap: 60→30s (prevent over-cooling)
+# - Global tier cooldown on all-429: 15s (prevent immediate re-hit)
+KEY_COOLDOWN_S = float(os.environ.get("KEY_COOLDOWN_S", "10.0"))
+_key_cooldown_map = {}  # {(tier_model, key_idx): cooldown_until_timestamp}
+_key_cooldown_lock = threading.Lock()
+
+# R38.5: Exponential backoff tracking for 429s per key
+# key -> consecutive_429_count, used to scale cooldown duration
+_key429_count = {}
+_key429_lock = threading.Lock()
+
+def is_key_cooling(tier_model, key_idx):
+    """Check if a key is in cooldown (recently got 429)."""
+    with _key_cooldown_lock:
+        cooldown_until = _key_cooldown_map.get((tier_model, key_idx), 0)
+        if cooldown_until > time.monotonic():
+            return True
+        return False
+
+def mark_key_cooling(tier_model, key_idx, duration_s=None):
+    """Mark a key as cooling after receiving 429.
+
+    R38.5: Exponential backoff with capped duration.
+    Base: KEY_COOLDOWN_S (10s), doubles per consecutive 429, capped at 30s.
+    """
+    with _key429_lock:
+        _key429_count[(tier_model, key_idx)] = _key429_count.get((tier_model, key_idx), 0) + 1
+        consecutive = _key429_count[(tier_model, key_idx)]
+    # R38.5: Exponential backoff: base KEY_COOLDOWN_S, double per consecutive 429, cap at 30s
+    import math
+    effective_duration = min(KEY_COOLDOWN_S * (2 ** (consecutive - 1)), 30) if duration_s is None else duration_s
+    with _key_cooldown_lock:
+        _key_cooldown_map[(tier_model, key_idx)] = time.monotonic() + effective_duration
+
+def reset_key429_count(tier_model, key_idx):
+    """Reset consecutive 429 count when a key succeeds."""
+    with _key429_lock:
+        _key429_count.pop((tier_model, key_idx), None)
 
 # ─── Per-tier persistent round-robin counter (R38.2→R38.4) ─────────────────
 # R38.4: Counter keys use hm_nv_ prefix (dual suffix convention).

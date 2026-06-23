@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upstream request executor for Hermes NV proxy — R38.4.
+"""Upstream request executor for Hermes NV proxy — R38.5.
 
 R38.2: Three-tier fallback routing with per-tier persistent RR counters.
 R38.3→R38.4: Dual suffix convention: _hm_nv = Hermes+NV, _hm_ms = Hermes+MS.
@@ -7,6 +7,12 @@ R38.3→R38.4: Dual suffix convention: _hm_nv = Hermes+NV, _hm_ms = Hermes+MS.
        previous failures were transient mihomo proxy issues, not model itself).
        Added sock.settimeout() after conn.request() for read timeout
        (R36.2 lesson: HTTPConnection.timeout only controls connect, not read).
+R38.5: throttle_outbound() only on first key attempt (not during cycling).
+       NV RPM is per-key independent — cycling to a different key has its own
+       RPM bucket, so throttle delay within cycling is pure waste.
+       429 cooldown restored (lost during R38.4 naming refactor).
+       KEY_COOLDOWN_S optimized: 20→10s base, 15s global tier cooldown.
+       Attempt range: HM_NUM_KEYS * 2 (allow cooldown recovery skips).
 
 Default tier: glm5.1_hm_nv (5 keys, sequential RR from current position).
 If all 5 keys fail (429 or empty 200) → fallback to kimi_hm_nv tier.
@@ -31,6 +37,7 @@ from .config import (
     UPSTREAM_TIMEOUT,
     _next_hm_nv_key,
     throttle_outbound,
+    is_key_cooling, mark_key_cooling, reset_key429_count,
 )
 from .logger import _log, _log_metrics, _log_error_detail
 
@@ -145,6 +152,10 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
     On empty 200: cycle to next key within same tier.
     On other error: report immediately (no cycling).
 
+    R38.5: 429 cooldown restored. Keys that recently got 429 are skipped
+    (cooldown duration configurable via KEY_COOLDOWN_S env var).
+    Attempt range doubled (HM_NUM_KEYS * 2) to allow cooldown recovery.
+
     Returns: UpstreamResult
       - success=True: valid response found
       - success=False, empty_200=True: all keys returned empty 200
@@ -163,8 +174,21 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
     # Get starting key from per-tier persistent counter
     start_key_idx = _next_hm_nv_key(tier_model)
 
-    for attempt_idx in range(HM_NUM_KEYS):
+    # R38.5: Double attempt range to allow cooldown recovery skips
+    # Some keys may be skipped (in cooldown), so we need extra attempts
+    # to reach non-cooling keys. Max HM_NUM_KEYS skips + HM_NUM_KEYS actual tries.
+    for attempt_idx in range(HM_NUM_KEYS * 2):
         key_idx = (start_key_idx + attempt_idx) % HM_NUM_KEYS
+
+        # R38.5: Skip keys in 429 cooldown to avoid wasting requests
+        if is_key_cooling(tier_model, key_idx):
+            _log("HM-KEY", f"tier={tier_model} k{key_idx+1} is in cooldown (429), skipping")
+            # After all keys checked once, if still no success and all are cooling, break to fallback
+            if attempt_idx >= HM_NUM_KEYS and all(is_key_cooling(tier_model, k) for k in range(HM_NUM_KEYS)):
+                _log("HM-TIER", f"tier={tier_model} all keys in cooldown, breaking to fallback")
+                break
+            continue
+
         litellm_url = HM_LITELLM_URLS[key_idx]
         model_label = litellm_model_name(tier_model, key_idx)
 
@@ -172,7 +196,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
         litellm_body = dict(oai_body)
         litellm_body["model"] = model_label
 
-        _log("HM-KEY", f"tier={tier_model} attempt {attempt_idx+1}/{HM_NUM_KEYS}: "
+        _log("HM-KEY", f"tier={tier_model} attempt {attempt_idx+1}/{HM_NUM_KEYS * 2}: "
                        f"k{key_idx+1} → {litellm_url} model={model_label}")
 
         litellm_data = json.dumps(litellm_body).encode("utf-8")
@@ -185,7 +209,12 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
         try:
             conn, path_prefix = _make_litellm_conn(litellm_url, UPSTREAM_TIMEOUT)
             litellm_path = path_prefix.rstrip("/") + "/chat/completions"
-            throttle_outbound()
+            # R38.5: throttle only on first key attempt of a request, not during key cycling.
+            # NV RPM is per-key independent — cycling to a different key has its own RPM bucket,
+            # so throttle delay between cycling attempts is pure waste.
+            # First attempt still throttled to respect RPM burst limits on the first key.
+            if attempt_idx == 0:
+                throttle_outbound()
             conn.request("POST", litellm_path, body=litellm_data, headers=headers_out)
             resp = conn.getresponse()
             # R38.3: Set socket read timeout AFTER request
@@ -217,6 +246,10 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                         "error_type": cycle_reason,
                         "upstream_type": "nv_litellm",
                     })
+                    # R38.5: Mark key as cooling after 429 to avoid wasting subsequent requests
+                    if resp.status == 429:
+                        mark_key_cooling(tier_model, key_idx)
+                        _log("HM-COOLDOWN", f"tier={tier_model} k{key_idx+1} marked cooling after 429")
                     _log("HM-CYCLE", f"tier={tier_model} k{key_idx+1} ({model_label}) → "
                                      f"{resp.status} ({cycle_reason}), cycling to next key")
                     continue
@@ -257,6 +290,8 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             result.nv_model_label = model_label
             result.key_cycle_attempts = key_cycle_attempts
             result.fallback_tiers_used = [tier_model]
+            # R38.5: Reset 429 count when key succeeds — cooldown exponential backoff resets
+            reset_key429_count(tier_model, key_idx)
             metrics["upstream_type"] = "nv_litellm"
             metrics["tier_model"] = tier_model
             metrics["nv_key_idx"] = key_idx
@@ -330,6 +365,13 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
     _log("HM-TIER-FAIL", f"tier={tier_model} all {HM_NUM_KEYS} keys failed: {fail_summary}, "
                           f"elapsed={result.elapsed_ms}ms")
 
+    # R38.5: When ALL keys in a tier hit 429, mark entire tier for global cooldown.
+    # This prevents rapid re-cycling when the tier recovers but then immediately 429s again.
+    if all_429:
+        for k in range(HM_NUM_KEYS):
+            mark_key_cooling(tier_model, k, duration_s=15)  # 15s global tier cooldown
+        _log("HM-GLOBAL-COOLDOWN", f"tier={tier_model} all keys 429. Marking all keys cooling 15 seconds")
+
     # Log error detail for tier failure
     _log_error_detail({
         "request_id": request_id,
@@ -346,9 +388,9 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
 
 def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NV request via LiteLLM with three-tier fallback (R38.4).
+    """Execute NV request via LiteLLM with three-tier fallback (R38.5).
 
-    R38.4: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
+    R38.5: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
     - mapped_model determines starting tier (default: glm5.1_hm_nv)
     - Each tier tries 5 keys with per-tier persistent RR counter
     - On tier all-fail: fallback to next tier (from current position)

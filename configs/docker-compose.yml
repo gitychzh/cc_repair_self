@@ -408,7 +408,8 @@ services:
       PROXY_TIMEOUT: "300"
       UPSTREAM_TIMEOUT: "60"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      MIN_OUTBOUND_INTERVAL_S: "2.0"  # R38.5: 1.5→2.0 (throttle only on first attempt; cycling exempt)
+      KEY_COOLDOWN_S: "10.0"  # R38.5: per-key 429 cooldown base (exponential backoff, cap 30s)
       # R38: LiteLLM upstream URLs (container-to-container on cc-net)
       HM_LITELLM_URL1: http://nv_hm_41101:4000/v1
       HM_LITELLM_URL2: http://nv_hm_41102:4000/v1
