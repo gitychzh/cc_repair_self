@@ -121,10 +121,51 @@ if not NV_PROXY_URL_MAP and NV_PROXY_URL:
 # Prevents JSON file from growing indefinitely. 1200000 ≈ 12 slots × 100000 cycles
 NV_MAX_CYCLE = int(os.environ.get("NV_MAX_CYCLE", "1200000"))
 
-# NV model IDs on NVIDIA API
+# NV model IDs on NVIDIA API — R38.6: 3-tier fallback (glm5.1→kimi→deepseek)
+# When NV last-resort triggers (MS all-429), tries each tier in order.
+# Each tier tries all 5 NV keys (per-tier RR, persistent counter).
+# Tier all-429/empty-200 → next tier. All tiers fail → ABORT-NO-FALLBACK.
 NV_MODEL_IDS = {
     "glm5.1": "z-ai/glm-5.1",
 }
+
+# R38.6: NV 3-tier fallback model list per base model.
+# Tier order: original model → fallback1 → fallback2.
+# Each entry: (nvidia_api_model_id, tier_label)
+# Tested: kimi-k2.6 and deepseek-v4-flash both 200 OK on NV API (2026-06-23).
+# Can be overridden via NV_FALLBACK_TIERS env var (JSON list of [model_id, label] pairs).
+_NV_FALLBACK_TIERS_DEFAULT = {
+    "glm5.1": [
+        ("z-ai/glm-5.1",          "glm5.1_nv"),    # Tier 1: original model
+        ("moonshotai/kimi-k2.6",  "kimi_nv"),      # Tier 2: kimi fallback (tested OK)
+        ("deepseek-ai/deepseek-v4-flash", "deepseek_nv"),  # Tier 3: deepseek fallback (tested OK)
+    ],
+}
+_nv_fallback_tiers_env = os.environ.get("NV_FALLBACK_TIERS", "")
+if _nv_fallback_tiers_env:
+    try:
+        # Env var format: JSON list of [model_id, label] pairs (applied to default model only)
+        tiers_list = json.loads(_nv_fallback_tiers_env)
+        if isinstance(tiers_list, list) and all(isinstance(t, list) and len(t) == 2 for t in tiers_list):
+            NV_FALLBACK_TIERS = {
+                DEFAULT_UPSTREAM_MODEL: [(t[0], t[1]) for t in tiers_list]
+            }
+            print(f"[NV-TIER] Loaded from env: {NV_FALLBACK_TIERS}", file=sys.stderr, flush=True)
+        else:
+            print(f"[NV-TIER] WARN: Invalid NV_FALLBACK_TIERS env format, using defaults", file=sys.stderr, flush=True)
+            NV_FALLBACK_TIERS = _NV_FALLBACK_TIERS_DEFAULT
+    except json.JSONDecodeError as e:
+        print(f"[NV-TIER] WARN: NV_FALLBACK_TIERS parse error ({e}), using defaults", file=sys.stderr, flush=True)
+        NV_FALLBACK_TIERS = _NV_FALLBACK_TIERS_DEFAULT
+else:
+    NV_FALLBACK_TIERS = _NV_FALLBACK_TIERS_DEFAULT
+
+# Per-tier NV RR counters for 3-tier fallback (R38.6)
+# Each tier has its own persistent counter so it continues from the last position
+# (not restarting from k1 on each tier switch).
+_nv_tier_rr_counters = {}  # key: "base_model:tier_idx" → int counter
+_nv_tier_rr_lock = threading.Lock()
+_NV_TIER_RR_FILE = os.path.join(LOG_DIR, "nv_tier_rr_counter.json")
 
 # ─── MS-NV interleaving (R33.2 → R36: strict alternating) ───────────────────
 # R36: Strict alternating pattern: ms→nv→ms→nv→ms→nv→...
@@ -467,6 +508,54 @@ def _flush_and_exit(signum, _frame):
 atexit.register(_save_rr_counter)
 _signal.signal(_signal.SIGTERM, _flush_and_exit)
 _signal.signal(_signal.SIGINT, _flush_and_exit)
+
+# ─── Per-tier NV RR counter persistence (R38.6) ────────────────────────────
+def _load_nv_tier_rr_counter() -> None:
+    """Restore per-tier NV RR counters from disk. Best-effort."""
+    try:
+        with open(_NV_TIER_RR_FILE, "r") as f:
+            raw = f.read().strip()
+        if not raw:
+            return
+        saved = json.loads(raw)
+        if isinstance(saved, dict):
+            for k, v in saved.items():
+                if isinstance(k, str) and isinstance(v, int) and v >= 0:
+                    _nv_tier_rr_counters[k] = v
+            if _nv_tier_rr_counters:
+                print(f"[NV-TIER-RR] restored from {_NV_TIER_RR_FILE}: {_nv_tier_rr_counters}", file=sys.stderr, flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[NV-TIER-RR] WARN could not load {_NV_TIER_RR_FILE}: {e}; starting fresh", file=sys.stderr, flush=True)
+
+def _save_nv_tier_rr_counter() -> None:
+    """Persist per-tier NV RR counters to disk atomically."""
+    try:
+        tmp = "%s.tmp.%d.%d" % (_NV_TIER_RR_FILE, os.getpid(), threading.get_ident())
+        with open(tmp, "w") as f:
+            json.dump(_nv_tier_rr_counters, f)
+        os.replace(tmp, _NV_TIER_RR_FILE)
+    except Exception as e:
+        print(f"[NV-TIER-RR] WARN could not save {_NV_TIER_RR_FILE}: {e}", file=sys.stderr, flush=True)
+
+# Restore on module import
+_load_nv_tier_rr_counter()
+
+def _next_nv_tier_key(base_model, tier_idx):
+    """Get next NV key index for a specific tier (per-tier persistent RR).
+
+    Each tier has its own counter so it continues from the last position,
+    not restarting from k1 when switching tiers.
+    Returns: nv_key_idx (0-based)
+    """
+    counter_key = f"{base_model}:{tier_idx}"
+    with _nv_tier_rr_lock:
+        counter = _nv_tier_rr_counters.get(counter_key, 0)
+        nv_key_idx = counter % NV_NUM_KEYS
+        _nv_tier_rr_counters[counter_key] = counter + 1
+        _save_nv_tier_rr_counter()
+    return nv_key_idx
 
 # ─── Thread locks for logging ────────────────────────────────────────────
 _log_lock = threading.Lock()

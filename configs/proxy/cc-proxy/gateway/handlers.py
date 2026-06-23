@@ -384,6 +384,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body_bytes)))
+        # R38.6: Force Connection: close on all responses to prevent keep-alive BrokenPipe.
+        # When proxy returns 429 (ABORT), CC may reuse the TCP connection for retry.
+        # But the proxy thread is done → socket closed → BrokenPipe → dispatcher
+        # relay fails → BOTH upstreams failed → CC gets 502 instead of 429.
+        # Connection: close forces CC to open a fresh connection for retry → reliable.
+        self.send_header("Connection", "close")
+        self.close_connection = True
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, str(v))

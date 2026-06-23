@@ -36,8 +36,9 @@ from .config import (
     MODEL_UPSTREAMS, DEFAULT_UPSTREAM_MODEL, OUTPUT_TOKEN_MARGIN,
     NV_BASEURL, NV_NUM_KEYS, NV_KEYS, NV_PROXY_URL, NV_ENABLED, NV_MODEL_IDS,
     NV_TIMEOUT, NV_PROXY_URL_MAP,
+    NV_FALLBACK_TIERS,
     MS_NV_TOTAL_SLOTS,
-    _next_variant_key_pair,
+    _next_variant_key_pair, _next_nv_tier_key,
     throttle_outbound, MIN_OUTBOUND_INTERVAL_S,
 )
 from .logger import _log, _log_metrics, _log_error_detail
@@ -147,12 +148,13 @@ def _strip_nv_unsupported_params(oai_body):
 
 
 def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_start,
-                        nv_key_idx, nv_proxy_url, is_stream, force_stream):
+                        nv_key_idx, nv_proxy_url, is_stream, force_stream,
+                        nv_model_id=None, nv_model_label=None):
     """Try 1 NV key with its dedicated proxy. On ANY failure → return result (no key cycling).
 
     R36: NV slot gets exactly 1 attempt. If it fails (429, timeout, empty 200,
     connection error), the caller switches to MS fallback immediately.
-    No NV key cycling — each key has its own proxy, and stability is paramount.
+    R38.6: nv_model_id and nv_model_label can be overridden for 3-tier fallback.
 
     Args:
         handler: ProxyHandler instance
@@ -165,6 +167,8 @@ def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_s
         nv_proxy_url: str — per-key proxy URL (e.g. "http://host.docker.internal:7894")
         is_stream: bool — whether this is a streaming request
         force_stream: bool — whether stream was forced for non-stream request
+        nv_model_id: str — override NV API model ID (for tier fallback, e.g. "moonshotai/kimi-k2.6")
+        nv_model_label: str — override log label (for tier fallback, e.g. "kimi_nv_k1")
 
     Returns:
         UpstreamResult — check result.success and result.empty_200 for outcome
@@ -172,7 +176,10 @@ def _try_nv_single_key(handler, oai_body, mapped_model, request_id, metrics, t_s
     result = UpstreamResult()
     result.is_stream = is_stream
     result.nv_proxy_url = nv_proxy_url
-    nv_model_id = NV_MODEL_IDS.get(mapped_model, "z-ai/glm-5.1")
+    if nv_model_id is None:
+        nv_model_id = NV_MODEL_IDS.get(mapped_model, "z-ai/glm-5.1")
+    if nv_model_label is None:
+        nv_model_label = f"nvk{nv_key_idx+1}"
 
     # Strip NV unsupported params
     nv_body = _strip_nv_unsupported_params(oai_body)
@@ -403,61 +410,116 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
                          prior_cycle_attempts, is_stream, force_stream):
     """Try NV keys as last-resort fallback when ALL MS keys returned 429.
 
-    R36.5: NV round-robin across all NV keys (1 attempt per key).
-    Unlike R36 strict alternating (1 attempt, immediate fail), this gives NV
-    a reasonable chance since it's only called when MS is completely exhausted.
-
-    NV_TIMEOUT=30s (R36.5: reduced from 40s — NV success p50=13.4s, p95=~30s,
-    so 30s captures 80% of viable NV requests while limiting waste on failures).
+    R38.6: 3-tier NV model fallback (glm5.1→kimi→deepseek).
+    When MS all-429 triggers NV last-resort:
+      - Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
+      - Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-429/empty-200 →
+      - Tier 3: deepseek (deepseek-ai/deepseek-v4-flash) → all 5 NV keys RR → all-fail → ABORT
+    Per-tier persistent RR counter (continues from last position, not restarting from k1).
+    Each tier uses all 5 NV keys — same API key works for all NV models.
 
     Returns UpstreamResult. Success → return to user (slow but better than error).
-    All NV keys fail → result with combined cycle attempts.
+    All tiers fail → result with combined cycle attempts.
     """
+    from .config import NV_FALLBACK_TIERS, _next_nv_tier_key
+
     result = UpstreamResult()
     result.is_stream = is_stream
-    nv_cycle_attempts = []
+    all_nv_cycle_attempts = list(prior_cycle_attempts)
 
-    for nv_key_idx in range(NV_NUM_KEYS):
-        nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
-        nv_result = _try_nv_single_key(handler, oai_body, mapped_model, request_id,
-                                        metrics, t_start, nv_key_idx, nv_proxy_url,
-                                        is_stream, force_stream)
-        if nv_result.success and not nv_result.empty_200:
-            # NV last-resort succeeded — merge prior MS cycle attempts for logging
-            nv_result.key_cycle_attempts = prior_cycle_attempts + nv_cycle_attempts + nv_result.key_cycle_attempts
-            _log("NV-LAST-RESORT-SUCCESS", f"NV k{nv_key_idx+1} succeeded as last-resort "
-                                           f"after MS all-429 (attempt {nv_key_idx+1}/{NV_NUM_KEYS})")
-            return nv_result
+    # Get fallback tiers for this model
+    tiers = NV_FALLBACK_TIERS.get(mapped_model, [])
+    if not tiers:
+        # No fallback tiers configured — use legacy single-model approach
+        tiers = [(NV_MODEL_IDS.get(mapped_model, "z-ai/glm-5.1"), mapped_model + "_nv")]
 
-        # NV key failed — record attempt and continue
-        nv_cycle_attempts.append({
-            "nv_key_idx": nv_key_idx,
-            "litellm_model": f"nvk{nv_key_idx+1}",
-            "error_type": nv_result.final_error_json.get("error", "unknown")[:200] if nv_result.final_error_json else "unknown",
-            "elapsed_ms": nv_result.elapsed_ms,
-            "upstream_type": "nv",
-            "nv_proxy_url": nv_proxy_url,
-        })
-        elapsed_ms = int((time.time() - t_start) * 1000)
-        fail_reason = "empty_200" if nv_result.empty_200 else f"status={nv_result.final_resp_status}"
-        _log("NV-LAST-RESORT-FAIL", f"NV k{nv_key_idx+1} failed ({fail_reason}) after {elapsed_ms}ms "
-                                    f"(attempt {nv_key_idx+1}/{NV_NUM_KEYS})")
+    for tier_idx, (nv_api_model, tier_label) in enumerate(tiers):
+        tier_cycle_attempts = []
+        tier_all_429 = True  # Track if all keys in this tier returned 429
+        tier_all_transient_429 = True  # Track if all are transient (non-quota) 429
 
-        # Close failed NV connection
-        if nv_result.conn:
-            try:
-                nv_result.conn.close()
-            except Exception:
-                pass
+        _log("NV-TIER", f"Tier {tier_idx+1}/{len(tiers)}: model={nv_api_model} label={tier_label} "
+                        f"(trying {NV_NUM_KEYS} keys with per-tier RR)")
 
-    # All NV keys failed — return combined failure result
+        for attempt_idx in range(NV_NUM_KEYS):
+            # Per-tier persistent RR: continue from last position
+            nv_key_idx = _next_nv_tier_key(mapped_model, tier_idx)
+            nv_proxy_url = NV_PROXY_URL_MAP.get(str(nv_key_idx), NV_PROXY_URL)
+            nv_model_label = f"{tier_label}_k{nv_key_idx+1}"
+
+            nv_result = _try_nv_single_key(handler, oai_body, mapped_model, request_id,
+                                            metrics, t_start, nv_key_idx, nv_proxy_url,
+                                            is_stream, force_stream,
+                                            nv_model_id=nv_api_model,
+                                            nv_model_label=nv_model_label)
+
+            if nv_result.success and not nv_result.empty_200:
+                # Tier succeeded — merge all cycle attempts for logging
+                nv_result.key_cycle_attempts = all_nv_cycle_attempts + tier_cycle_attempts + nv_result.key_cycle_attempts
+                _log("NV-LAST-RESORT-SUCCESS", f"NV Tier {tier_idx+1} ({tier_label}) k{nv_key_idx+1} succeeded "
+                                               f"as last-resort after MS all-429 "
+                                               f"(attempt {attempt_idx+1}/{NV_NUM_KEYS} in tier)")
+                return nv_result
+
+            # NV key failed — record attempt
+            fail_status = nv_result.final_resp_status
+            is_429 = fail_status == 429
+            is_transient_429 = is_429 and not nv_result.empty_200
+
+            if not is_429:
+                tier_all_429 = False
+            if not is_transient_429:
+                tier_all_transient_429 = False
+
+            tier_cycle_attempts.append({
+                "nv_key_idx": nv_key_idx,
+                "litellm_model": nv_model_label,
+                "nv_api_model": nv_api_model,
+                "tier_idx": tier_idx,
+                "tier_label": tier_label,
+                "error_type": nv_result.final_error_json.get("error", "unknown")[:200] if nv_result.final_error_json else "unknown",
+                "error_status": fail_status,
+                "empty_200": nv_result.empty_200,
+                "elapsed_ms": nv_result.elapsed_ms,
+                "upstream_type": "nv",
+                "nv_proxy_url": nv_proxy_url,
+            })
+            elapsed_ms = int((time.time() - t_start) * 1000)
+            fail_reason = "empty_200" if nv_result.empty_200 else f"status={fail_status}"
+            _log("NV-LAST-RESORT-FAIL", f"NV Tier {tier_idx+1} ({tier_label}) k{nv_key_idx+1} failed ({fail_reason}) "
+                                        f"after {elapsed_ms}ms (attempt {attempt_idx+1}/{NV_NUM_KEYS} in tier)")
+
+            # Close failed NV connection
+            if nv_result.conn:
+                try:
+                    nv_result.conn.close()
+                except Exception:
+                    pass
+
+            # If this key failed with a non-429 error (timeout, connection, etc),
+            # the tier is unlikely to succeed on remaining keys — but still try
+            # (different proxy port = different network path, might work)
+
+        # Tier exhausted — all keys in this tier failed
+        all_nv_cycle_attempts.extend(tier_cycle_attempts)
+        _log("NV-TIER-EXHAUSTED", f"Tier {tier_idx+1}/{len(tiers)} ({tier_label}) exhausted: "
+                                   f"all_429={tier_all_429} all_transient={tier_all_transient_429} "
+                                   f"keys_tried={len(tier_cycle_attempts)}")
+
+        # If tier had non-429 failures (timeout/connection), skip remaining tiers
+        # — those issues are network-level, unlikely to improve with different models
+        if not tier_all_429:
+            _log("NV-TIER-SKIP", f"Tier {tier_idx+1} had non-429 failures → skipping remaining tiers")
+            break
+
+    # All tiers failed — return combined failure result
     result.success = False
     result.all_keys_exhausted = True
     result.all_429 = True  # MS was all-429 that triggered this fallback
-    result.key_cycle_attempts = prior_cycle_attempts + nv_cycle_attempts
+    result.key_cycle_attempts = all_nv_cycle_attempts
     result.upstream_type = "nv"
     result.elapsed_ms = int((time.time() - t_start) * 1000)
-    result.final_error_json = nv_cycle_attempts[-1].get("error_type", "NV all keys failed") if nv_cycle_attempts else {"error": "NV all keys failed"}
+    result.final_error_json = {"error": "All NV tiers exhausted (glm5.1→kimi→deepseek all-429)"}
     result.final_resp_status = 429
     return result
 
