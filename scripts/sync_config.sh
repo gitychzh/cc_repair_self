@@ -76,6 +76,25 @@ SYNC_MAP=(
     "configs/litellm-nv/config-k4.yaml:litellm-nv/config-k4.yaml"
     "configs/litellm-nv/config-k5.yaml:litellm-nv/config-k5.yaml"
 
+    # R37: NV HM LiteLLM containers (41101-41105, 4 dep each: kimi/glm/minimax/deepseek)
+    "configs/litellm-nv-hm/config-k1.yaml:litellm-nv-hm/config-k1.yaml"
+    "configs/litellm-nv-hm/config-k2.yaml:litellm-nv-hm/config-k2.yaml"
+    "configs/litellm-nv-hm/config-k3.yaml:litellm-nv-hm/config-k3.yaml"
+    "configs/litellm-nv-hm/config-k4.yaml:litellm-nv-hm/config-k4.yaml"
+    "configs/litellm-nv-hm/config-k5.yaml:litellm-nv-hm/config-k5.yaml"
+
+    # R37: Hermes专用 NV proxy (hm40006)
+    "configs/proxy/hm-proxy/Dockerfile:proxy/hm-proxy/Dockerfile"
+    "configs/proxy/hm-proxy/gateway_main.py:proxy/hm-proxy/gateway_main.py"
+    "configs/proxy/hm-proxy/gateway/__init__.py:proxy/hm-proxy/gateway/__init__.py"
+    "configs/proxy/hm-proxy/gateway/app.py:proxy/hm-proxy/gateway/app.py"
+    "configs/proxy/hm-proxy/gateway/config.py:proxy/hm-proxy/gateway/config.py"
+    "configs/proxy/hm-proxy/gateway/handlers.py:proxy/hm-proxy/gateway/handlers.py"
+    "configs/proxy/hm-proxy/gateway/upstream.py:proxy/hm-proxy/gateway/upstream.py"
+    "configs/proxy/hm-proxy/gateway/error_mapping.py:proxy/hm-proxy/gateway/error_mapping.py"
+    "configs/proxy/hm-proxy/gateway/logger.py:proxy/hm-proxy/gateway/logger.py"
+    "configs/proxy/hm-proxy/.gitignore:proxy/hm-proxy/.gitignore"
+
     # Mihomo proxy config (R36: per-key NV proxy groups)
     "configs/mihomo/config-opc_uname.yaml:mihomo/config-opc_uname.yaml"
     "configs/mihomo/config-opc2_uname.yaml:mihomo/config-opc2_uname.yaml"
