@@ -121,25 +121,27 @@ if not NV_PROXY_URL_MAP and NV_PROXY_URL:
 # Prevents JSON file from growing indefinitely. 1200000 ≈ 12 slots × 100000 cycles
 NV_MAX_CYCLE = int(os.environ.get("NV_MAX_CYCLE", "1200000"))
 
-# NV model IDs on NVIDIA API — R38.7: 2-tier fallback (glm5.1→kimi, deepseek REMOVED)
+# NV model IDs on NVIDIA API — R38.8: 3-tier fallback (glm5.1→kimi→deepseek, all restored)
 # When NV last-resort triggers (MS all-429), tries each tier in order.
 # Each tier tries all 5 NV keys (per-tier RR, persistent counter).
 # Tier all-429/empty-200 → next tier. All tiers fail → ABORT-NO-FALLBACK.
+# R38.8: deepseek-v4-pro RESTORED as tier 3 (tested OK, avg 1-3s, 100% success rate)
 # R38.7: NV_TIER_TIMEOUT_BUDGET_S caps total NV time at 90s (prevents 450s catastrophic blocking).
 NV_MODEL_IDS = {
     "glm5.1": "z-ai/glm-5.1",
+    "deepseek": "deepseek-ai/deepseek-v4-pro",
 }
 
-# R38.6→R38.7: NV 2-tier fallback model list per base model.
-# deepseek-ai/deepseek-v4-flash REMOVED from NV fallback chain (R38.7).
-# Data evidence: 5/5 NV keys all 30s+ timeout on deepseek-v4-flash — zero success rate.
-# Keeping it wasted 225s per request with zero value.
-# deepseek config entry preserved in NV_MODEL_IDS for future re-enablement if NV API restores it.
+# R38.8: NV 3-tier fallback model list per base model.
+# deepseek-ai/deepseek-v4-pro RESTORED as tier 3 (R38.8).
+# R38.6 removed deepseek-v4-flash (all 30s+ timeout, zero success rate) — different model!
+# v4-pro tested OK: avg 1-3s, 100% success rate on all proxy environments.
 # Can be overridden via NV_FALLBACK_TIERS env var (JSON list of [model_id, label] pairs).
 _NV_FALLBACK_TIERS_DEFAULT = {
     "glm5.1": [
-        ("z-ai/glm-5.1",          "glm5.1_nv"),    # Tier 1: original model
-        ("moonshotai/kimi-k2.6",  "kimi_nv"),      # Tier 2: kimi fallback (tested OK)
+        ("z-ai/glm-5.1",              "glm5.1_nv"),      # Tier 1: original model
+        ("moonshotai/kimi-k2.6",      "kimi_nv"),        # Tier 2: kimi fallback
+        ("deepseek-ai/deepseek-v4-pro", "deepseek_nv"),  # Tier 3: deepseek fallback (R38.8 restored)
     ],
 }
 

@@ -410,7 +410,8 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
                          prior_cycle_attempts, is_stream, force_stream):
     """Try NV keys as last-resort fallback when ALL MS keys returned 429.
 
-    R38.6→R38.7: 2-tier NV model fallback (glm5.1→kimi, deepseek REMOVED).
+    R38.8: 3-tier NV model fallback (glm5.1→kimi→deepseek-v4-pro, all restored).
+    R38.8: NV conn-fast-break — 2 consecutive connection errors → skip tier immediately.
     R38.7: NV_TIER_TIMEOUT_BUDGET_S prevents catastrophic cumulative timeouts.
       Without budget: 5 keys × 30s × 3 tiers = 450s max blocking.
       With 90s budget: at most ~3 key timeouts in tier1 + ~2-3 in tier2 before ABORT.
