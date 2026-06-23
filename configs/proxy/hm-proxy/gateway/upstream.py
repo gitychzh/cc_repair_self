@@ -20,7 +20,6 @@ import datetime
 import urllib.parse
 
 from .config import (
-    LITELLM_KEY, PROXY_TIMEOUT, UPSTREAM_TIMEOUT,
     NV_BASEURL, NV_NUM_KEYS, NV_KEYS, NV_PROXY_URL, NV_ENABLED, NV_MODEL_IDS,
     NV_TIMEOUT, NV_PROXY_URL_MAP, DEFAULT_NV_MODEL,
     _next_hm_nv_key,
