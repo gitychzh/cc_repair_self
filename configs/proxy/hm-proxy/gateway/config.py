@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Configuration for Hermes NV proxy (hm40006) — R38.9.
 
+R38.10: deepseek-v4-pro bypasses DEGRADING integrate API → NVCF pexec orion function (ACTIVE).
+       kimi restored as primary (deepseek data collection experiment concluded:
+       integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429).
 R38.9: Tier order changed — deepseek_v4_pro primary → kimi fallback → glm5.1 tier 3.
        Purpose: collect deepseek latency data under real CC workload (150K+ input chars).
        Previous order was kimi→glm5.1→deepseek (R38.8). Reverting glm5.1 from primary
@@ -14,9 +17,12 @@ Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
-Chain: Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
+Chain (kimi/glm5.1): Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → integrate API
+Chain (deepseek): Hermes → hm40006 → NVCF pexec (orion ACTIVE) → mihomo per-key SOCKS5 proxy → NV API
+
 hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
-LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s)
+LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s) — for kimi/glm5.1 only
+NVCF pexec does: direct NV function invocation — for deepseek only (bypasses DEGRADING integrate API)
 """
 import os
 import sys
@@ -48,23 +54,53 @@ for i in range(1, 6):
 HM_NUM_KEYS = len(HM_LITELLM_URLS)  # Should be 5
 HM_LITELLM_KEY = os.environ.get("HM_LITELLM_KEY", "sk-litellm-local")
 
+# ─── NVCF pexec configuration (R38.10) ──────────────────────────────────────
+# deepseek-v4-pro: integrate API routes to DEGRADING ai-deepseek-v4-pro → 429.
+# NVCF pexec routes to ACTIVE orion-deepseek-v4-pro → 200.
+# Only deepseek uses NVCF pexec; kimi/glm5.1 still go through LiteLLM (integrate API
+# routes them to ACTIVE functions).
+NVCF_PEXEC_MODELS = {
+    "deepseek_hm_nv": {
+        "function_id": os.environ.get("NVCF_DEEPSEEK_FUNCTION_ID",
+                                      "4e533b45-dc54-4e3a-a69a-6ff24e048cb5"),  # orion-deepseek-v4-pro (ACTIVE)
+        "nvcf_base_url": os.environ.get("NVCF_BASE_URL",
+                                        "api.nvcf.nvidia.com"),
+        "nvcf_path_prefix": "/v2/nvcf/pexec/functions",
+    },
+}
+
+# ─── NV API keys for direct NVCF pexec access ──────────────────────────────
+# hm-proxy bypasses LiteLLM for NVCF pexec models, needs NV API keys directly.
+HM_NV_KEYS = []
+for i in range(1, 6):
+    key = os.environ.get(f"HM_NV_KEY{i}", "")
+    if key:
+        HM_NV_KEYS.append(key)
+HM_NV_NUM_KEYS = len(HM_NV_KEYS)
+
+# ─── Per-key mihomo proxy URLs for NVCF pexec ──────────────────────────────
+# Same proxy mapping as LiteLLM containers: K1→7894, K2→7895, etc.
+HM_NV_PROXY_URLS = []
+for i in range(1, 6):
+    url = os.environ.get(f"HM_NV_PROXY_URL{i}", "")
+    if url:
+        HM_NV_PROXY_URLS.append(url)
+
+if HM_NV_NUM_KEYS > 0 and HM_NV_NUM_KEYS != HM_NUM_KEYS:
+    print(f"[HM-CONFIG] WARN: {HM_NV_NUM_KEYS} NV keys but {HM_NUM_KEYS} LiteLLM URLs "
+          f"(should match)", file=sys.stderr, flush=True)
+
 if HM_NUM_KEYS < 5:
     print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} LiteLLM URLs configured (expected 5)", file=sys.stderr, flush=True)
 
-# ─── Three-tier fallback model chain (R38.2→R38.4→R38.7) ─────────────────────
-# R38.7: deepseek_hm_nv RESTORED as tier 3 fallback.
-# Data evidence: After nv_proxy_selector reselected better nodes, deepseek-v4-pro
-# succeeded on 3/5 ports (7894=1.3s, 7896=6.7s, 7897=3.4s) + 4/5 LiteLLM containers.
-# R38.6 removal was correct at the time (0/5 success due to stale Hysteria2 nodes).
-# R38.7 restoration: node reselection fixed the root cause. deepseek ~60% success rate
-# is acceptable as tier 3 — only tried when glm5.1+kimi both fail.
+# ─── Three-tier fallback model chain (R38.2→R38.4→R38.10) ─────────────────────
+# R38.10: kimi restored as primary. deepseek experiment concluded — integrate API
+# routes deepseek-v4-pro to DEGRADING ai-deepseek-v4-pro → 429. deepseek now uses
+# NVCF pexec direct path (orion-deepseek-v4-pro, ACTIVE) as tier 2 fallback.
+# R38.7: deepseek_hm_nv RESTORED as tier 3 fallback (reselected nodes → 3/5 success).
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# R38.9: deepseek_v4_pro as primary (testing latency data collection)
-#   Previous: kimi_hm_nv primary → now testing deepseek_v4_pro as tier 1
-#   Goal: collect deepseek latency data under real CC workload (>150K input chars)
-#   REVERT WHEN: deepseek data collection complete, or deepseek proves unsuitable
-# Priority order: deepseek (primary) → kimi (fallback 1) → glm5.1 (fallback 2)
-NV_MODEL_TIERS = ["deepseek_hm_nv", "kimi_hm_nv", "glm5.1_hm_nv"]
+# Priority order: kimi (primary) → deepseek (fallback 1, NVCF pexec) → glm5.1 (fallback 2)
+NV_MODEL_TIERS = ["kimi_hm_nv", "deepseek_hm_nv", "glm5.1_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -79,7 +115,7 @@ LITELLM_MODEL_MAP = {
     "deepseek_hm_nv": "nvdeepseek",
 }
 
-DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.9: deepseek primary (testing data collection); revert after evaluation
+DEFAULT_NV_MODEL = "kimi_hm_nv"  # R38.10: kimi primary (deepseek experiment concluded → DEGRADING integrate API)
 
 # ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
 # Maximum time to spend on ONE tier before giving up and moving to next tier.

@@ -141,6 +141,8 @@ proxy-groups:
 # ── R38.8: 5 NV proxy groups — type:select, managed by script ──
 # Script reads mihomo API NV latency data (from health-check url = NV API /v1/models),
 # ranks by delay, assigns top5 to K1-K5. health-check url = NV API (not gstatic).
+# Script reads mihomo API NV latency data (from health-check), ranks by delay,
+# assigns top5 to K1-K5. health-check url = NV API /v1/models (not gstatic).
 # This ensures: NV-specific latency data + alive detection + no overlap + script control.
 - name: ♻️US-NV-K1
   proxies: []
@@ -173,6 +175,7 @@ proxy-providers:
     # Root cause: gstatic alive nodes may be dead to NV API (delay=0, nv_alive=False)
     # Now mihomo kernel tests NV API directly every 180s → dead nodes detected within 3min
     filter: 美国
+    filter: 美国|圣何塞|阿什本|洛杉矶
     health-check:
       enable: true
       interval: 180

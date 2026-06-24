@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname + opc2_uname (R38.9, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.10, 2026-06-24)
 
 ## Architecture (R38.9)
 ```
@@ -26,13 +26,18 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   _hm_ms suffix for Hermes MS fallback endpoint (R38.4: _hm_ms = Hermes + ModelScope)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.9: deepseek primary + 3-tier fallback)
+:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.10: kimi primary + deepseek NVCF pexec + 3-tier fallback)
+  R38.10: deepseek bypasses DEGRADING integrate API → NVCF pexec orion (ACTIVE) via SOCKS5 proxy
+  kimi/glm5.1 still via LiteLLM (integrate API routes them to ACTIVE functions)
+  Mixed path: deepseek → SOCKS5 → api.nvcf.nvidia.com/pexec; kimi/glm5.1 → LiteLLM → integrate API
   R38.7: deepseek RESTORED as tier 3
   R38.8: depends_on condition:service_healthy (hm40006 waits for ALL 5 LiteLLM nv_hm healthy before starting)
   R38.8: connection fast-break (2 consecutive conn errors → skip tier)
   R38.8: 408 (LiteLLM timeout) 加入 cycling 错误列表 (was: 只 cycle 429/500/502 → 408立即返回错误)
   R38.9: deepseek_hm_nv 作为 primary tier (测试延迟数据采集)
-  默认 deepseek_hm_nv → 失败 → kimi_hm_nv → glm5.1_hm_nv → 全失败 → ABORT
+  R38.9: deepseek data collection concluded → integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429
+  R38.10: NVCF pexec direct path for deepseek (orion ACTIVE function, bypasses DEGRADING routing)
+  默认 kimi_hm_nv → deepseek_hm_nv(NVCF pexec) → glm5.1_hm_nv → 全失败 → ABORT
   TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
@@ -58,7 +63,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.9: deepseek primary (testing) + 3-tier fallback + conn-fast-break |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.10: kimi primary + deepseek NVCF pexec(SOCKS5) + 3-tier fallback |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
 | nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7894 proxy |
 | nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7895 proxy |
@@ -67,19 +72,19 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | nv_hm_41105 | :41105 | LiteLLM NV HM K5 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7899 proxy |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
-## R38 Changes (opc_uname, 2026-06-23) — Hermes 重新工程化
+## R38 Changes (opc_uname, 2026-06-24) — deepseek NVCF pexec direct path
 
-### 根因分析
-Hermes 是独立全局安装的外部 app（hermes-agent 0.17.0, ~/.hermes-venv/bin/hermes），
-有自己的 config（~/.hermes/config.yaml）、fallback provider、model_aliases。
-R37 hm-proxy 用 HTTPS CONNECT tunnel 直连 NV API，绕过 LiteLLM。
-R38 重新工程化：hm40006 改为路由到 5 个 LiteLLM 容器（41101-41105），每个容器走
-各自的 mihomo per-key proxy (7894-7899)，实现 IP 多样性 + LiteLLM drop_params 支持。
+### 根因分析 (R38.10)
+integrate.api.nvidia.com/v1 路由 deepseek-ai/deepseek-v4-pro → DEGRADING ai-deepseek-v4-pro NVCF function → 429。
+NVCF pexec endpoint api.nvcf.nvidia.com/v2/nvcf/pexec/functions/{id} 可直接调用 ACTIVE orion-deepseek-v4-pro → 200。
+kimi/glm5.1 的 integrate API 路由到 ACTIVE functions（nvquery-kimi-k2_6, ai-glm5_1/dynamo-glm-5_1），无需 bypass。
 
-关键发现：
-- LiteLLM v1.87 的 HTTPS_PROXY env 对 httpx 有效（容器级代理）
-- LiteLLM HM 容器曾用 DATABASE_URL 导致 "model=None" bug（DB ProxyModelTable 空）
-- 修复：去掉 DATABASE_URL → STORE_MODEL_IN_DB=False（in-memory mode，从 config.yaml 读）
+### R38.10 修改内容
+1. **hm-proxy config.py**: 新增 NVCF_PEXEC_MODELS（deepseek→orion function ID）+ HM_NV_KEYS/HM_NV_PROXY_URLS
+2. **hm-proxy upstream.py**: NVCF pexec if/else分支 — deepseek用SOCKS5代理直连NVCF；kimi/glm5.1走LiteLLM
+3. **hm-proxy Dockerfile**: 添加 PySocks 安装（ensurepip + pip install）
+4. **docker-compose.yml**: hm40006 新增 HM_NV_KEY1-5 + HM_NV_PROXY_URL1-5 env vars
+5. **Tier order**: deepseek_hm_nv 从 primary → fallback 1（kimi恢复primary），deepseek走NVCF pexec
 
 ### 修改内容
 1. **hm40006 upstream.py**: 从 HTTPS CONNECT tunnel 直连 NV → 转发到 LiteLLM 41101-41105
@@ -139,3 +144,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.9: hm40006 tier order changed — deepseek_hm_nv primary → kimi_hm_nv fallback → glm5.1_hm_nv tier 3 (目的：采集 deepseek 大上下文延迟数据)
 - R38.9: opc2_uname Hermes 完全复制远程部署 — hm40006 R38.9 3-tier + nv_hm_41101-41105 timeout=35s + mihomo nv-us-provider NV API health-check + Hermes v0.17.0 升级 + primary=40006(NV) + fallback=40003(MS)
 - R38.9: opc2_uname Hermes Dashboard WebUI 复刻 — systemd hermes-dashboard.service (0.0.0.0:9119, --insecure) + 全 API 验证通过 + WS JSONRPC session.create ✅ + Tailscale 外部可达
+- R38.10: deepseek NVCF pexec direct path — bypasses DEGRADING integrate API routing → SOCKS5 proxy → api.nvcf.nvidia.com/orion-deepseek-v4-pro (ACTIVE). kimi restored as primary. 9/9 deepseek tests succeed (avg 1.2-2.2s). HTTPS CONNECT tunnel failed (mihomo 400 Bad Request) → SOCKS5 works.
