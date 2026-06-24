@@ -638,14 +638,16 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         "startup_retry_attempted": retry_idx > 0,
     })
 
-    _log_metrics({
-        "request_id": request_id,
-        "error_subcategory": "all_tiers_failed",
-        "start_tier": NV_MODEL_TIERS[start_tier_idx],
-        "tiers_tried": final_result.fallback_tiers_used,
-        "total_cycle_attempts": len(all_attempts),
-        "elapsed_ms": final_result.elapsed_ms,
-        "startup_retry_attempted": retry_idx > 0,
-    })
+    # R41: Do NOT call _log_metrics() here. The metrics dict passed into this
+    # function (from handlers._handle_openai_nv) is written by handlers.py in
+    # the `all_keys_exhausted` branch (handlers.py ~L142) with full DB-compatible
+    # fields (request_id, timestamp, duration_ms, status, fallback_tiers_used...).
+    # A second _log_metrics here previously emitted a *sparse* dict (only
+    # request_id/error_subcategory/start_tier/tiers_tried/elapsed_ms) missing the
+    # NOT NULL `ts`/`timestamp` and the `duration_ms`/`fallback_tiers_used` keys
+    # that db._build_request_row reads. One sparse dict in a flush batch made the
+    # whole batch INSERT fail and rollback → hermes_logs.hm_requests stayed empty
+    # (~96 rows on 06-24, only 6 landed). error_detail file above is unaffected.
+    # Removing this duplicate restores DB persistence without losing event signal.
 
     return final_result
