@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.12, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.13, 2026-06-24)
 
-## Architecture (R38.9)
+## Architecture (R38.13: LiteLLM NV HM containers removed)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
@@ -32,33 +32,20 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
     glm5.1 → ai-glm5_1 (ACTIVE), strips thinking_budget (NVCF rejects it ❌) ✅
     kimi → nvquery-kimi-k2.6 (ACTIVE), all params pass through ✅
   No LiteLLM routing — hm40006 connects directly via SOCKS5 proxy per-key mihomo
-  LiteLLM 41101-41105 containers kept as manual fallback only (not actively used)
-  R38.7: deepseek RESTORED as tier 3
-  R38.8: depends_on condition:service_healthy (hm40006 waits for ALL 5 LiteLLM nv_hm healthy before starting)
-  R38.8: connection fast-break (2 consecutive conn errors → skip tier)
-  R38.8: 408 (LiteLLM timeout) 加入 cycling 错误列表 (was: 只 cycle 429/500/502 → 408立即返回错误)
-  R38.9: deepseek_hm_nv 作为 primary tier (测试延迟数据采集)
-  R38.9: deepseek data collection concluded → integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429
-  R38.10: NVCF pexec direct path for deepseek (orion ACTIVE function, bypasses DEGRADING routing)
+  R38.13: LiteLLM 41101-41105 containers REMOVED (no longer needed, all routing via NVCF pexec)
   默认 deepseek_hm_nv(NVCF pexec) → glm5.1_hm_nv → kimi_hm_nv → 全失败 → ABORT
   TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
-  每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
-  LiteLLM timeout=35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s)
-  LiteLLM drop_params=true 自动 strip NV unsupported params
-  Connection:close on all requests (prevent BrokenPipe errors)
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
   R38.8: mihomo health-check url = NV API /v1/models (not gstatic) → dead nodes detected within 3min
   R38.8: nv_proxy_selector reads mihomo API data (no self-testing), */3 cron, execution <1s
-  nv_proxy_selector cron: */3 * * * * (R38.8: from */15, script now <1s, no self-testing)
   Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.9: default=deepseek_hm_nv, fallback default_model=glm5.1_hm_ms)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
-→ :41101-41105 LiteLLM nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
-→ :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA integrate API (health-check url = NV API, interval=180s)
+→ :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA API (health-check url = NV API, interval=180s)
 ```
 
-## Containers (R38.4: 7 core + 1 external + 5 HM LiteLLM = 13 total)
+## Containers (R38.13: 7 core + 1 external + 1 LiteLLM MS + 1 DB = 10 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
@@ -68,14 +55,22 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
 | hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.12: ALL models NVCF pexec (deepseek/glm5.1/kimi), no LiteLLM routing |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
-| nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 2 dep (glm5.1/kimi), FALLBACK ONLY |
-| nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 2 dep (glm5.1/kimi), FALLBACK ONLY |
-| nv_hm_41103 | :41103 | LiteLLM NV HM K3 | 1CPU/1GiB | 2 dep (glm5.1/kimi), FALLBACK ONLY |
-| nv_hm_41104 | :41104 | LiteLLM NV HM K4 | 1CPU/1GiB | 2 dep (glm5.1/kimi), FALLBACK ONLY |
-| nv_hm_41105 | :41105 | LiteLLM NV HM K5 | 1CPU/1GiB | 2 dep (glm5.1/kimi), FALLBACK ONLY |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
-## R38 Changes (opc_uname, 2026-06-24) — R38.12 全模型 NVCF pexec
+## R38 Changes (opc_uname, 2026-06-24) — R38.13 LiteLLM NV HM cleanup
+
+### R38.13: LiteLLM NV HM containers removed
+hm40006 logs confirm NVCF pexec is stable (77 success, 5 transient SSLEOF→retry→success, 0 ABORT, 0 tier fallback needed).
+All 3 models (deepseek 247 reqs, glm5.1 48 reqs, kimi 24 reqs) route via NVCF pexec with no LiteLLM dependency.
+
+**Removed:**
+- 5 containers: nv_hm_41101~41105 (each ~600MB RAM, 1CPU, 0 traffic since R38.12)
+- 5 config files: litellm-nv-hm/config-k1~k5.yaml
+- 5 log dirs: /opt/cc-infra/logs/litellm-nv-hm-k1~k5
+- 2 unused Docker images: litellm/litellm:v1.89.2 (1.7GB), ghcr.io/berriai/litellm:v1.83.14 (2.56GB)
+- 5 service definitions from docker-compose.yml (~170 lines)
+
+**Resource savings:** ~3GB RAM reclaimed + ~4.26GB disk reclaimed + 5 CPU slots freed. 13→10 containers.
 
 ### 根因分析 (R38.10)
 integrate.api.nvidia.com/v1 路由 deepseek-ai/deepseek-v4-pro → DEGRADING ai-deepseek-v4-pro NVCF function → 429。
@@ -136,9 +131,6 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.4: Dual suffix convention: _hm_nv(Hermes+NV) / _hm_ms(Hermes+MS), _nv→_hm_nv in hm-proxy, _hm→_hm_ms in passthrough-proxy, RR counter migration nv_→hm_nv_, opc_uname disk cleanup (80GB Hermes JIT .so cache removed)
 - R38.5: throttle cycling豁免 + cooldown恢复 + K5代理修复 + NV per-key RPM
 - R38.6: 3 CRITICAL fixes — sock.settimeout BEFORE getresponse() (infinite read timeout bug), deepseek removed from HM fallback chain (NV API unreachable, all 30s timeout), tier timeout budget 90s, KEY_COOLDOWN 30→15, MIN_OUTBOUND 3.5→1.5
-
-- R38.5: hm-proxy cycling throttle exemption + cooldown restore + K5 proxy fix
-- R38.5 Round 2: UPSTREAM_TIMEOUT 60→45s + tier-skip when all keys cooling + nv_proxy_selector.sh→.py
 - R38.7: deepseek RESTORED as tier 3 (nv_proxy_selector节点重选后3/5端口成功) + TIER_TIMEOUT_BUDGET_S 90→60s + LiteLLM timeout 60→35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s) + nv_proxy_selector cron */15
 - R38.8: hm40006 Connection refused storm fix — depends_on service_healthy + conn-fast-break(2 consecutive errors→skip tier) + startup-retry(wait 5s retry once for transient restarts) + cc-proxy NV conn-fast-break
 - R38.8: mihomo nv-us-provider health-check url changed from gstatic→NV API /v1/models — root cause: gstatic alive nodes may be dead to NV API; NV API health-check detects dead nodes within 180s
@@ -149,4 +141,5 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.9: opc2_uname Hermes Dashboard WebUI 复刻 — systemd hermes-dashboard.service (0.0.0.0:9119, --insecure) + 全 API 验证通过 + WS JSONRPC session.create ✅ + Tailscale 外部可达
 - R38.10: deepseek NVCF pexec direct path — bypasses DEGRADING integrate API routing → SOCKS5 proxy → api.nvcf.nvidia.com/orion-deepseek-v4-pro (ACTIVE). kimi restored as primary. 9/9 deepseek tests succeed (avg 1.2-2.2s). HTTPS CONNECT tunnel failed (mihomo 400 Bad Request) → SOCKS5 works.
 - R38.11: Tier reorder — deepseek primary (NVCF pexec 100% success, avg 1.8s) → glm5.1 fallback 1 (~20s) → kimi last-resort (~4s). NVCF pexec no longer strips thinking_budget/reasoning_effort (endpoint accepts them, tested 200 OK).
-- R38.12: ALL models NVCF pexec — glm5.1 and kimi also bypass integrate API → direct SOCKS5 → NVCF ACTIVE functions. Per-model strip_params declaration (glm5.1 strips thinking_budget, deepseek/kimi pass all). LiteLLM 41101-41105 removed from active routing (kept as manual fallback). hm40006 no longer depends_on LiteLLM containers. upstream.py from 836→~420 lines (deleted LiteLLM branch).
+- R38.12: ALL models NVCF pexec — glm5.1 and kimi also bypass integrate API → direct SOCKS5 → NVCF ACTIVE functions. Per-model strip_params declaration (glm5.1 strips thinking_budget, deepseek/kimi pass all). LiteLLM 41101-41105 removed from active routing. hm40006 no longer depends_on LiteLLM containers. upstream.py from 836→~420 lines (deleted LiteLLM branch).
+- R38.13: LiteLLM NV HM containers (41101-41105) REMOVED — stopped, removed, config files deleted, log dirs cleaned, unused Docker images pruned. 13→10 containers. ~3GB RAM + ~4.26GB disk reclaimed.
