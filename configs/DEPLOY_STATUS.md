@@ -59,6 +59,26 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ## R38 Changes (opc_uname, 2026-06-24) — R38.14 HM tier reorder (glm5.1 primary)
 
+### R41: hm-proxy DB 持久化修复 — 删除 all_tiers_failed 路径的残缺 _log_metrics (2026-06-25, cc1→cc2)
+
+**根因（cc2 hm40006 metrics 数据驱动发现）**：分析 cc2 hm40006 `/app/logs/hm_metrics.2026-06-2{4,5}.jsonl`（150 请求样本）：200=100(66.7%) / 502=18 / 429=7 / all_tiers_exhausted=25(16.7%)，fallback 触发率 56%。但 `hermes_logs.hm_requests` 表只有 6 行（全 02:29-02:31 一分钟内），02:31 后零落库。
+
+直接根因：`upstream.py execute_request()` 在 all_tiers_failed 终点（旧 L641）调用了**第二次** `_log_metrics({残缺dict})`，该 dict 只有 `request_id/error_subcategory/start_tier/tiers_tried/elapsed_ms`，**缺 NOT NULL 的 `timestamp`(`ts` 列) 和 `duration_ms`/`fallback_tiers_used` 等 db._build_request_row 读取的键**。一个残缺 dict 混入 flush batch → 整批 `INSERT ... VALUES %s` 失败 → rollback → **batch 内全部 50 行丢弃**。因 56% fallback + 16.7% 全失败，几乎每个 batch 都含失败请求 → DB 长期空。
+
+而 `handlers.py` all_keys_exhausted 分支（~L142）已用**完整** metrics dict 写过同一事件（带 request_id/timestamp/duration_ms/status/fallback_tiers_used），upstream.py 那次是**重复且残缺的双写**。
+
+**修复**：删除 `upstream.py execute_request()` 末尾的 `_log_metrics({...})` 调用，保留 `_log_error_detail`（error_detail 文件不受影响，tier_summaries 仍在）。handlers.py 的完整写入成为唯一 DB 写入点。
+
+**验证（cc2, 2026-06-25 03:55）**：
+- rebuild hm40006 后触发 2 个真实请求（kimi 200/1.7s + glm5.1 200/28.8s）→ 2 行均正确落库 hm_requests（ts/request_model/status/duration_ms/tier_model 字段完整）。
+- `_build_request_row` 单元验证：完整 metrics dict → 32 列 tuple，NOT NULL 列（request_id/ts/host_machine）全非空。
+- 容器日志零 `[HM-DB] flush failed` / `connect failed`。
+- hm40006 healthy，rr_counter 持久化正常，环形 fallback chain 不变。
+
+**遗留（下一轮候选）**：`hm_tier_attempts` 表仍 0 行 — 成功路径 handlers 未填充 `key_cycle_details` 字段，导致 tier attempt 明细不入库。hm_requests 主表已恢复，可观测性核心恢复。
+
+**教训**：`_log_metrics` 的 dict schema 必须与 `db._build_request_row` 期望字段对齐，否则一个残缺 dict 毒死整批（batch INSERT 原子性）。双写同事件时两处 schema 必须一致。
+
 ### R40: hm-proxy fallback 根因修复 + 日志入 Postgres + 工程化 (2026-06-25)
 
 **根因（远程 opc_uname hermes 卡住）**：远程 hm40006 容器仍跑 R38.9 旧代码（容器 2026-06-24 16:43 创建，从未 rebuild 到 R38.14），`NV_MODEL_TIERS=["deepseek","kimi","glm5.1"]`，glm5.1 在末位(idx=2)。Hermes `default_model=glm5.1_hm_nv` → `start_tier_idx=2` → `NV_MODEL_TIERS[2:]=["glm5.1"]` 只剩 1 个 tier，**无 fallback**。glm5.1 NVCF 2 次 timeout(45s+15s+connect开销=74.2s) → 直接 502 `Tiers tried: [glm5.1_hm_nv: 2×mixed]`，Hermes 持续 502 卡死。本机 6/24 08:06 也出现过同模式(tiers_tried=['glm5.1'], 71.4s)。
