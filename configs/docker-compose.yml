@@ -248,7 +248,7 @@ services:
       # Prevents catastrophic cumulative timeouts: 5 keys × 30s × 3 tiers = 450s → now capped at 90s.
       # Each tier gets a share of the remaining budget. Budget exhausted → ABORT immediately.
       NV_FALLBACK_TIERS: '[["z-ai/glm-5.1","glm5.1_nv"],["moonshotai/kimi-k2.6","kimi_nv"],["deepseek-ai/deepseek-v4-pro","deepseek_nv"]]'
-      NV_TIER_TIMEOUT_BUDGET_S: "90"
+      NV_TIER_TIMEOUT_BUDGET_S: "45"  # R41-1: 90→45 — NV last-resort 24h data: 43 triggers, 8 success (18.6%), 37 fail at attempt 4 (~102s). Front keys timeout→NV unavailable, 45s=1key(30s)+1key(15s), saves ~55s/fail.
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"
       TZ: Asia/Shanghai
