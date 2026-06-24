@@ -17,7 +17,7 @@ R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:c
 R38.5: throttle_outbound() only on first key attempt (not during cycling).
 R38.2→R38.4: Per-tier persistent RR counters, dual suffix convention.
 
-Default tier: kimi_hm_nv (primary), deepseek_hm_nv (fallback 1, NVCF pexec), glm5.1_hm_nv (fallback 2).
+Default tier: deepseek_hm_nv (primary, NVCF pexec), glm5.1_hm_nv (fallback 1), kimi_hm_nv (last resort).
 If all 5 keys fail → fallback to next tier.
 If all tiers also all-fail → ABORT-NO-FALLBACK.
 
@@ -679,10 +679,10 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
 
 def execute_litellm_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NV request via LiteLLM with three-tier fallback (R38.8).
+    """Execute NV request via LiteLLM with three-tier fallback (R38.11).
 
-    R38.8: Tier chain: glm5.1_hm_nv → kimi_hm_nv → deepseek_hm_nv
-    - mapped_model determines starting tier (default: glm5.1_hm_nv)
+    R38.11: Tier chain: deepseek_hm_nv → glm5.1_hm_nv → kimi_hm_nv
+    - mapped_model determines starting tier (default: deepseek_hm_nv)
     - Each tier tries 5 keys with per-tier persistent RR counter
     - On tier all-fail: fallback to next tier (from current position)
     - All tiers fail: ABORT-NO-FALLBACK

@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006) — R38.9.
+"""Configuration for Hermes NV proxy (hm40006) — R38.11.
 
+R38.11: deepseek restored as primary tier (NVCF pexec orion ACTIVE, 100% success rate).
+        glm5.1 as fallback 1. kimi as last-resort (was primary in R38.10).
 R38.10: deepseek-v4-pro bypasses DEGRADING integrate API → NVCF pexec orion function (ACTIVE).
-       kimi restored as primary (deepseek data collection experiment concluded:
-       integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429).
-R38.9: Tier order changed — deepseek_v4_pro primary → kimi fallback → glm5.1 tier 3.
-       Purpose: collect deepseek latency data under real CC workload (150K+ input chars).
-       Previous order was kimi→glm5.1→deepseek (R38.8). Reverting glm5.1 from primary
-       because NV glm5.1 avg=23s/45%cycling is too slow for primary tier.
-R38.8 preserved: kimi stable ~4s as tier 2 fallback, conn-fast-break, health-check fixes.
-R38.7: deepseek RESTORED as tier 3 (3/5 keys succeed after nv_proxy_selector reselected).
+        kimi restored as primary (deepseek data collection experiment concluded:
+        integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429).
+R38.8 preserved: conn-fast-break, health-check fixes.
 R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:close.
 R38.3→R38.4: Dual suffix — _hm_nv (Hermes+NV) / _hm_ms (Hermes+MS).
 
@@ -17,11 +14,11 @@ Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
-Chain (kimi/glm5.1): Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → integrate API
-Chain (deepseek): Hermes → hm40006 → NVCF pexec (orion ACTIVE) → mihomo per-key SOCKS5 proxy → NV API
+Chain (deepseek): Hermes → hm40006 → NVCF pexec (orion ACTIVE) → per-key SOCKS5 proxy → mihomo → NV API
+Chain (glm5.1/kimi): Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → integrate API
 
 hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
-LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s) — for kimi/glm5.1 only
+LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s) — for glm5.1/kimi only
 NVCF pexec does: direct NV function invocation — for deepseek only (bypasses DEGRADING integrate API)
 """
 import os
@@ -94,13 +91,12 @@ if HM_NUM_KEYS < 5:
     print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} LiteLLM URLs configured (expected 5)", file=sys.stderr, flush=True)
 
 # ─── Three-tier fallback model chain (R38.2→R38.4→R38.10) ─────────────────────
-# R38.10: kimi restored as primary. deepseek experiment concluded — integrate API
-# routes deepseek-v4-pro to DEGRADING ai-deepseek-v4-pro → 429. deepseek now uses
-# NVCF pexec direct path (orion-deepseek-v4-pro, ACTIVE) as tier 2 fallback.
+# R38.11: deepseek restored as primary (NVCF pexec orion ACTIVE, 100% success rate).
+# kimi as last-resort (integrate API routes to ACTIVE nvquery-kimi-k2_6).
 # R38.7: deepseek_hm_nv RESTORED as tier 3 fallback (reselected nodes → 3/5 success).
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# Priority order: kimi (primary) → deepseek (fallback 1, NVCF pexec) → glm5.1 (fallback 2)
-NV_MODEL_TIERS = ["kimi_hm_nv", "deepseek_hm_nv", "glm5.1_hm_nv"]
+# R38.11: deepseek primary (NVCF pexec, 1.2~2.2s avg, 100% success) → glm5.1 (NV, ~20s avg) → kimi (last resort, ~4s avg)
+NV_MODEL_TIERS = ["deepseek_hm_nv", "glm5.1_hm_nv", "kimi_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -115,7 +111,7 @@ LITELLM_MODEL_MAP = {
     "deepseek_hm_nv": "nvdeepseek",
 }
 
-DEFAULT_NV_MODEL = "kimi_hm_nv"  # R38.10: kimi primary (deepseek experiment concluded → DEGRADING integrate API)
+DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.11: deepseek primary (NVCF pexec orion ACTIVE, 100% success rate)
 
 # ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
 # Maximum time to spend on ONE tier before giving up and moving to next tier.
@@ -144,21 +140,21 @@ MODEL_MAP = {
     "deepseek": "deepseek_hm_nv",
     "deepseek-v4-pro": "deepseek_hm_nv",
     "deepseek-ai/deepseek-v4-pro": "deepseek_hm_nv",
-    # Backward compat: unqualified default → deepseek (R38.9 primary)
+    # Backward compat: unqualified default → deepseek (R38.11 primary)
     "deepseek_hm": "deepseek_hm_nv",
-    # Fallback tier 1 — NV API (Hermes)
+    # Fallback tier 1 — NV API (Hermes) R38.11
+    "glm5.1_hm_nv": "glm5.1_hm_nv",
+    "glm5.1_nv": "glm5.1_hm_nv",       # R38.3 _nv alias → R38.4 _hm_nv
+    "glm-5.1": "glm5.1_hm_nv",
+    "z-ai/glm-5.1": "glm5.1_hm_nv",
+    "glm5.1_hm": "glm5.1_hm_nv",
+    # Last-resort tier — NV API (Hermes) R38.11
     "kimi_hm_nv": "kimi_hm_nv",
     "kimi_nv": "kimi_hm_nv",            # R38.3 alias → R38.4
     "kimi": "kimi_hm_nv",
     "kimi-k2.6": "kimi_hm_nv",
     "moonshotai/kimi-k2.6": "kimi_hm_nv",
     "kimi_hm": "kimi_hm_nv",
-    # Fallback tier 2 — NV API (Hermes)
-    "glm5.1_hm_nv": "glm5.1_hm_nv",
-    "glm5.1_nv": "glm5.1_hm_nv",       # R38.3 _nv alias → R38.4 _hm_nv
-    "glm-5.1": "glm5.1_hm_nv",
-    "z-ai/glm-5.1": "glm5.1_hm_nv",
-    "glm5.1_hm": "glm5.1_hm_nv",
 }
 
 def detect_nv_model(model_id: str) -> str:
