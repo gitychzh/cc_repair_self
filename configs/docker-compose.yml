@@ -1,9 +1,9 @@
-# R38.12: All HM NV models via NVCF pexec — no LiteLLM NV HM routing
+# R38.14: HM tier reorder — glm5.1 primary → deepseek fallback → kimi last-resort
 # 40001 (cc-stable):    CC → Anthropic format → 41001 glm5.1 v×k (pure MS baseline)
 # 40005 (cc-experiment): CC → Anthropic format → 41001 glm5.1 v×k, NV last-resort
 # 40002 (codex):        Codex → Responses API → 41001 glm5.1 v×k
 # 40003 (passthrough):  _ol/_oc/_hm_ms → OpenAI passthrough → 41001 glm5.1 v×k
-# 40006 (hm-proxy):    _hm_nv → NVCF pexec direct (deepseek/kimi/glm5.1, per-model ACTIVE function)
+# 40006 (hm-proxy):    _hm_nv → NVCF pexec direct (glm5.1/deepseek/kimi, per-model ACTIVE function; glm5.1 primary)
 # 41001: ms_uni41001 LiteLLM (70 glm5.1 dep)
 #
 # Port assignments: 41001=LiteLLM MS, 40000=dispatcher,

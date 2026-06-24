@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy — R38.12.
+"""Configuration for Hermes NV proxy — R38.14.
 
+R38.14: Tier reorder — glm5.1 primary (best agent quality for Hermes) → deepseek fallback → kimi last-resort.
 R38.12: ALL models use NVCF pexec direct path (SOCKS5 → ACTIVE functions).
         LiteLLM 41101-41105 removed from active routing (kept as manual fallback only).
         strip_params per-model declaration: glm5.1 strips thinking_budget (NVCF rejects it),
         deepseek/kimi pass all params through (NVCF accepts them).
-R38.11: deepseek restored as primary tier (NVCF pexec orion ACTIVE, 100% success rate).
-R38.10: deepseek-v4-pro bypasses DEGRADING integrate API → NVCF pexec orion function (ACTIVE).
 
 Chain (ALL models): Hermes → hm40006 → NVCF pexec (per-model ACTIVE function) → per-key SOCKS5 proxy → mihomo → NV API
 
@@ -14,7 +13,7 @@ Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
-Tier order: deepseek_hm_nv (primary) → glm5.1_hm_nv → kimi_hm_nv (last-resort)
+Tier order: glm5.1_hm_nv (primary, best agent quality) → deepseek_hm_nv → kimi_hm_nv (last-resort)
 """
 import os
 import sys
@@ -80,10 +79,9 @@ for i in range(1, 6):
 if HM_NUM_KEYS < 5:
     print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} NV keys configured (expected 5)", file=sys.stderr, flush=True)
 
-# ─── Three-tier fallback model chain (R38.12) ──────────────────────────────
-# R38.12: All models NVCF pexec. Tier order unchanged from R38.11.
-# deepseek primary → glm5.1 fallback → kimi last-resort
-NV_MODEL_TIERS = ["deepseek_hm_nv", "glm5.1_hm_nv", "kimi_hm_nv"]
+# ─── Three-tier fallback model chain (R38.14) ──────────────────────────────
+# R38.14: glm5.1 primary (best agent quality for Hermes) → deepseek fallback → kimi last-resort
+NV_MODEL_TIERS = ["glm5.1_hm_nv", "deepseek_hm_nv", "kimi_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -91,7 +89,7 @@ NV_MODEL_IDS = {
     "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",
 }
 
-DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.11+: deepseek primary (NVCF pexec ACTIVE)
+DEFAULT_NV_MODEL = "glm5.1_hm_nv"  # R38.14: glm5.1 primary (best agent quality for Hermes)
 
 # ─── Tier timeout budget ──────────────────────────────────────────────────
 TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "60"))
@@ -104,19 +102,19 @@ DEFAULT_AGENT_SUFFIX = "_hm_nv"
 
 # ─── Model name mapping ──────────────────────────────────────────────────
 MODEL_MAP = {
-    # Primary tier — deepseek (NVCF pexec orion ACTIVE)
+    # Primary tier — glm5.1 (NVCF pexec ai-glm5_1 ACTIVE, best agent quality)
+    "glm5.1_hm_nv": "glm5.1_hm_nv",
+    "glm5.1_nv": "glm5.1_hm_nv",
+    "glm-5.1": "glm5.1_hm_nv",
+    "z-ai/glm-5.1": "glm5.1_hm_nv",
+    "glm5.1_hm": "glm5.1_hm_nv",
+    # Fallback tier 1 — deepseek (NVCF pexec orion ACTIVE)
     "deepseek_hm_nv": "deepseek_hm_nv",
     "deepseek_nv": "deepseek_hm_nv",
     "deepseek": "deepseek_hm_nv",
     "deepseek-v4-pro": "deepseek_hm_nv",
     "deepseek-ai/deepseek-v4-pro": "deepseek_hm_nv",
     "deepseek_hm": "deepseek_hm_nv",
-    # Fallback tier 1 — glm5.1 (NVCF pexec ai-glm5_1 ACTIVE)
-    "glm5.1_hm_nv": "glm5.1_hm_nv",
-    "glm5.1_nv": "glm5.1_hm_nv",
-    "glm-5.1": "glm5.1_hm_nv",
-    "z-ai/glm-5.1": "glm5.1_hm_nv",
-    "glm5.1_hm": "glm5.1_hm_nv",
     # Last-resort tier — kimi (NVCF pexec nvquery-kimi ACTIVE)
     "kimi_hm_nv": "kimi_hm_nv",
     "kimi_nv": "kimi_hm_nv",

@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.13, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.14, 2026-06-24)
 
-## Architecture (R38.13: LiteLLM NV HM containers removed)
+## Architecture (R38.14: HM tier reorder — glm5.1 primary)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
@@ -33,7 +33,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
     kimi → nvquery-kimi-k2.6 (ACTIVE), all params pass through ✅
   No LiteLLM routing — hm40006 connects directly via SOCKS5 proxy per-key mihomo
   R38.13: LiteLLM 41101-41105 containers REMOVED (no longer needed, all routing via NVCF pexec)
-  默认 deepseek_hm_nv(NVCF pexec) → glm5.1_hm_nv → kimi_hm_nv → 全失败 → ABORT
+  默认 glm5.1_hm_nv(NVCF pexec, primary) → deepseek_hm_nv → kimi_hm_nv → 全失败 → ABORT
   TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
@@ -53,11 +53,21 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.12: ALL models NVCF pexec (deepseek/glm5.1/kimi), no LiteLLM routing |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.14: glm5.1 primary + NVCF pexec all 3 models, no LiteLLM routing |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
 | cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
 
-## R38 Changes (opc_uname, 2026-06-24) — R38.13 LiteLLM NV HM cleanup
+## R38 Changes (opc_uname, 2026-06-24) — R38.14 HM tier reorder (glm5.1 primary)
+
+### R38.14: HM tier reorder — glm5.1 primary
+理由：glm5.1 中文原生优势 + Hermes社区集成成熟 + reasoning能力更强更适合agent任务，kimi k2.6智商偏低不能充分利用Hermes能力。
+
+修改：
+- hm-proxy config.py: NV_MODEL_TIERS 从 ["deepseek_hm_nv", "glm5.1_hm_nv", "kimi_hm_nv"] → ["glm5.1_hm_nv", "deepseek_hm_nv", "kimi_hm_nv"]
+- hm-proxy config.py: DEFAULT_NV_MODEL 从 "deepseek_hm_nv" → "glm5.1_hm_nv"
+- Hermes config.yaml: default + default_model 从 deepseek_hm_nv → glm5.1_hm_nv
+- docker-compose.yml: hm40006 注释更新
+- DEPLOY_STATUS.md: R38.14 变更记录
 
 ### R38.13: LiteLLM NV HM containers removed
 hm40006 logs confirm NVCF pexec is stable (77 success, 5 transient SSLEOF→retry→success, 0 ABORT, 0 tier fallback needed).
