@@ -1,7 +1,7 @@
-# R38.2: NV HM LiteLLM container for Key3 (port 41103)
-# 3 deployments: nvglm5.1_k3, nvkimi_k3, nvdeepseek_k3
+# R38.11: NV HM LiteLLM container (2 deployments: nvglm5.1_kN, nvkimi_kN)
+# deepseek removed — hm40006 uses NVCF pexec direct path (bypasses DEGRADING integrate API)
+# nvdeepseek_kN was dead code: hm40006 code route deepseek via NVCF pexec, never reaches LiteLLM
 # R38.7: timeout 60→35 (sync with hm-proxy UPSTREAM_TIMEOUT=45; avoids NV quota waste)
-# R38.2: Removed nvminimax_k3 (minimax removed from HM model tiers)
 model_list:
   - model_name: nvglm5.1_k3
     litellm_params:
@@ -17,17 +17,6 @@ model_list:
   - model_name: nvkimi_k3
     litellm_params:
       model: openai/moonshotai/kimi-k2.6
-      api_key: os.environ/NV_KEY3
-      api_base: os.environ/NV_BASEURL
-      timeout: 35
-      drop_params: true
-    model_info:
-      mode: chat
-      max_tokens: 131072
-
-  - model_name: nvdeepseek_k3
-    litellm_params:
-      model: openai/deepseek-ai/deepseek-v4-pro
       api_key: os.environ/NV_KEY3
       api_base: os.environ/NV_BASEURL
       timeout: 35
