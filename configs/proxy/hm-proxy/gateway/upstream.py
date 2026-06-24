@@ -284,9 +284,12 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             # NVCF pexec body: keep model field (NVCF accepts both with/without)
             pexec_body = dict(oai_body)
             pexec_body["model"] = NV_MODEL_IDS[tier_model]  # actual NV model ID, not LiteLLM label
-            # Strip NV unsupported params (NVCF pexec is direct to NV function)
-            for param in ("thinking_budget", "reasoning_effort"):
-                pexec_body.pop(param, None)
+            # R38.10 NOTE: NVCF pexec endpoint ACCEPTS thinking_budget/reasoning_effort (tested 200 OK).
+            # Unlike NV integrate API (returns 400 "Unsupported parameter"), NVCF pexec silently accepts
+            # these params even though deepseek-v4-pro on NV free tier doesn't emit reasoning_content.
+            # Therefore: DO NOT strip thinking_budget/reasoning_effort from NVCF pexec requests.
+            # If Hermes sends them, they pass through harmlessly (model returns reasoning_tokens=0).
+            # Only strip from LiteLLM/integrate API path (handled in that branch).
             # stream_options is OK (NVCF supports it)
 
             pexec_data = json.dumps(pexec_body).encode("utf-8")
