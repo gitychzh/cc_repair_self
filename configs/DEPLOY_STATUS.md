@@ -1,4 +1,4 @@
-# Deploy Status — opc_uname + opc2_uname (R38.14, 2026-06-24)
+# Deploy Status — opc_uname + opc2_uname (R38.14, 2026-06-25)
 
 ## Architecture (R38.14: HM tier reorder — glm5.1 primary)
 ```
@@ -34,7 +34,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   No LiteLLM routing — hm40006 connects directly via SOCKS5 proxy per-key mihomo
   R38.13: LiteLLM 41101-41105 containers REMOVED (no longer needed, all routing via NVCF pexec)
   默认 glm5.1_hm_nv(NVCF pexec, primary) → deepseek_hm_nv → kimi_hm_nv → 全失败 → ABORT
-  TIER_TIMEOUT_BUDGET_S=60s
+  TIER_TIMEOUT_BUDGET_S=60s (R38.14: budget enforced per-attempt via sock.settimeout=min(UPSTREAM_TIMEOUT, remaining_budget); MIN_ATTEMPT_TIMEOUT=10s)
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
   R38.8: mihomo health-check url = NV API /v1/models (not gstatic) → dead nodes detected within 3min
@@ -68,6 +68,16 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 - Hermes config.yaml: default + default_model 从 deepseek_hm_nv → glm5.1_hm_nv
 - docker-compose.yml: hm40006 注释更新
 - DEPLOY_STATUS.md: R38.14 变更记录
+
+Bug fixes (R38.14):
+1. **Tier budget enforcement bug**: TIER_TIMEOUT_BUDGET_S=60s was only checked BEFORE key attempts, not during.
+   During NVCF overload, each key attempt takes UPSTREAM_TIMEOUT=45s → budget of 60s allowed 2 attempts (~92s total)
+   before breaking, wasting ~32s beyond intended budget.
+   Fix: sock.settimeout = min(UPSTREAM_TIMEOUT, remaining_budget) per-attempt.
+   Also added MIN_ATTEMPT_TIMEOUT=10s threshold: skip attempt if remaining budget < 10s (avoid doomed tiny timeout).
+2. **Misleading HM-TIMEOUT log**: elapsed_ms was computed from t_start (request-level start), not per-attempt start.
+   A 45s per-key timeout appeared as "92080ms" (total time after 2 key attempts).
+   Fix: log both attempt_elapsed_ms (per-key) and total_elapsed_ms separately.
 
 ### R38.13: LiteLLM NV HM containers removed
 hm40006 logs confirm NVCF pexec is stable (77 success, 5 transient SSLEOF→retry→success, 0 ABORT, 0 tier fallback needed).

@@ -213,13 +213,25 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
     for attempt_idx in range(HM_NUM_KEYS + 2):
         key_idx = (start_key_idx + attempt_idx) % HM_NUM_KEYS
+        t_attempt_start = time.time()  # R38.14: per-attempt start time for accurate logging
 
-        # Tier timeout budget check
+        # Tier timeout budget check (before each attempt)
         elapsed_in_tier = time.time() - tier_budget_start
         if elapsed_in_tier >= TIER_TIMEOUT_BUDGET_S:
             _log("HM-TIER-BUDGET", f"tier={tier_model} budget {TIER_TIMEOUT_BUDGET_S}s "
                                     f"exceeded after {elapsed_in_tier:.1f}s, breaking")
             break
+
+        # R38.14: per-attempt timeout respects remaining budget
+        # This prevents the bug where budget=60s but actual elapsed=~92s
+        # (budget was only checked BEFORE attempts, not during in-progress requests)
+        remaining_budget = TIER_TIMEOUT_BUDGET_S - elapsed_in_tier
+        MIN_ATTEMPT_TIMEOUT = 10  # Don't attempt if less than 10s budget remains (doomed attempt)
+        if remaining_budget < MIN_ATTEMPT_TIMEOUT:
+            _log("HM-TIER-BUDGET", f"tier={tier_model} budget {TIER_TIMEOUT_BUDGET_S}s "
+                                    f"remaining {remaining_budget:.1f}s < {MIN_ATTEMPT_TIMEOUT}s minimum, breaking")
+            break
+        per_attempt_timeout = min(UPSTREAM_TIMEOUT, remaining_budget)
 
         # Skip keys in 429 cooldown
         if is_key_cooling(tier_model, key_idx):
@@ -260,11 +272,12 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             # Throttle before making connection (SOCKS5 connect is a real outbound)
             if attempt_idx == 0:
                 throttle_outbound()
-            conn = _make_nvcf_proxy_conn(proxy_url, nvcf_host=nvcf_host, timeout=UPSTREAM_TIMEOUT)
+            conn = _make_nvcf_proxy_conn(proxy_url, nvcf_host=nvcf_host, timeout=per_attempt_timeout)
             conn.request("POST", nvcf_path, body=pexec_data, headers=headers_out)
             # R38.6 CRITICAL FIX: sock.settimeout() BEFORE getresponse()
+            # R38.14: use per_attempt_timeout (respects budget) instead of UPSTREAM_TIMEOUT
             if conn.sock:
-                conn.sock.settimeout(UPSTREAM_TIMEOUT)
+                conn.sock.settimeout(per_attempt_timeout)
             resp = conn.getresponse()
 
             if resp.status >= 400:
@@ -349,20 +362,23 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             return result
 
         except socket.timeout as e:
-            elapsed_ms = int((time.time() - t_start) * 1000)
-            _log("HM-TIMEOUT", f"tier={tier_model} k{key_idx+1} NVCF pexec timeout after {elapsed_ms}ms")
+            # R38.14: use per-attempt elapsed, not request-level t_start
+            attempt_elapsed_ms = int((time.time() - t_attempt_start) * 1000)
+            total_elapsed_ms = int((time.time() - t_start) * 1000)
+            _log("HM-TIMEOUT", f"tier={tier_model} k{key_idx+1} NVCF pexec timeout: "
+                               f"attempt={attempt_elapsed_ms}ms total={total_elapsed_ms}ms")
             key_cycle_attempts.append({
                 "tier": tier_model,
                 "nv_key_idx": key_idx,
                 "litellm_model": f"nvcf_{NV_MODEL_IDS[tier_model]}_k{key_idx+1}",
                 "error_type": "NVCFPexecTimeout",
-                "elapsed_ms": elapsed_ms,
+                "elapsed_ms": attempt_elapsed_ms,  # R38.14: per-attempt elapsed, not total
                 "upstream_type": "nvcf_pexec",
             })
             continue
 
         except (ConnectionRefusedError, http.client.RemoteDisconnected) as e:
-            elapsed_ms = int((time.time() - t_start) * 1000)
+            attempt_elapsed_ms = int((time.time() - t_attempt_start) * 1000)  # R38.14
             _log("HM-CONN", f"tier={tier_model} k{key_idx+1} connection error: {e}")
             consecutive_conn_err += 1
             key_cycle_attempts.append({
@@ -370,7 +386,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                 "nv_key_idx": key_idx,
                 "litellm_model": f"nvcf_{NV_MODEL_IDS[tier_model]}_k{key_idx+1}",
                 "error_type": f"NVCFPexec{type(e).__name__}",
-                "elapsed_ms": elapsed_ms,
+                "elapsed_ms": attempt_elapsed_ms,
                 "upstream_type": "nvcf_pexec",
             })
             if consecutive_conn_err >= CONN_ERR_FAST_BREAK:
@@ -381,7 +397,7 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
         except Exception as e:
             error_class = type(e).__name__
-            elapsed_ms = int((time.time() - t_start) * 1000)
+            elapsed_ms = int((time.time() - t_attempt_start) * 1000)  # R38.14: per-attempt
             _log("HM-ERR", f"tier={tier_model} k{key_idx+1} {error_class}: {e}")
             if "gaierror" in error_class.lower() or "socket" in error_class.lower():
                 consecutive_conn_err += 1
