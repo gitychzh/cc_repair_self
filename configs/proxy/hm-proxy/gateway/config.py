@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006) — R38.7.
+"""Configuration for Hermes NV proxy (hm40006) — R38.9.
 
-R38.7: 3-tier fallback restored (glm5.1→kimi→deepseek).
-       Data evidence: nv_proxy_selector reselected better nodes → deepseek 3/5 keys now
-       succeed (was 0/5 in R38.6 due to stale Hysteria2 nodes). Restoring as tier 3
-       gives an extra safety net when glm5.1+kimi both fail.
-       TIER_TIMEOUT_BUDGET_S 90→60s: glm5.1 avg=20.8s max=38.2s → 60s budget allows
-       1 timeout(45s) + 1 retry window(15s). 90s was too generous (2 timeouts wasted).
+R38.9: Tier order changed — deepseek_v4_pro primary → kimi fallback → glm5.1 tier 3.
+       Purpose: collect deepseek latency data under real CC workload (150K+ input chars).
+       Previous order was kimi→glm5.1→deepseek (R38.8). Reverting glm5.1 from primary
+       because NV glm5.1 avg=23s/45%cycling is too slow for primary tier.
+R38.8 preserved: kimi stable ~4s as tier 2 fallback, conn-fast-break, health-check fixes.
+R38.7: deepseek RESTORED as tier 3 (3/5 keys succeed after nv_proxy_selector reselected).
 R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:close.
 R38.3→R38.4: Dual suffix — _hm_nv (Hermes+NV) / _hm_ms (Hermes+MS).
 
@@ -59,10 +59,12 @@ if HM_NUM_KEYS < 5:
 # R38.7 restoration: node reselection fixed the root cause. deepseek ~60% success rate
 # is acceptable as tier 3 — only tried when glm5.1+kimi both fail.
 # R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# R38.8: kimi as primary (NV glm-5.1 currently >60s, unusable; kimi stable ~4s)
-#   REVERT WHEN: NV glm-5.1 latency returns to <20s (test with nv_proxy_selector.sh)
-# Priority order: kimi (primary) → glm5.1 (fallback 1) → deepseek (fallback 2)
-NV_MODEL_TIERS = ["kimi_hm_nv", "glm5.1_hm_nv", "deepseek_hm_nv"]
+# R38.9: deepseek_v4_pro as primary (testing latency data collection)
+#   Previous: kimi_hm_nv primary → now testing deepseek_v4_pro as tier 1
+#   Goal: collect deepseek latency data under real CC workload (>150K input chars)
+#   REVERT WHEN: deepseek data collection complete, or deepseek proves unsuitable
+# Priority order: deepseek (primary) → kimi (fallback 1) → glm5.1 (fallback 2)
+NV_MODEL_TIERS = ["deepseek_hm_nv", "kimi_hm_nv", "glm5.1_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -77,7 +79,7 @@ LITELLM_MODEL_MAP = {
     "deepseek_hm_nv": "nvdeepseek",
 }
 
-DEFAULT_NV_MODEL = "kimi_hm_nv"  # R38.8: kimi primary (glm5.1 NV极慢>k60s); revert when glm5.1<20s
+DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.9: deepseek primary (testing data collection); revert after evaluation
 
 # ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
 # Maximum time to spend on ONE tier before giving up and moving to next tier.
@@ -100,37 +102,34 @@ DEFAULT_AGENT_SUFFIX = "_hm_nv"
 # R38.4: Dual suffix convention: _hm_nv (Hermes+NV), _hm_ms (Hermes+MS)
 # Backward compat: old _nv/_hm names → _hm_nv equivalents
 MODEL_MAP = {
-    # Primary tier — NV API (Hermes)
-    "glm5.1_hm_nv": "glm5.1_hm_nv",
-    "glm5.1_nv": "glm5.1_hm_nv",       # R38.3 _nv alias → R38.4 _hm_nv
-    "glm5.1": "glm5.1_hm_nv",          # Unqualified → NV (backward compat)
-    "glm-5.1": "glm5.1_hm_nv",
-    "z-ai/glm-5.1": "glm5.1_hm_nv",
-    # Backward compat: old _hm names → _hm_nv (Hermes config migration)
-    "glm5.1_hm": "glm5.1_hm_nv",
+    # Primary tier — NV API (Hermes) R38.9: deepseek_v4_pro primary
+    "deepseek_hm_nv": "deepseek_hm_nv",
+    "deepseek_nv": "deepseek_hm_nv",     # R38.3 alias → R38.4
+    "deepseek": "deepseek_hm_nv",
+    "deepseek-v4-pro": "deepseek_hm_nv",
+    "deepseek-ai/deepseek-v4-pro": "deepseek_hm_nv",
+    # Backward compat: unqualified default → deepseek (R38.9 primary)
+    "deepseek_hm": "deepseek_hm_nv",
     # Fallback tier 1 — NV API (Hermes)
     "kimi_hm_nv": "kimi_hm_nv",
     "kimi_nv": "kimi_hm_nv",            # R38.3 alias → R38.4
     "kimi": "kimi_hm_nv",
     "kimi-k2.6": "kimi_hm_nv",
     "moonshotai/kimi-k2.6": "kimi_hm_nv",
-    # Backward compat
     "kimi_hm": "kimi_hm_nv",
     # Fallback tier 2 — NV API (Hermes)
-    "deepseek_hm_nv": "deepseek_hm_nv",
-    "deepseek_nv": "deepseek_hm_nv",     # R38.3 alias → R38.4
-    "deepseek": "deepseek_hm_nv",
-    "deepseek-v4-pro": "deepseek_hm_nv",
-    "deepseek-ai/deepseek-v4-pro": "deepseek_hm_nv",
-    # Backward compat
-    "deepseek_hm": "deepseek_hm_nv",
+    "glm5.1_hm_nv": "glm5.1_hm_nv",
+    "glm5.1_nv": "glm5.1_hm_nv",       # R38.3 _nv alias → R38.4 _hm_nv
+    "glm-5.1": "glm5.1_hm_nv",
+    "z-ai/glm-5.1": "glm5.1_hm_nv",
+    "glm5.1_hm": "glm5.1_hm_nv",
 }
 
 def detect_nv_model(model_id: str) -> str:
     """Detect NV model tier from frontend model name.
 
-    Returns: internal NV model key (glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv)
-    Falls back to DEFAULT_NV_MODEL (glm5.1_hm_nv).
+    Returns: internal NV model key (deepseek_hm_nv/kimi_hm_nv/glm5.1_hm_nv)
+    Falls back to DEFAULT_NV_MODEL (deepseek_hm_nv).
     """
     mapped = MODEL_MAP.get(model_id, None)
     if mapped and mapped in NV_MODEL_IDS:
@@ -141,7 +140,7 @@ def get_tier_index(mapped_model: str) -> int:
     """Get the tier index for a mapped model.
 
     Returns: 0-based index in NV_MODEL_TIERS.
-    Falls back to 0 (primary tier = glm5.1_hm_nv).
+    Falls back to 0 (primary tier = deepseek_hm_nv).
     """
     try:
         return NV_MODEL_TIERS.index(mapped_model)
