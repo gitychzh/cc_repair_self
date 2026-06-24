@@ -59,6 +59,40 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ## R38 Changes (opc_uname, 2026-06-24) — R38.14 HM tier reorder (glm5.1 primary)
 
+### R40: hm-proxy fallback 根因修复 + 日志入 Postgres + 工程化 (2026-06-25)
+
+**根因（远程 opc_uname hermes 卡住）**：远程 hm40006 容器仍跑 R38.9 旧代码（容器 2026-06-24 16:43 创建，从未 rebuild 到 R38.14），`NV_MODEL_TIERS=["deepseek","kimi","glm5.1"]`，glm5.1 在末位(idx=2)。Hermes `default_model=glm5.1_hm_nv` → `start_tier_idx=2` → `NV_MODEL_TIERS[2:]=["glm5.1"]` 只剩 1 个 tier，**无 fallback**。glm5.1 NVCF 2 次 timeout(45s+15s+connect开销=74.2s) → 直接 502 `Tiers tried: [glm5.1_hm_nv: 2×mixed]`，Hermes 持续 502 卡死。本机 6/24 08:06 也出现过同模式(tiers_tried=['glm5.1'], 71.4s)。
+
+**代码修复**：
+- **A1 环形 fallback (upstream.py execute_request)**：`tier_order = NV_MODEL_TIERS[start:] + NV_MODEL_TIERS[:start]`（环形），任何 tier 失败都有 2 个 fallback。根治"末位 tier 无 fallback"设计缺陷，不只是版本同步问题。
+- **A2 budget 漏算 SOCKS5 connect (upstream.py _try_tier_keys)**：预留 `HM_CONNECT_RESERVE_S=5`，connect 后再校验 budget，read_timeout=post_connect_remaining。修复 74.2s vs 60s budget 超限。
+- **A3 cooldown 误分类**：全 key cooldown 时不再 `all([])=True` 误判为 429+empty，新增 `all_cooldown` 字段。
+- **A4 dead code 清理**：`tier_attempts` 过滤简化为单条件 `[a for a in ... if a.get("tier")==tier_model]`。
+- **A5 错误信息增强 (error_mapping.py)**：502/429 错误体加 `tiers_tried_count` + `fallback_actually_attempted` 字段，��分"只跑1 tier"vs"全3 tier真失败"。
+
+**日志入 Postgres（工程化）**：
+- 新增 `gateway/db.py`：psycopg2 异步批量写入（后台 daemon thread，queue.Queue，2s/50条 flush，DB 挂了只写文件不降级主链路）。
+- 新增 `configs/postgres/hermes-logs-schema.sql`：`hermes_logs` 库 + `hm_requests`(每请求一行) + `hm_tier_attempts`(每attempt一行) + 索引 + `v_hm_tier_health_1h`/`v_hm_key_errors_24h` 视图 + `hm_cleanup_old(30)` 清理函数。
+- Dockerfile 加 `psycopg2-binary`；docker-compose hm40006 env 加 `HM_DB_*`；cc_postgres 加 `hermes_logs` 到多库 + 挂载 schema。
+- 新增 `scripts/hm_log_query.sh`（recent-fails/tier-health/key-errors/single-tier-fails/request/count-by-status/tail）+ `scripts/hm_log_cleanup.sh`。
+- `single-tier-fails` 是 R40 根因检测器：专门查"只跑1 tier无fallback"的失败。
+
+**两机链路差异（系统性比对）**：
+| 维度 | 本机 opc_uname (opcsname) | 远程 opc_uname (opc2sname) |
+|------|--------------------------|---------------------------|
+| hm40006 容器版本 | R40 (2026-06-25 02:22 rebuild) | R38.9 旧版 (2026-06-24 16:43, **未 rebuild**) |
+| NV_MODEL_TIERS | [glm5.1, deepseek, kimi] (R38.14+) | [deepseek, kimi, glm5.1] (R38.9 旧序) |
+| glm5.1 请求行为 | 首位，失败→fallback deepseek✅ | 末位，失败→无 fallback→502❌ |
+| Hermes 状态 | 正常 | 卡住(持续 502) |
+| 修复方式 | 已 R40 | 需 git pull + rebuild hm40006 |
+
+**版本同步检查方法**：
+```bash
+docker exec hm40006 grep 'NV_MODEL_TIERS = ' /app/gateway/config.py
+docker inspect hm40006 --format '{{.Created}}'
+# R40+: tier[0]=glm5.1_hm_nv, 容器创建时间应晚于 R40 push 时间
+```
+
 ### R38.14: HM tier reorder — glm5.1 primary
 理由：glm5.1 中文原生优势 + Hermes社区集成成熟 + reasoning能力更强更适合agent任务，kimi k2.6智商偏低不能充分利用Hermes能力。
 

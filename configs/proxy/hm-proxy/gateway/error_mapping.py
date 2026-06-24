@@ -9,9 +9,13 @@ import json
 
 
 def format_nv_all_keys_exhausted(result, mapped_model, request_model):
-    """Format all-tiers-exhausted error as OpenAI error format (R38.2).
+    """Format all-tiers-exhausted error as OpenAI error format (R38.2, R40 A5).
 
     Includes detailed info about which tiers were tried and their failure types.
+    R40 A5: adds `tiers_tried_count` and `fallback_actually_attempted` fields so the
+    caller (Hermes/user) can distinguish "only 1 tier tried, no fallback" from
+    "all 3 tiers genuinely failed". Pre-R40, a 1-tier failure looked identical to a
+    3-tier failure in the message, hiding the no-fallback root cause.
     """
     tiers_tried = result.fallback_tiers_used or []
     tier_summaries = result.tier_attempts or []
@@ -25,10 +29,16 @@ def format_nv_all_keys_exhausted(result, mapped_model, request_model):
             tier_details.append(f"{tier_name}: {n}×429")
         elif ts.get("all_empty_200"):
             tier_details.append(f"{tier_name}: {n}×empty200")
+        elif ts.get("all_cooldown"):
+            tier_details.append(f"{tier_name}: cooldown")
         else:
             tier_details.append(f"{tier_name}: {n}×mixed")
 
     tier_str = ", ".join(tier_details) if tier_details else "unknown"
+    tiers_tried_count = len(tier_summaries)
+    # Fallback was genuinely attempted only if >1 tier had real attempts (not skipped)
+    tiers_with_attempts = sum(1 for ts in tier_summaries if ts.get("num_attempts", 0) > 0)
+    fallback_actually_attempted = tiers_with_attempts > 1
 
     # Classify overall error type
     if result.all_429:
@@ -38,6 +48,8 @@ def format_nv_all_keys_exhausted(result, mapped_model, request_model):
                            f"Tiers tried: [{tier_str}]. Please retry in a few seconds.",
                 "type": "rate_limit_error",
                 "code": "429",
+                "tiers_tried_count": tiers_tried_count,
+                "fallback_actually_attempted": fallback_actually_attempted,
             }
         }, 429
     else:
@@ -48,6 +60,8 @@ def format_nv_all_keys_exhausted(result, mapped_model, request_model):
                            f"Tiers tried: [{tier_str}]. Please retry — upstream may recover.",
                 "type": "server_error",
                 "code": "502",
+                "tiers_tried_count": tiers_tried_count,
+                "fallback_actually_attempted": fallback_actually_attempted,
             }
         }, 502
 

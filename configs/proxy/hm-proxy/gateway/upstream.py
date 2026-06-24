@@ -17,6 +17,7 @@ If all tiers also all-fail → ABORT-NO-FALLBACK.
 Chain (ALL models): hm40006 → NVCF pexec (per-model ACTIVE function) → per-key SOCKS5 proxy → mihomo → NV API
 """
 import json
+import os
 import http.client
 import socket
 import ssl
@@ -223,15 +224,22 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             break
 
         # R38.14: per-attempt timeout respects remaining budget
-        # This prevents the bug where budget=60s but actual elapsed=~92s
-        # (budget was only checked BEFORE attempts, not during in-progress requests)
+        # R40 A2: reserve CONNECT_RESERVE_S for SOCKS5 connect+SSL handshake (2-5s observed).
+        #   Pre-R40 bug: per_attempt_timeout = min(45, remaining) ignored connect time, so
+        #   attempt 1 spent 45s(read)+3s(connect)=48s but budget thought only 45s elapsed;
+        #   attempt 2 then got remaining=15s, spent 3s(connect)+15s(read)=18s → total 66s,
+        #   ~74s with throttle/overhead, blowing past the 60s budget and showing as 74.2s
+        #   in the 502 error. Reserve keeps the read timeout within true remaining budget.
+        CONNECT_RESERVE_S = float(os.environ.get("HM_CONNECT_RESERVE_S", "5"))
         remaining_budget = TIER_TIMEOUT_BUDGET_S - elapsed_in_tier
         MIN_ATTEMPT_TIMEOUT = 10  # Don't attempt if less than 10s budget remains (doomed attempt)
         if remaining_budget < MIN_ATTEMPT_TIMEOUT:
             _log("HM-TIER-BUDGET", f"tier={tier_model} budget {TIER_TIMEOUT_BUDGET_S}s "
                                     f"remaining {remaining_budget:.1f}s < {MIN_ATTEMPT_TIMEOUT}s minimum, breaking")
             break
-        per_attempt_timeout = min(UPSTREAM_TIMEOUT, remaining_budget)
+        # Read timeout = min(UPSTREAM_TIMEOUT, remaining - CONNECT_RESERVE) so connect+read together stay in budget
+        per_attempt_timeout = max(MIN_ATTEMPT_TIMEOUT,
+                                  min(UPSTREAM_TIMEOUT, remaining_budget - CONNECT_RESERVE_S))
 
         # Skip keys in 429 cooldown
         if is_key_cooling(tier_model, key_idx):
@@ -272,12 +280,36 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
             # Throttle before making connection (SOCKS5 connect is a real outbound)
             if attempt_idx == 0:
                 throttle_outbound()
+            t_connect_start = time.time()
             conn = _make_nvcf_proxy_conn(proxy_url, nvcf_host=nvcf_host, timeout=per_attempt_timeout)
+            connect_elapsed = time.time() - t_connect_start
+            # R40 A2: re-check budget AFTER connect — connect time wasn't counted when
+            # computing per_attempt_timeout above, so a slow connect may have eaten the budget.
+            post_connect_remaining = TIER_TIMEOUT_BUDGET_S - (time.time() - tier_budget_start)
+            if post_connect_remaining < MIN_ATTEMPT_TIMEOUT:
+                _log("HM-TIER-BUDGET", f"tier={tier_model} k{key_idx+1} after connect "
+                                        f"({connect_elapsed:.1f}s) remaining {post_connect_remaining:.1f}s "
+                                        f"< {MIN_ATTEMPT_TIMEOUT}s, aborting attempt")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                key_cycle_attempts.append({
+                    "tier": tier_model,
+                    "nv_key_idx": key_idx,
+                    "litellm_model": f"nvcf_{NV_MODEL_IDS[tier_model]}_k{key_idx+1}",
+                    "error_type": "budget_exhausted_after_connect",
+                    "elapsed_ms": int(connect_elapsed * 1000),
+                    "upstream_type": "nvcf_pexec",
+                })
+                break
+            # Read timeout = whatever remains in the budget, capped by per_attempt_timeout
+            read_timeout = min(per_attempt_timeout, post_connect_remaining)
             conn.request("POST", nvcf_path, body=pexec_data, headers=headers_out)
             # R38.6 CRITICAL FIX: sock.settimeout() BEFORE getresponse()
-            # R38.14: use per_attempt_timeout (respects budget) instead of UPSTREAM_TIMEOUT
+            # R40 A2: use read_timeout (post-connect remaining) instead of per_attempt_timeout
             if conn.sock:
-                conn.sock.settimeout(per_attempt_timeout)
+                conn.sock.settimeout(read_timeout)
             resp = conn.getresponse()
 
             if resp.status >= 400:
@@ -463,60 +495,72 @@ def _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
 
 
 def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_start):
-    """Execute NVCF pexec request with three-tier fallback (R38.12).
+    """Execute NVCF pexec request with three-tier fallback (R38.12, R40 ring fallback).
 
     ALL models use NVCF pexec direct path. No LiteLLM routing.
-    - mapped_model determines starting tier (default: deepseek_hm_nv)
+    - mapped_model determines starting tier (default: glm5.1_hm_nv)
+    - R40 CRITICAL FIX: ring fallback — tier_order = TIERS[start:] + TIERS[:start]
+      This guarantees ANY tier (including the last) has 2 fallback tiers.
+      Pre-R40 bug: TIERS[start_idx:] slice — when start_tier was the LAST tier
+      (e.g. glm5.1 in R38.9 order [..., glm5.1]), the slice had only 1 element,
+      so a failure at that tier returned 502 with NO fallback attempted.
+      Symptom: "Tiers tried: [glm5.1_hm_nv: 2×mixed]" 74.2s, Hermes stuck.
     - Each tier tries 5 keys with per-tier persistent RR counter
-    - On tier all-fail: fallback to next tier (from current position)
+    - On tier all-fail: fallback to next tier in ring order (wraps around)
     - All tiers fail: ABORT-NO-FALLBACK
     - R38.8: If all tiers fail with ONLY connection errors, wait 5s and retry once.
     """
     start_tier_idx = get_tier_index(mapped_model)
     is_stream = oai_body.get("stream", False)
 
+    # R40: ring order — start_tier first, then the rest in original order, wrapping.
+    # Example: TIERS=[A,B,C], start=B → ring=[B,C,A]. Last-tier C now has A as fallback.
+    tier_order = NV_MODEL_TIERS[start_tier_idx:] + NV_MODEL_TIERS[:start_tier_idx]
+
     _log("HM-REQ", f"mapped_model={mapped_model} start_tier={NV_MODEL_TIERS[start_tier_idx]} "
-                   f"stream={is_stream} tier_chain={NV_MODEL_TIERS[start_tier_idx:]}")
+                   f"stream={is_stream} tier_chain={tier_order} (ring fallback, R40)")
 
     for retry_idx in range(2):
         all_attempts = []
         all_tier_summaries = []
         fallback_tiers_used = []
 
-        for tier_idx in range(start_tier_idx, len(NV_MODEL_TIERS)):
-            tier_model = NV_MODEL_TIERS[tier_idx]
-            is_first_tier = (tier_idx == start_tier_idx)
+        for tier_idx, tier_model in enumerate(tier_order):
+            is_first_tier = (tier_idx == 0)
+            prev_tier = tier_order[tier_idx - 1] if not is_first_tier else None
 
             # Skip tier if all keys in cooldown
             all_cooling = all(is_key_cooling(tier_model, k) for k in range(HM_NUM_KEYS))
             if all_cooling:
                 _log("HM-TIER-SKIP", f"tier={tier_model} all keys in cooldown, skipping")
+                # R40 A3: cooldown is neither 429 nor empty-200 — don't misclassify.
                 all_tier_summaries.append({
                     "tier": tier_model,
-                    "all_429": True,
+                    "all_429": False,
                     "all_empty_200": False,
+                    "all_cooldown": True,
                     "num_attempts": 0,
                     "elapsed_ms": 0,
                     "skipped": True,
                 })
                 if not is_first_tier:
-                    _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
-                                        f"falling back to {tier_model}")
+                    _log("HM-FALLBACK", f"Tier {prev_tier} all-failed → "
+                                        f"falling back to {tier_model} (skipped, cooldown)")
                 continue
 
             if not is_first_tier:
-                _log("HM-FALLBACK", f"Tier {NV_MODEL_TIERS[tier_idx-1]} all-failed → "
+                _log("HM-FALLBACK", f"Tier {prev_tier} all-failed → "
                                     f"falling back to {tier_model}")
 
             tier_result = _try_tier_keys(oai_body, tier_model, request_id, metrics, t_start,
                                          is_stream, all_attempts)
 
             if tier_result.success and not tier_result.empty_200:
-                tier_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, tier_idx + 1)]
+                tier_result.fallback_tiers_used = tier_order[:tier_idx + 1]
                 if not is_first_tier:
                     _log("HM-FALLBACK-SUCCESS", f"Success on fallback tier {tier_model} "
-                                                f"after primary {NV_MODEL_TIERS[start_tier_idx]} failed")
-                    metrics["fallback_from"] = NV_MODEL_TIERS[tier_idx - 1]
+                                                f"after primary {tier_order[0]} failed")
+                    metrics["fallback_from"] = prev_tier
                     metrics["fallback_to"] = tier_model
                 metrics["tier_model"] = tier_result.tier_model
                 metrics["fallback_tiers_used"] = tier_result.fallback_tiers_used
@@ -526,12 +570,14 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                 return tier_result
 
             # Tier all-failed: record and try next
+            # R40 A4: simplified — single condition, no `or a not in all_attempts` dead code.
             tier_attempts = [a for a in tier_result.key_cycle_attempts
-                             if a.get("tier") == tier_model or a not in all_attempts]
+                             if a.get("tier") == tier_model]
             all_tier_summaries.append({
                 "tier": tier_model,
                 "all_429": tier_result.all_429,
                 "all_empty_200": tier_result.empty_200,
+                "all_cooldown": False,
                 "num_attempts": len(tier_attempts),
                 "elapsed_ms": tier_result.elapsed_ms,
             })
@@ -544,8 +590,8 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
                     pass
 
         # ─── All tiers exhausted ───
-        _log("HM-ALL-TIERS-FAIL", f"All {len(NV_MODEL_TIERS)-start_tier_idx} tiers failed "
-                                   f"(tiers: {NV_MODEL_TIERS[start_tier_idx:]}), "
+        _log("HM-ALL-TIERS-FAIL", f"All {len(tier_order)} tiers failed "
+                                   f"(ring tiers tried: {tier_order}), "
                                    f"elapsed={int((time.time() - t_start) * 1000)}ms, ABORT-NO-FALLBACK")
 
         has_429 = any(s.get("all_429") for s in all_tier_summaries)
@@ -576,7 +622,7 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
     final_result.empty_200 = has_empty
     final_result.key_cycle_attempts = all_attempts
     final_result.tier_attempts = all_tier_summaries
-    final_result.fallback_tiers_used = [NV_MODEL_TIERS[i] for i in range(start_tier_idx, len(NV_MODEL_TIERS))]
+    final_result.fallback_tiers_used = tier_order
     final_result.elapsed_ms = int((time.time() - t_start) * 1000)
     final_result.final_resp_status = 429 if has_429 else 502
 
@@ -584,8 +630,8 @@ def execute_request(handler, oai_body, mapped_model, request_id, metrics, t_star
         "request_id": request_id,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "error_subcategory": "all_tiers_failed",
-        "start_tier": NV_MODEL_TIERS[start_tier_idx],
-        "tiers_tried": NV_MODEL_TIERS[start_tier_idx:],
+        "start_tier": tier_order[0],
+        "tiers_tried": tier_order,
         "tier_summaries": all_tier_summaries,
         "total_attempts": len(all_attempts),
         "elapsed_ms": final_result.elapsed_ms,

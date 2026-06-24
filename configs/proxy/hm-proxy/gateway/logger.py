@@ -6,6 +6,7 @@ import time
 import datetime
 
 from .config import LOG_DIR, _log_lock, _metrics_lock, _error_detail_lock
+from . import db  # R40: enqueue metrics to postgres (best-effort, async)
 
 LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
 
@@ -45,12 +46,17 @@ def _log(level, msg):
 
 
 def _log_metrics(entry):
-    """Write structured JSON metrics to hm_metrics.{date}.jsonl."""
+    """Write structured JSON metrics to hm_metrics.{date}.jsonl + enqueue to DB (R40)."""
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         date = datetime.date.today().isoformat()
         with _metrics_lock, open(os.path.join(LOG_DIR, f"hm_metrics.{date}.jsonl"), "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+    # R40: best-effort async postgres persistence (non-blocking, file log is ground truth)
+    try:
+        db.enqueue_metrics(entry)
     except Exception:
         pass
 

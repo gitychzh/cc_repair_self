@@ -86,6 +86,7 @@ SYNC_MAP=(
     "configs/proxy/hm-proxy/gateway/upstream.py:proxy/hm-proxy/gateway/upstream.py"
     "configs/proxy/hm-proxy/gateway/error_mapping.py:proxy/hm-proxy/gateway/error_mapping.py"
     "configs/proxy/hm-proxy/gateway/logger.py:proxy/hm-proxy/gateway/logger.py"
+    "configs/proxy/hm-proxy/gateway/db.py:proxy/hm-proxy/gateway/db.py"
     "configs/proxy/hm-proxy/.gitignore:proxy/hm-proxy/.gitignore"
 
     # Mihomo proxy config (R36: per-key NV proxy groups)
@@ -94,6 +95,7 @@ SYNC_MAP=(
 
     # Postgres
     "configs/postgres/init-db.sh:postgres/init-db.sh"
+    "configs/postgres/hermes-logs-schema.sql:postgres/hermes-logs-schema.sql"
 )
 
 echo "=== Syncing configs from ${REPO_DIR} to ${DEPLOY_DIR} ==="
