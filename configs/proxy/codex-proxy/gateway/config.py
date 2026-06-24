@@ -237,16 +237,16 @@ NUM_VARIANTS = {"glm5.1": NUM_VARIANTS_GLM51}
 # Variant model IDs — proxy uses these to construct precise model names.
 # Each variant has independent 200/id/day quota on ModelScope. NEVER remove variants.
 GLM51_VARIANT_IDS = [
-    "ZHIPUAI/GLM-5.1",      # v1
-    "ZHIPUAI/GLm-5.1",      # v2
-    "ZHIPUAI/GlM-5.1",      # v3
-    "ZHIPUAI/Glm-5.1",      # v4
-    "ZHIPUAI/gLM-5.1",      # v5
-    "ZHIPUAI/gLm-5.1",      # v6
-    "ZHIPUAI/glM-5.1",      # v7
-    "ZHIPUAI/glm-5.1",      # v8
-    "ZHIPUAi/GLM-5.1",      # v9
-    "ZHIPUAi/GLm-5.1",      # v10
+    "ZHIPUAI/GLM-5.2",      # v1
+    "ZHIPUAI/GLm-5.2",      # v2
+    "ZHIPUAI/GlM-5.2",      # v3
+    "ZHIPUAI/Glm-5.2",      # v4
+    "ZHIPUAI/gLM-5.2",      # v5
+    "ZHIPUAI/gLm-5.2",      # v6
+    "ZHIPUAI/glM-5.2",      # v7
+    "ZHIPUAI/glm-5.2",      # v8
+    "ZHIPUAi/GLM-5.2",      # v9
+    "ZHIPUAi/GLm-5.2",      # v10
 ]
 VARIANT_IDS = {"glm5.1": GLM51_VARIANT_IDS}
 
