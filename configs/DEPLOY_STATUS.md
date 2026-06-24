@@ -26,13 +26,13 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   _hm_ms suffix for Hermes MS fallback endpoint (R38.4: _hm_ms = Hermes + ModelScope)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
-:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.8: 3-tier + 408 cycling + kimi primary)
+:40006  hm-proxy → _hm_nv /v1/chat/completions → LiteLLM 41101-41105 (R38.9: deepseek primary + 3-tier fallback)
   R38.7: deepseek RESTORED as tier 3
   R38.8: depends_on condition:service_healthy (hm40006 waits for ALL 5 LiteLLM nv_hm healthy before starting)
   R38.8: connection fast-break (2 consecutive conn errors → skip tier)
   R38.8: 408 (LiteLLM timeout) 加入 cycling 错误列表 (was: 只 cycle 429/500/502 → 408立即返回错误)
-  R38.8: kimi_hm_nv 作为 primary tier (NV glm-5.1 极慢>60s; revert when glm5.1<20s)
-  默认 kimi_hm_nv → 失败 → glm5.1_hm_nv → deepseek_hm_nv → 全失败 → ABORT
+  R38.9: deepseek_hm_nv 作为 primary tier (测试延迟数据采集)
+  默认 deepseek_hm_nv → 失败 → kimi_hm_nv → glm5.1_hm_nv → 全失败 → ABORT
   TIER_TIMEOUT_BUDGET_S=60s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
   每个 LiteLLM 容器走各自的 mihomo per-key proxy (7894-7899) → NV API
@@ -43,7 +43,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
   R38.8: mihomo health-check url = NV API /v1/models (not gstatic) → dead nodes detected within 3min
   R38.8: nv_proxy_selector reads mihomo API data (no self-testing), */3 cron, execution <1s
   nv_proxy_selector cron: */3 * * * * (R38.8: from */15, script now <1s, no self-testing)
-  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.8: default=kimi_hm_nv, fallback default_model=glm5.1_hm_ms)
+  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.9: default=deepseek_hm_nv, fallback default_model=glm5.1_hm_ms)
 
 → :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
 → :41101-41105 LiteLLM nv_hm_4110X (3 NV model dep each, per-key mihomo proxy → NV API)
@@ -58,7 +58,7 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.8: kimi primary + 408 cycling + conn-fast-break, depends_on healthy |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.9: deepseek primary (testing) + 3-tier fallback + conn-fast-break |
 | ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
 | nv_hm_41101 | :41101 | LiteLLM NV HM K1 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7894 proxy |
 | nv_hm_41102 | :41102 | LiteLLM NV HM K2 | 1CPU/1GiB | 3 dep (glm5.1/kimi/deepseek), per-key 7895 proxy |
@@ -136,3 +136,4 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R38.8: mihomo nv-us-provider health-check url changed from gstatic→NV API /v1/models — root cause: gstatic alive nodes may be dead to NV API; NV API health-check detects dead nodes within 180s
 - R38.8: nv_proxy_selector.py rewritten to read mihomo API latency data (no self-testing) — execution <1s (was 30-60s), cron */3 (was */15)
 - R38.8: deepseek-v4-pro RESTORED as cc-proxy(40005) NV tier 3 fallback (tested OK: avg 1-3s, 100% success rate; R38.6 removed was deepseek-v4-flash, different model)
+- R38.9: hm40006 tier order changed — deepseek_hm_nv primary → kimi_hm_nv fallback → glm5.1_hm_nv tier 3 (目的：采集 deepseek 大上下文延迟数据)
