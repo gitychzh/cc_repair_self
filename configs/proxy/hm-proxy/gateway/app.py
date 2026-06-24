@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Hermes NV proxy entry point — ThreadedHTTPServer startup — R38.7."""
+"""Hermes NV proxy entry point — ThreadedHTTPServer startup — R38.12."""
 import os
 import sys
 from http.server import ThreadingHTTPServer
 
 from gateway.config import (
     LISTEN_HOST, LISTEN_PORT, PROXY_ROLE,
-    HM_NUM_KEYS, HM_LITELLM_URLS,
+    HM_NUM_KEYS,
+    NVCF_PEXEC_MODELS,
     NV_MODEL_TIERS, DEFAULT_NV_MODEL,
 )
 from gateway.handlers import ProxyHandler
@@ -15,7 +16,7 @@ from gateway.handlers import ProxyHandler
 def create_and_start_server():
     print(f"[HM-PROXY] Starting Hermes NV proxy on {LISTEN_HOST}:{LISTEN_PORT}", file=sys.stderr, flush=True)
     print(f"[HM-PROXY] PROXY_ROLE={PROXY_ROLE} HM_NUM_KEYS={HM_NUM_KEYS} "
-           f"LiteLLM_urls={len(HM_LITELLM_URLS)} "
+           f"NVCF_pexec_models={list(NVCF_PEXEC_MODELS.keys())} "
            f"tiers={NV_MODEL_TIERS} default={DEFAULT_NV_MODEL}", file=sys.stderr, flush=True)
 
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)

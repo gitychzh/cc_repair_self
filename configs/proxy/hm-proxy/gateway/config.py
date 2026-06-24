@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""Configuration for Hermes NV proxy (hm40006) — R38.11.
+"""Configuration for Hermes NV proxy — R38.12.
 
+R38.12: ALL models use NVCF pexec direct path (SOCKS5 → ACTIVE functions).
+        LiteLLM 41101-41105 removed from active routing (kept as manual fallback only).
+        strip_params per-model declaration: glm5.1 strips thinking_budget (NVCF rejects it),
+        deepseek/kimi pass all params through (NVCF accepts them).
 R38.11: deepseek restored as primary tier (NVCF pexec orion ACTIVE, 100% success rate).
-        glm5.1 as fallback 1. kimi as last-resort (was primary in R38.10).
 R38.10: deepseek-v4-pro bypasses DEGRADING integrate API → NVCF pexec orion function (ACTIVE).
-        kimi restored as primary (deepseek data collection experiment concluded:
-        integrate API routes deepseek to DEGRADING ai-deepseek-v4-pro → 429).
-R38.8 preserved: conn-fast-break, health-check fixes.
-R38.6 critical fixes preserved: sock.settimeout BEFORE getresponse, Connection:close.
-R38.3→R38.4: Dual suffix — _hm_nv (Hermes+NV) / _hm_ms (Hermes+MS).
+
+Chain (ALL models): Hermes → hm40006 → NVCF pexec (per-model ACTIVE function) → per-key SOCKS5 proxy → mihomo → NV API
 
 Each tier uses 5 keys (k1→k5) with per-tier persistent RR counter.
 Fallback triggers: all 5 keys 429 or empty 200 (choices=null/content=null).
 Fallback continues from current key position (not from k1).
 
-Chain (deepseek): Hermes → hm40006 → NVCF pexec (orion ACTIVE) → per-key SOCKS5 proxy → mihomo → NV API
-Chain (glm5.1/kimi): Hermes → hm40006 → LiteLLM 41101-41105 → mihomo per-key proxy → integrate API
-
-hm40006 does: model tier selection + per-tier 5-key RR + MSG-FIX + throttle + 3-tier fallback
-LiteLLM does: NV API call (with drop_params for unsupported params, timeout=35s) — for glm5.1/kimi only
-NVCF pexec does: direct NV function invocation — for deepseek only (bypasses DEGRADING integrate API)
+Tier order: deepseek_hm_nv (primary) → glm5.1_hm_nv → kimi_hm_nv (last-resort)
 """
 import os
 import sys
@@ -40,62 +35,54 @@ PROXY_ROLE = os.environ.get("PROXY_ROLE", "passthrough")
 # ─── Logging ──────────────────────────────────────────────────────────────
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 
-# ─── LiteLLM upstream URLs (R38) ───────────────────────────────────────────
-# 5 LiteLLM containers, each on its own port with per-key mihomo proxy
-# Key1 → 41101 (mihomo 7894), Key2 → 41102 (mihomo 7895), etc.
-HM_LITELLM_URLS = []
-for i in range(1, 6):
-    url = os.environ.get(f"HM_LITELLM_URL{i}", "")
-    if url:
-        HM_LITELLM_URLS.append(url)
-HM_NUM_KEYS = len(HM_LITELLM_URLS)  # Should be 5
-HM_LITELLM_KEY = os.environ.get("HM_LITELLM_KEY", "sk-litellm-local")
-
-# ─── NVCF pexec configuration (R38.10) ──────────────────────────────────────
-# deepseek-v4-pro: integrate API routes to DEGRADING ai-deepseek-v4-pro → 429.
-# NVCF pexec routes to ACTIVE orion-deepseek-v4-pro → 200.
-# Only deepseek uses NVCF pexec; kimi/glm5.1 still go through LiteLLM (integrate API
-# routes them to ACTIVE functions).
+# ─── NVCF pexec configuration (R38.12: ALL models) ──────────────────────────
+# R38.12: All 3 models now use NVCF pexec direct path (bypasses integrate API).
+# Each model targets a specific ACTIVE NVCF function ID, env var overrideable.
+# strip_params: per-model declaration of params that NVCF pexec rejects.
+#   - deepseek/kimi: NVCF pexec accepts all params (thinking_budget, reasoning_effort)
+#   - glm5.1: NVCF pexec REJECTS thinking_budget (returns 400) → must strip it
+#     reasoning_effort is OK (tested 200 OK)
+NVCF_BASE_URL = os.environ.get("NVCF_BASE_URL", "api.nvcf.nvidia.com")
 NVCF_PEXEC_MODELS = {
     "deepseek_hm_nv": {
         "function_id": os.environ.get("NVCF_DEEPSEEK_FUNCTION_ID",
                                       "4e533b45-dc54-4e3a-a69a-6ff24e048cb5"),  # orion-deepseek-v4-pro (ACTIVE)
-        "nvcf_base_url": os.environ.get("NVCF_BASE_URL",
-                                        "api.nvcf.nvidia.com"),
-        "nvcf_path_prefix": "/v2/nvcf/pexec/functions",
+        "strip_params": [],  # NVCF pexec accepts all params for deepseek ✅
+    },
+    "kimi_hm_nv": {
+        "function_id": os.environ.get("NVCF_KIMI_FUNCTION_ID",
+                                      "f966661c-790d-4f71-b973-c525fb8eafd4"),  # nvquery-kimi-k2.6 (ACTIVE)
+        "strip_params": [],  # NVCF pexec accepts all params for kimi ✅
+    },
+    "glm5.1_hm_nv": {
+        "function_id": os.environ.get("NVCF_GLM51_FUNCTION_ID",
+                                      "822231fa-d4f3-44dd-8057-be52cc344c1d"),  # ai-glm5_1 (ACTIVE)
+        "strip_params": ["thinking_budget"],  # NVCF pexec REJECTS thinking_budget → 400 ❌
     },
 }
 
-# ─── NV API keys for direct NVCF pexec access ──────────────────────────────
-# hm-proxy bypasses LiteLLM for NVCF pexec models, needs NV API keys directly.
+# ─── NV API keys for NVCF pexec (all models use same 5 keys) ──────────────
 HM_NV_KEYS = []
 for i in range(1, 6):
     key = os.environ.get(f"HM_NV_KEY{i}", "")
     if key:
         HM_NV_KEYS.append(key)
-HM_NV_NUM_KEYS = len(HM_NV_KEYS)
+HM_NUM_KEYS = len(HM_NV_KEYS)
 
-# ─── Per-key mihomo proxy URLs for NVCF pexec ──────────────────────────────
-# Same proxy mapping as LiteLLM containers: K1→7894, K2→7895, etc.
+# ─── Per-key mihomo SOCKS5 proxy URLs ──────────────────────────────────────
+# K1→7894, K2→7895, K3→7896, K4→7897, K5→7899
 HM_NV_PROXY_URLS = []
 for i in range(1, 6):
     url = os.environ.get(f"HM_NV_PROXY_URL{i}", "")
     if url:
         HM_NV_PROXY_URLS.append(url)
 
-if HM_NV_NUM_KEYS > 0 and HM_NV_NUM_KEYS != HM_NUM_KEYS:
-    print(f"[HM-CONFIG] WARN: {HM_NV_NUM_KEYS} NV keys but {HM_NUM_KEYS} LiteLLM URLs "
-          f"(should match)", file=sys.stderr, flush=True)
-
 if HM_NUM_KEYS < 5:
-    print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} LiteLLM URLs configured (expected 5)", file=sys.stderr, flush=True)
+    print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} NV keys configured (expected 5)", file=sys.stderr, flush=True)
 
-# ─── Three-tier fallback model chain (R38.2→R38.4→R38.10) ─────────────────────
-# R38.11: deepseek restored as primary (NVCF pexec orion ACTIVE, 100% success rate).
-# kimi as last-resort (integrate API routes to ACTIVE nvquery-kimi-k2_6).
-# R38.7: deepseek_hm_nv RESTORED as tier 3 fallback (reselected nodes → 3/5 success).
-# R38.4: Dual suffix convention: _hm_nv = Hermes + NV API, _hm_ms = Hermes + MS API
-# R38.11: deepseek primary (NVCF pexec, 1.2~2.2s avg, 100% success) → glm5.1 (NV, ~20s avg) → kimi (last resort, ~4s avg)
+# ─── Three-tier fallback model chain (R38.12) ──────────────────────────────
+# R38.12: All models NVCF pexec. Tier order unchanged from R38.11.
+# deepseek primary → glm5.1 fallback → kimi last-resort
 NV_MODEL_TIERS = ["deepseek_hm_nv", "glm5.1_hm_nv", "kimi_hm_nv"]
 
 NV_MODEL_IDS = {
@@ -104,53 +91,35 @@ NV_MODEL_IDS = {
     "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",
 }
 
-# LiteLLM model name pattern: nv{model_short}_k{N}
-LITELLM_MODEL_MAP = {
-    "glm5.1_hm_nv": "nvglm5.1",
-    "kimi_hm_nv": "nvkimi",
-    "deepseek_hm_nv": "nvdeepseek",
-}
+DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.11+: deepseek primary (NVCF pexec ACTIVE)
 
-DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R38.11: deepseek primary (NVCF pexec orion ACTIVE, 100% success rate)
-
-# ─── Tier timeout budget (R38.6→R38.7) ─────────────────────────────────────────
-# Maximum time to spend on ONE tier before giving up and moving to next tier.
-# Prevents cumulative timeout stacking (5 keys × 45s = 225s worst case per tier).
-# R38.7: 90→60s. Data: NV glm5.1 avg=20.8s max=38.2s. 60s budget allows:
-#   - 1 timeout (45s) + 1 retry window (15s) → 2nd key only needs 6-15s to succeed
-#   - If 1 key already timed out 45s, the tier is likely broken; 60s forces quick exit
-#   - 90s was too generous: 2 timeouts wasted 90s before budget kicked in
+# ─── Tier timeout budget ──────────────────────────────────────────────────
 TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "60"))
 
 # ─── Agent suffix ──────────────────────────────────────────────────────────
-# R38.4: Dual suffix — _hm_nv (Hermes + NV), _hm_ms (Hermes + MS)
 AGENT_SUFFIXES = {
     "_hm_nv": {"name": "HermesNV", "format": "openai"},
 }
 DEFAULT_AGENT_SUFFIX = "_hm_nv"
 
 # ─── Model name mapping ──────────────────────────────────────────────────
-# Frontend model names → internal NV model keys
-# R38.4: Dual suffix convention: _hm_nv (Hermes+NV), _hm_ms (Hermes+MS)
-# Backward compat: old _nv/_hm names → _hm_nv equivalents
 MODEL_MAP = {
-    # Primary tier — NV API (Hermes) R38.9: deepseek_v4_pro primary
+    # Primary tier — deepseek (NVCF pexec orion ACTIVE)
     "deepseek_hm_nv": "deepseek_hm_nv",
-    "deepseek_nv": "deepseek_hm_nv",     # R38.3 alias → R38.4
+    "deepseek_nv": "deepseek_hm_nv",
     "deepseek": "deepseek_hm_nv",
     "deepseek-v4-pro": "deepseek_hm_nv",
     "deepseek-ai/deepseek-v4-pro": "deepseek_hm_nv",
-    # Backward compat: unqualified default → deepseek (R38.11 primary)
     "deepseek_hm": "deepseek_hm_nv",
-    # Fallback tier 1 — NV API (Hermes) R38.11
+    # Fallback tier 1 — glm5.1 (NVCF pexec ai-glm5_1 ACTIVE)
     "glm5.1_hm_nv": "glm5.1_hm_nv",
-    "glm5.1_nv": "glm5.1_hm_nv",       # R38.3 _nv alias → R38.4 _hm_nv
+    "glm5.1_nv": "glm5.1_hm_nv",
     "glm-5.1": "glm5.1_hm_nv",
     "z-ai/glm-5.1": "glm5.1_hm_nv",
     "glm5.1_hm": "glm5.1_hm_nv",
-    # Last-resort tier — NV API (Hermes) R38.11
+    # Last-resort tier — kimi (NVCF pexec nvquery-kimi ACTIVE)
     "kimi_hm_nv": "kimi_hm_nv",
-    "kimi_nv": "kimi_hm_nv",            # R38.3 alias → R38.4
+    "kimi_nv": "kimi_hm_nv",
     "kimi": "kimi_hm_nv",
     "kimi-k2.6": "kimi_hm_nv",
     "moonshotai/kimi-k2.6": "kimi_hm_nv",
@@ -169,32 +138,16 @@ def detect_nv_model(model_id: str) -> str:
     return DEFAULT_NV_MODEL
 
 def get_tier_index(mapped_model: str) -> int:
-    """Get the tier index for a mapped model.
-
-    Returns: 0-based index in NV_MODEL_TIERS.
-    Falls back to 0 (primary tier = deepseek_hm_nv).
-    """
+    """Get the tier index for a mapped model."""
     try:
         return NV_MODEL_TIERS.index(mapped_model)
     except ValueError:
         return 0
 
-def litellm_model_name(mapped_model: str, key_idx: int) -> str:
-    """Build LiteLLM model name for key_idx (0-based).
-
-    e.g. mapped_model="glm5.1_hm_nv", key_idx=0 → "nvglm5.1_k1"
-    """
-    prefix = LITELLM_MODEL_MAP.get(mapped_model, "nvglm5.1")
-    return f"{prefix}_k{key_idx + 1}"
-
 # ─── Token estimation ──────────────────────────────────────────────────────
 CHARS_PER_TOKEN_ESTIMATE = float(os.environ.get("CHARS_PER_TOKEN_ESTIMATE", "3.0"))
 
 # ─── Outbound throttle ──────────────────────────────────────────────────────
-# R38.5: throttle only applies to first key attempt (not cycling).
-# Cycling keys have independent RPM buckets — throttle delay is pure waste.
-# R38.6: Default 1.5s (reduced from 2.0→3.5→1.5; 5 NV keys each have independent
-# RPM=1/key, throttle only needs to prevent burst, 1.5s is sufficient).
 MIN_OUTBOUND_INTERVAL_S = float(os.environ.get("MIN_OUTBOUND_INTERVAL_S", "1.5"))
 _outbound_last_sent = 0.0
 _outbound_throttle_lock = threading.Lock()
@@ -213,21 +166,11 @@ def throttle_outbound():
             now = time.monotonic()
         _outbound_last_sent = now
 
-# ─── 429 Cooldown tracking (R38.5→R38.6: restored + optimized) ──────────────
-# When a key gets 429, mark it as "cooling" for KEY_COOLDOWN_S seconds.
-# During cooldown, skip that key in the RR rotation to avoid wasting requests.
-# R38.6 optimizations (data-driven):
-# - KEY_COOLDOWN_S base: 10→15s (NV 429 recovery is ~15s based on burst throttle data;
-#   CLAUDE.md says "429 root cause is RPM burst throttle, auto-recovers ~15min" — but
-#   per-key RPM=1/key recovery is faster, ~15s per key)
-# - Exponential backoff cap: 30s (prevent over-cooling)
-# - Global tier cooldown on all-429: 15s (prevent immediate re-hit)
+# ─── 429 Cooldown tracking ────────────────────────────────────────────────
 KEY_COOLDOWN_S = float(os.environ.get("KEY_COOLDOWN_S", "15.0"))
-_key_cooldown_map = {}  # {(tier_model, key_idx): cooldown_until_timestamp}
+_key_cooldown_map = {}
 _key_cooldown_lock = threading.Lock()
 
-# R38.5: Exponential backoff tracking for 429s per key
-# key -> consecutive_429_count, used to scale cooldown duration
 _key429_count = {}
 _key429_lock = threading.Lock()
 
@@ -240,15 +183,10 @@ def is_key_cooling(tier_model, key_idx):
         return False
 
 def mark_key_cooling(tier_model, key_idx, duration_s=None):
-    """Mark a key as cooling after receiving 429.
-
-    R38.5: Exponential backoff with capped duration.
-    Base: KEY_COOLDOWN_S (10s), doubles per consecutive 429, capped at 30s.
-    """
+    """Mark a key as cooling after receiving 429. Exponential backoff, capped at 30s."""
     with _key429_lock:
         _key429_count[(tier_model, key_idx)] = _key429_count.get((tier_model, key_idx), 0) + 1
         consecutive = _key429_count[(tier_model, key_idx)]
-    # R38.5: Exponential backoff: base KEY_COOLDOWN_S, double per consecutive 429, cap at 30s
     import math
     effective_duration = min(KEY_COOLDOWN_S * (2 ** (consecutive - 1)), 30) if duration_s is None else duration_s
     with _key_cooldown_lock:
@@ -259,40 +197,29 @@ def reset_key429_count(tier_model, key_idx):
     with _key429_lock:
         _key429_count.pop((tier_model, key_idx), None)
 
-# ─── Per-tier persistent round-robin counter (R38.2→R38.4) ─────────────────
-# R38.4: Counter keys use hm_nv_ prefix (dual suffix convention).
-# Old "nv_glm5.1"/"nv_kimi"/"nv_deepseek" (R38.3) counters are migrated.
-# Oldest "hm_nv_glm5.1" (R38.2) also migrated.
+# ─── Per-tier persistent round-robin counter ───────────────────────────────
 _RR_COUNTER_FILE = os.path.join(LOG_DIR, "rr_counter.json")
 _vk_rr_counter = {}
 _vk_rr_lock = threading.Lock()
 
-# Tier-specific RR counter keys (R38.4: hm_nv_ prefix)
 _TIER_RR_KEYS = {
     "glm5.1_hm_nv": "hm_nv_glm5.1",
     "kimi_hm_nv": "hm_nv_kimi",
     "deepseek_hm_nv": "hm_nv_deepseek",
 }
 
-# R38.4 backward compat: old counter key names → new counter key names
 _OLD_RR_KEY_MAP = {
-    # R38.3 keys → R38.4
     "nv_glm5.1": "hm_nv_glm5.1",
     "nv_kimi": "hm_nv_kimi",
     "nv_deepseek": "hm_nv_deepseek",
-    # R38.2 oldest keys (already match R38.4 format)
     "hm_nv_glm5.1": "hm_nv_glm5.1",
     "hm_nv_kimi": "hm_nv_kimi",
     "hm_nv_deepseek": "hm_nv_deepseek",
-    # Oldest single counter
     "hm_nv": "hm_nv_glm5.1",
 }
 
 def _load_rr_counter() -> None:
-    """Restore counters from disk at startup.
-
-    R38.4: Migrates old nv_/hm_nv_ counter keys to hm_nv_ keys on first load.
-    """
+    """Restore counters from disk at startup, migrating old key names."""
     try:
         with open(_RR_COUNTER_FILE, "r") as f:
             raw = f.read().strip()
@@ -303,7 +230,6 @@ def _load_rr_counter() -> None:
             migrated = False
             for k, v in saved.items():
                 if isinstance(k, str) and isinstance(v, int) and v >= 0:
-                    # Check if this is an old key that needs migration
                     new_key = _OLD_RR_KEY_MAP.get(k, k)
                     if new_key != k:
                         _vk_rr_counter[new_key] = v
@@ -346,22 +272,13 @@ def _save_rr_counter() -> None:
 _load_rr_counter()
 
 def _next_hm_nv_key(tier_model: str) -> int:
-    """Per-tier sequential round-robin: each tier tracks its own key position.
-
-    R38.4: _hm_nv dual suffix for tier keys.
-    This ensures fallback continues from current position (not k1).
-
-    Args:
-        tier_model: one of "glm5.1_hm_nv" / "kimi_hm_nv" / "deepseek_hm_nv"
-
-    Returns: 0-based key index (0..HM_NUM_KEYS-1)
-    """
+    """Per-tier sequential round-robin: each tier tracks its own key position."""
     rr_key = _TIER_RR_KEYS.get(tier_model, "hm_nv_glm5.1")
     with _vk_rr_lock:
         counter = _vk_rr_counter.get(rr_key, 0)
         key_idx = counter % HM_NUM_KEYS
         _vk_rr_counter[rr_key] = counter + 1
-        _save_rr_counter()  # Immediate persist — survive power loss
+        _save_rr_counter()
         return key_idx
 
 # Signal handlers for clean shutdown

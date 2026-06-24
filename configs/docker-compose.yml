@@ -400,14 +400,12 @@ services:
     logging: *logging
 
 
-  # ─── R38.7: hm40006 — Hermes NV proxy (routes through LiteLLM) ───
-  # Hermes → 40006 → LiteLLM 41101-41105 → mihomo per-key proxy → NV API
-  # 5-key sequential round-robin via LiteLLM containers, persistent counter
-  # MSG-FIX, LiteLLM handles drop_params for NV unsupported params
-  # Physically isolated from cc/codex/passthrough — builds from proxy/hm-proxy/
-  # R38.7 changes (data-driven):
-  # - deepseek RESTORED as tier 3 fallback (3/5 ports succeed after nv_proxy_selector reselected nodes)
-  # - TIER_TIMEOUT_BUDGET_S 90→60s (glm5.1 avg=20.8s → 60s allows 1 timeout + 1 retry window)
+  # ─── R38.12: hm40006 — Hermes NV proxy (ALL models via NVCF pexec) ───
+  # Hermes → 40006 → NVCF pexec (per-model ACTIVE function) → per-key SOCKS5 proxy → mihomo → NV API
+  # R38.12: ALL 3 models (deepseek, glm5.1, kimi) use NVCF pexec direct path.
+  #   LiteLLM 41101-41105 no longer used for routing (kept as manual fallback only).
+  #   Per-model strip_params: glm5.1 strips thinking_budget (NVCF rejects it).
+  #   deepseek/kimi pass all params through (NVCF accepts them).
   # R38.6 critical fixes preserved: sock.settimeout() BEFORE getresponse(), Connection:close
   hm40006:
     build:
@@ -419,24 +417,23 @@ services:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
       PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "45"  # unchanged; NV glm5.1 max=38.2s needs 45s buffer; sock.settimeout works correctly
-      TIER_TIMEOUT_BUDGET_S: "60"  # R38.7: 90→60 (glm5.1 avg=20.8s → 1 timeout(45s) + retry window(15s))
+      UPSTREAM_TIMEOUT: "45"
+      TIER_TIMEOUT_BUDGET_S: "60"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
-      MIN_OUTBOUND_INTERVAL_S: "1.5"  # unchanged; 5 NV keys each independent RPM=1
-      KEY_COOLDOWN_S: "15.0"  # unchanged; NV per-key 429 recovery ~15s
-      # R38: LiteLLM upstream URLs (container-to-container on cc-net)
-      HM_LITELLM_URL1: http://nv_hm_41101:4000/v1
-      HM_LITELLM_URL2: http://nv_hm_41102:4000/v1
-      HM_LITELLM_URL3: http://nv_hm_41103:4000/v1
-      HM_LITELLM_URL4: http://nv_hm_41104:4000/v1
-      HM_LITELLM_URL5: http://nv_hm_41105:4000/v1
-      HM_LITELLM_KEY: sk-litellm-local
-      # R38.10: NVCF pexec direct access for deepseek-v4-pro (bypasses DEGRADING integrate API routing)
+      MIN_OUTBOUND_INTERVAL_S: "1.5"
+      KEY_COOLDOWN_S: "15.0"
+      # R38.12: NVCF pexec function IDs (ALL models) — env var overrideable
+      NVCF_BASE_URL: api.nvcf.nvidia.com
+      NVCF_DEEPSEEK_FUNCTION_ID: 4e533b45-dc54-4e3a-a69a-6ff24e048cb5  # orion-deepseek-v4-pro (ACTIVE)
+      NVCF_KIMI_FUNCTION_ID: f966661c-790d-4f71-b973-c525fb8eafd4  # nvquery-kimi-k2.6 (ACTIVE)
+      NVCF_GLM51_FUNCTION_ID: 822231fa-d4f3-44dd-8057-be52cc344c1d  # ai-glm5_1 (ACTIVE)
+      # NV API keys (shared across all models)
       HM_NV_KEY1: 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
       HM_NV_KEY2: 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
       HM_NV_KEY3: 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
       HM_NV_KEY4: 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
       HM_NV_KEY5: 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
+      # Per-key SOCKS5 proxy URLs (mihomo mixed ports)
       HM_NV_PROXY_URL1: http://host.docker.internal:7894
       HM_NV_PROXY_URL2: http://host.docker.internal:7895
       HM_NV_PROXY_URL3: http://host.docker.internal:7896
@@ -453,17 +450,8 @@ services:
       - 40006:40006
     networks:
       - cc-net
-    depends_on:
-      nv_hm_41101:
-        condition: service_healthy
-      nv_hm_41102:
-        condition: service_healthy
-      nv_hm_41103:
-        condition: service_healthy
-      nv_hm_41104:
-        condition: service_healthy
-      nv_hm_41105:
-        condition: service_healthy
+    # R38.12: No depends_on LiteLLM containers — hm40006 no longer routes through them.
+    # LiteLLM 41101-41105 kept running as manual fallback (can add back depends_on if needed).
     healthcheck:
       test:
         - CMD-SHELL
