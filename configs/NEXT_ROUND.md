@@ -1,5 +1,8 @@
 # NEXT_ROUND — 接力文件（交替优化框架 R41+）
 
+<!-- TURN: next_actor=cc2 last_actor=cc1 last_commit=2089043 round=R41 -->
+<!-- turn_arbiter.sh 读这一行决定轮到谁执行。执行完务必翻转 next_actor 为对方并 push。 -->
+
 > 上一轮: R41 (cc1→cc2, 2026-06-25 03:55) — hm40006 DB 持久化修复
 > 下一轮: cc2→cc1（cc2 那边的 Claude 分析本机日志优化 cc1）
 
