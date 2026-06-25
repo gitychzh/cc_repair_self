@@ -6,6 +6,11 @@ http.client.HTTPSConnection call to ModelScope API.
 
 Much simpler than hm-proxy's NV path (no SOCKS5, no SSL tunnel hack,
 no pexec function IDs, no per-key proxy) — just straight HTTPS to MS.
+
+R44: stream_passthrough_chunked — writes SSE data in HTTP chunked encoding
+format so cc-proxy's HTTP/1.1 client can read incrementally. Previous
+stream_passthrough wrote raw data which worked with HTTP/1.0 Connection:close
+but broke cc-proxy's incremental SSE reading.
 """
 import json
 import http.client
@@ -86,17 +91,24 @@ def call_modelscope(oai_body, variant_id, api_key, display_name, is_stream=False
         return (0, {"error": f"{error_class}: {str(e)[:200]}"})
 
 
-def stream_passthrough(resp, conn, wfile, display_name):
-    """Stream ModelScope SSE response directly to client wfile.
+def stream_passthrough_chunked(resp, conn, wfile, display_name):
+    """Stream ModelScope SSE response in HTTP chunked transfer encoding.
 
-    Reads 8192-byte chunks from MS HTTPSConnection and writes them
-    directly to the client's wfile — no parsing, no transformation,
-    no buffering. Same pattern as hm-proxy.
+    R44: cc-proxy uses HTTPConnection (HTTP/1.1 client) to read from ms-gateway.
+    When ms-gateway responded with HTTP/1.0 + Connection:close, cc-proxy's
+    resp.read(8192) couldn't read SSE data incrementally — it blocked until
+    the connection closed, then either got all data at once or IncompleteRead(0).
+
+    With HTTP/1.1 + Transfer-Encoding:chunked:
+      - Each SSE chunk from MS is wrapped as a HTTP chunk: size\r\n data\r\n
+      - cc-proxy's resp.read(8192) reads each HTTP chunk incrementally
+      - Final chunk: 0\r\n\r\n signals end of stream
+      - No Content-Length needed (stream length unknown upfront)
 
     Args:
         resp: http.client.HTTPResponse from MS
         conn: the HTTPSConnection (for cleanup after stream ends)
-        wfile: client wfile to write to
+        wfile: client wfile to write to (must send chunked encoding)
         display_name: for logging
     """
     try:
@@ -109,8 +121,15 @@ def stream_passthrough(resp, conn, wfile, display_name):
             if not ttfb:
                 ttfb = True
                 _log("MS-TTFB", f"{display_name} first chunk received")
+            # Write as HTTP chunked encoding: hex_size\r\n data\r\n
+            chunk_size = len(chunk)
+            wfile.write(f"{chunk_size:x}\r\n".encode("ascii"))
             wfile.write(chunk)
-            bytes_sent += len(chunk)
+            wfile.write(b"\r\n")
+            wfile.flush()  # Flush each chunk to ensure cc-proxy can read incrementally
+            bytes_sent += chunk_size
+        # End of chunked stream: 0\r\n\r\n
+        wfile.write(b"0\r\n\r\n")
         wfile.flush()
         _log("MS-STREAM-END", f"{display_name} stream complete, {bytes_sent} bytes sent")
     except Exception as e:

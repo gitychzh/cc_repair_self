@@ -18,10 +18,14 @@ from .config import THINKING_SIGNATURE_DEFAULT, UPSTREAM_TIMEOUT, PROXY_TIMEOUT
 from .logger import _log, _log_metrics, _log_error_detail
 
 
-def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_start):
+def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_start,
+                   prefill_buffer=""):
     """Real-time SSE conversion: OpenAI streaming chunks → Anthropic SSE events.
 
     handler: ProxyHandler instance (needed for _send_sse, _send_json)
+    prefill_buffer: SSE bytes already peeked by upstream (R40.x NV empty-stream
+        fix). Consumed first, then resp is read for the rest. Empty for MS path
+        (no peek) — behavior unchanged.
     """
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
@@ -31,7 +35,7 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
     message_start_sent = False
     message_delta_sent = False
     ttfb_recorded = False
-    buffer = ""
+    buffer = prefill_buffer
     next_block_idx = 0
     # Track active content blocks by type to emit content_block_stop at transitions
     active_block_type = None  # "thinking", "text", or "tool_use"
@@ -123,8 +127,15 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
         handler._send_sse("message_stop", {"type": "message_stop"})
         # R35.6: Use metrics["status"] to reflect actual outcome, not always 200.
         # If error_type is set (stream error), use 502. Otherwise 200 (clean completion).
+        # R40.x: empty_stream_response now also recorded as 502 (was 200) so metrics
+        # no longer masks the failure. This path is defensive — peek in upstream.py
+        # should catch NV empty streams before reaching here. Only MS-side empty
+        # streams (rare) or peek misses land here.
         if metrics.get("error_type") and metrics["error_type"] not in (None, "empty_stream_response"):
             metrics["status"] = 502  # Stream error — CC received incomplete response
+        elif metrics.get("empty_stream_response"):
+            metrics["status"] = 502  # Empty stream — defensive, should be rare post-peek
+            metrics["error_type"] = "empty_stream_response"
         else:
             metrics["status"] = 200  # Clean completion
         metrics["duration_ms"] = int((time.time() - t_start) * 1000)
@@ -169,14 +180,14 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
                     _log("WARN", f"malformed SSE chunk: {data_str[:200]}")
                     continue
 
-                delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                finish_reason = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                choices = chunk_data.get("choices") or [{}]; delta = choices[0].get("delta") or {}
+                choices = chunk_data.get("choices") or [{}]; finish_reason = choices[0].get("finish_reason")
 
                 # ── Collect usage from streaming chunks ──
                 # With stream_options.include_usage=True, litellm sends usage data in
                 # a SEPARATE final chunk (after the finish_reason chunk).
                 # We must collect it here regardless of finish_reason.
-                chunk_usage = chunk_data.get("usage", {})
+                chunk_usage = chunk_data.get("usage") or {}
                 if chunk_usage:
                     pt = chunk_usage.get("prompt_tokens", 0)
                     ct = chunk_usage.get("completion_tokens", 0)
@@ -238,7 +249,7 @@ def stream_to_anth(handler, resp, request_model, target_model, conn, metrics, t_
                     })
 
                 # ── Tool calls ──
-                tool_calls = delta.get("tool_calls", [])
+                tool_calls = delta.get("tool_calls") or []
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     if tc.get("id"):
@@ -388,21 +399,21 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
                     ttfb_recorded = True
 
                 msg_id = chunk_data.get("id", msg_id)
-                delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                choices = chunk_data.get("choices") or [{}]; delta = choices[0].get("delta") or {}
                 fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
 
                 # Collect reasoning
-                reasoning = delta.get("reasoning_content", "")
+                reasoning = delta.get("reasoning_content") or ""
                 if reasoning:
                     reasoning_text += reasoning
 
                 # Collect text content
-                text = delta.get("content", "")
+                text = delta.get("content") or ""
                 if text:
                     content_text += text
 
                 # Collect tool calls
-                tool_calls = delta.get("tool_calls", [])
+                tool_calls = delta.get("tool_calls") or []
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     if tc.get("id"):
@@ -417,7 +428,7 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
                         tool_calls_data[-1]["arguments"] += fn["arguments"]
 
                 # Collect usage
-                chunk_usage = chunk_data.get("usage", {})
+                chunk_usage = chunk_data.get("usage") or {}
                 if chunk_usage:
                     total_input_tokens = chunk_usage.get("prompt_tokens", total_input_tokens)
                     total_output_tokens = chunk_usage.get("completion_tokens", total_output_tokens)

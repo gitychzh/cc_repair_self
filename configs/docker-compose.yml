@@ -414,11 +414,11 @@ services:
       PROXY_ROLE: passthrough
       LISTEN_PORT: "40006"
       PROXY_TIMEOUT: "300"
-      UPSTREAM_TIMEOUT: "45"
-      TIER_TIMEOUT_BUDGET_S: "60"
+      UPSTREAM_TIMEOUT: "55"
+      TIER_TIMEOUT_BUDGET_S: "75"
       CHARS_PER_TOKEN_ESTIMATE: "3.0"
       MIN_OUTBOUND_INTERVAL_S: "1.5"
-      KEY_COOLDOWN_S: "15.0"
+      KEY_COOLDOWN_S: "10.0"
       # R38.12: NVCF pexec function IDs (ALL models) — env var overrideable
       NVCF_BASE_URL: api.nvcf.nvidia.com
       NVCF_DEEPSEEK_FUNCTION_ID: 4e533b45-dc54-4e3a-a69a-6ff24e048cb5  # orion-deepseek-v4-pro (ACTIVE)
@@ -447,7 +447,7 @@ services:
       HM_DB_PASSWORD: ${POSTGRES_PASSWORD}
       HM_DB_NAME: hermes_logs
       HM_HOST_MACHINE: ${HM_HOST_MACHINE:-opc_uname}
-      HM_CONNECT_RESERVE_S: "5"
+      HM_CONNECT_RESERVE_S: "2"
     <<: *resource-1c1g-host
     volumes:
       - ./logs/proxy40006:/app/logs

@@ -7,6 +7,12 @@ and forwards directly to ModelScope API via HTTPS.
 
 This is a pure pass-through gateway — no routing, no retries, no cooldown,
 no format conversion. The upstream proxies handle all the intelligence.
+
+R44: protocol_version = 'HTTP/1.1' — BaseHTTPRequestHandler defaults to HTTP/1.0
+which causes cc-proxy's HTTPConnection (HTTP/1.1 client) to misread SSE streams:
+HTTP/1.0 without Content-Length uses "read until close" semantics, but SSE streams
+need incremental reading. With HTTP/1.1 + Transfer-Encoding:chunked, cc-proxy's
+resp.read(8192) properly reads each chunk incrementally.
 """
 import http.server
 import json
@@ -16,11 +22,21 @@ import urllib.parse
 from .config import (
     LISTEN_PORT, GATEWAY_KEY, resolve_model, build_model_list, _log
 )
-from .upstream import call_modelscope, stream_passthrough, collect_response
+from .upstream import call_modelscope, stream_passthrough_chunked, collect_response
 
 
 class MsGatewayHandler(http.server.BaseHTTPRequestHandler):
-    """Handle requests to ms-gateway."""
+    """Handle requests to ms-gateway.
+
+    R44: Use HTTP/1.1 protocol so cc-proxy (HTTP/1.1 client) can read
+    streaming responses incrementally via chunked transfer encoding.
+    """
+
+    # R44: Upgrade from HTTP/1.0 to HTTP/1.1 for proper streaming support.
+    # HTTP/1.0 forces "read until connection close" which breaks incremental
+    # SSE reading by cc-proxy's HTTPConnection. HTTP/1.1 + chunked allows
+    # proper incremental reads.
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -106,23 +122,25 @@ class MsGatewayHandler(http.server.BaseHTTPRequestHandler):
                 conn = second
 
                 if is_stream:
-                    # Streaming: pass through SSE chunks directly
+                    # Streaming: use HTTP/1.1 chunked transfer encoding.
+                    # R44: Previously used HTTP/1.0 + Connection:close which caused
+                    # cc-proxy's HTTPConnection to fail reading SSE data incrementally.
+                    # HTTP/1.0 "read until close" semantics don't work well with SSE
+                    # streaming — cc-proxy gets IncompleteRead or has to wait for the
+                    # entire stream to complete before reading any data.
+                    # HTTP/1.1 + Transfer-Encoding:chunked allows incremental reads.
                     self.send_response(200)
-                    # Forward MS response headers
-                    for hdr in ("Content-Type", "Transfer-Encoding"):
-                        val = resp.getheader(hdr)
-                        if val:
-                            self.send_header(hdr, val)
-                    self.send_header("Connection", "close")
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
-                    stream_passthrough(resp, conn, self.wfile, display_name)
+                    stream_passthrough_chunked(resp, conn, self.wfile, display_name)
                 else:
                     # Non-streaming: collect full response and send
                     body = collect_response(resp, conn, display_name)
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
-                    self.send_header("Connection", "close")
                     # Forward MS quota headers if present
                     for hdr_key in (
                         "llm_provider-modelscope-ratelimit-model-requests-remaining",
@@ -133,6 +151,7 @@ class MsGatewayHandler(http.server.BaseHTTPRequestHandler):
                             self.send_header(hdr_key, val)
                     self.end_headers()
                     self.wfile.write(body)
+                    self.wfile.flush()
             else:
                 # Error: (status_code, error_dict)
                 error_status = status_or_resp
@@ -176,12 +195,12 @@ class MsGatewayHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()
 
     def log_message(self, format, *args):
         """Suppress default HTTPServer logging — we use our own _log."""
