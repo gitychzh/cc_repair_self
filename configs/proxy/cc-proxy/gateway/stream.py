@@ -400,7 +400,7 @@ def collect_stream_to_anth(handler, resp, request_model, target_model, conn, met
 
                 msg_id = chunk_data.get("id", msg_id)
                 choices = chunk_data.get("choices") or [{}]; delta = choices[0].get("delta") or {}
-                fr = chunk_data.get("choices", [{}])[0].get("finish_reason")
+                choices = chunk_data.get("choices") or [{}]; fr = choices[0].get("finish_reason")
 
                 # Collect reasoning
                 reasoning = delta.get("reasoning_content") or ""
