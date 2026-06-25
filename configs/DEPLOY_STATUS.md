@@ -1,6 +1,6 @@
-# Deploy Status — opc_uname + opc2_uname (R38.14, 2026-06-25)
+# Deploy Status — opc_uname + opc2_uname (R44, 2026-06-25)
 
-## Architecture (R38.14: HM tier reorder — glm5.1 primary)
+## Architecture (R44: LiteLLM→ms-gateway + null-safety fix)
 ```
 CC (settings.json ANTHROPIC_BASE_URL=40000)
   → :40000 dispatcher (auto-fallback relay, Connection:close relay, PROXY_TIMEOUT deadline)
@@ -9,12 +9,12 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 :40005  cc-proxy → _cc /v1/messages → MS-first (ALL requests go to MS first)
   MS success → done (fast, ~2.3s avg)
-  MS all-429 → NV 3-tier last-resort fallback (R38.8: glm5.1→kimi→deepseek, all restored)
-    Tier 1: glm5.1 (z-ai/glm-5.1) → all 5 NV keys RR → all-429/empty-200 →
+  MS all-429 → NV 3-tier last-resort fallback (R42: deepseek→kimi→glm5.1)
+    Tier 1: deepseek (deepseek-ai/deepseek-v4-pro) → all 5 NV keys RR → all-fail →
     Tier 2: kimi (moonshotai/kimi-k2.6) → all 5 NV keys RR → all-fail →
-    Tier 3: deepseek-v4-pro (deepseek-ai/deepseek-v4-pro) → all-fail → ABORT
+    Tier 3: glm5.1 (z-ai/glm-5.1) → all-fail → ABORT
     per-tier persistent RR counter (not restarting from k1)
-    NV_TIER_TIMEOUT_BUDGET_S=90s caps total NV fallback time
+    NV_TIER_TIMEOUT_BUDGET_S=45s caps total NV fallback time (R41-1: 90→45)
     R38.8: NV conn-fast-break (2 consecutive connection errors → skip to next tier)
     Budget checked before each tier start and before each key attempt
   NV_TIMEOUT=30s (p50=13.4s, p80=~30s → captures 80% viable NV requests)
@@ -27,25 +27,27 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 
 ── 外部 app endpoint（不属于 cc-infra 核心）──
 :40006  hm-proxy → _hm_nv /v1/chat/completions → ALL models via NVCF pexec (SOCKS5 → ACTIVE functions)
-  R38.12: ALL 3 models use NVCF pexec direct path (bypasses integrate API entirely)
+  R42: Tier reorder — deepseek primary (1-3s, 100% rate) → kimi → glm5.1
+  NVCF pexec direct path (bypasses integrate API entirely)
     deepseek → orion-deepseek-v4-pro (ACTIVE), all params pass through ✅
     glm5.1 → ai-glm5_1 (ACTIVE), strips thinking_budget (NVCF rejects it ❌) ✅
     kimi → nvquery-kimi-k2.6 (ACTIVE), all params pass through ✅
   No LiteLLM routing — hm40006 connects directly via SOCKS5 proxy per-key mihomo
-  R38.13: LiteLLM 41101-41105 containers REMOVED (no longer needed, all routing via NVCF pexec)
-  默认 glm5.1_hm_nv(NVCF pexec, primary) → deepseek_hm_nv → kimi_hm_nv → 全失败 → ABORT
-  TIER_TIMEOUT_BUDGET_S=60s (R38.14: budget enforced per-attempt via sock.settimeout=min(UPSTREAM_TIMEOUT, remaining_budget); MIN_ATTEMPT_TIMEOUT=10s)
+  R38.13: LiteLLM 41101-41105 containers REMOVED
+  默认 deepseek_hm_nv(NVCF pexec, primary) → kimi_hm_nv → glm5.1_hm_nv → 全失败 → ABORT
+  TIER_TIMEOUT_BUDGET_S=45s
   fallback 从当前位置继续（不是从k1），per-tier persistent RR counter
-  NV_MODEL_IDS: glm5.1_hm_nv/kimi_hm_nv/deepseek_hm_nv (3-tier chain active)
-  R38.8: mihomo health-check url = NV API /v1/models (not gstatic) → dead nodes detected within 3min
-  R38.8: nv_proxy_selector reads mihomo API data (no self-testing), */3 cron, execution <1s
-  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml (R38.9: default=deepseek_hm_nv, fallback default_model=glm5.1_hm_ms)
+  NV_MODEL_IDS: deepseek_hm_nv/kimi_hm_nv/glm5.1_hm_nv (3-tier chain active)
+  Hermes: ~/.hermes-venv/bin/hermes → config in ~/.hermes/config.yaml
 
-→ :41001 LiteLLM ms_uni41001 (glm5.1v1k1~v10k7 = 70 dep) → ModelScope [2GiB limit]
+→ :41001 ms-gateway (R44: replaced LiteLLM, python:3.11-alpine, ~65.7MB, ~2s startup)
+  Pure passthrough — resolves model_name→MS variant ID+key, direct HTTPS to ModelScope
+  HTTP/1.1 + Transfer-Encoding:chunked for SSE streaming (R44 fix)
+  No routing, no retries, no cooldown, no DB — cc-proxy handles all intelligence
 → :7894-7899 mihomo ♻️US-NV-K1~K5 → NVIDIA API (health-check url = NV API, interval=180s)
 ```
 
-## Containers (R38.13: 7 core + 1 external + 1 LiteLLM MS + 1 DB = 10 total)
+## Containers (R44: 7 core + 1 external + 1 ms-gateway + 1 DB = 10 total)
 | Container | Port | Role | Resources | Notes |
 |-----------|------|------|-----------|-------|
 | auth_to_api_40000 | :40000 | Dispatcher | 1CPU/1GiB | Content-Length fix + PROXY_TIMEOUT deadline |
@@ -53,120 +55,59 @@ CC (settings.json ANTHROPIC_BASE_URL=40000)
 | auth_to_api_40002 | :40002 | Proxy(codex) | 1CPU/1GiB | Responses→Chat |
 | auth_to_api_40003 | :40003 | Proxy(passthrough) | 1CPU/1GiB | MSG-FIX, _hm_ms suffix for Hermes MS fallback |
 | auth_to_api_40005 | :40005 | Proxy(cc,EXPERIMENT) | 1CPU/1GiB | MS-first + NV last-resort, NV_TIMEOUT=30 |
-| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R38.14: glm5.1 primary + NVCF pexec all 3 models, no LiteLLM routing |
-| ms_uni41001 | :41001 | LiteLLM MS | 1CPU/2GiB | 70 glm5.1 dep |
-| cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 |
+| hm40006 | :40006 | hm-proxy(external) | 1CPU/1GiB | R42: deepseek primary + NVCF pexec all 3 models |
+| ms_uni41001 | :41001 | ms-gateway | 1CPU/1GiB | R44: replaced LiteLLM, python:3.11-alpine, 70 models |
+| cc_postgres | :5432 | LiteLLM DB | 1CPU/1GiB | PostgreSQL 16 (used by hm-proxy only) |
 
-## R38 Changes (opc_uname, 2026-06-24) — R38.14 HM tier reorder (glm5.1 primary)
+## R44 Changes (opc_uname, 2026-06-25) — LiteLLM→ms-gateway + null-safety fix
 
-### R41: hm-proxy DB 持久化修复 — 删除 all_tiers_failed 路径的残缺 _log_metrics (2026-06-25, cc1→cc2)
+### Root Cause: Two Independent Bugs Breaking SSE Streaming
 
-**根因（cc2 hm40006 metrics 数据驱动发现）**：分析 cc2 hm40006 `/app/logs/hm_metrics.2026-06-2{4,5}.jsonl`（150 请求样本）：200=100(66.7%) / 502=18 / 429=7 / all_tiers_exhausted=25(16.7%)，fallback 触发率 56%。但 `hermes_logs.hm_requests` 表只有 6 行（全 02:29-02:31 一分钟内），02:31 后零落库。
+1. **HTTP/1.0 protocol mismatch**: ms-gateway (BaseHTTPRequestHandler) sent HTTP/1.0 responses,
+   but cc-proxy's HTTPConnection (HTTP/1.1 client) couldn't read SSE data incrementally.
+   HTTP/1.0 "read until close" semantics block until the entire stream finishes or connection closes,
+   then either returns all data at once or IncompleteRead(0 bytes).
 
-直接根因：`upstream.py execute_request()` 在 all_tiers_failed 终点（旧 L641）调用了**第二次** `_log_metrics({残缺dict})`，该 dict 只有 `request_id/error_subcategory/start_tier/tiers_tried/elapsed_ms`，**缺 NOT NULL 的 `timestamp`(`ts` 列) 和 `duration_ms`/`fallback_tiers_used` 等 db._build_request_row 读取的键**。一个残缺 dict 混入 flush batch → 整批 `INSERT ... VALUES %s` 失败 → rollback → **batch 内全部 50 行丢弃**。因 56% fallback + 16.7% 全失败，几乎每个 batch 都含失败请求 → DB 长期空。
+2. **null-safety gap in stream.py**: LiteLLM filtered null fields from MS SSE responses;
+   without LiteLLM, raw MS SSE has `tool_calls: null`, `choices: []`, etc.
+   Python `dict.get(key, default)` returns None when key exists but value is null
+   (only returns default when key doesn't exist at all).
+   `for tc in None:` → TypeError: 'NoneType' object is not iterable.
 
-而 `handlers.py` all_keys_exhausted 分支（~L142）已用**完整** metrics dict 写过同一事件（带 request_id/timestamp/duration_ms/status/fallback_tiers_used），upstream.py 那次是**重复且残缺的双写**。
+### Fix 1: ms-gateway HTTP/1.1 + chunked streaming
+- handler.py: `protocol_version = "HTTP/1.1"` (was HTTP/1.0 default)
+- handler.py: streaming response uses `Transfer-Encoding: chunked` header
+- upstream.py: `stream_passthrough_chunked()` — wraps each SSE chunk as HTTP chunked format:
+  `hex_size\r\n data\r\n`, terminated with `0\r\n\r\n`
+- Each chunk flushed to wfile immediately → cc-proxy can read incrementally
 
-**修复**：删除 `upstream.py execute_request()` 末尾的 `_log_metrics({...})` 调用，保留 `_log_error_detail`（error_detail 文件不受影响，tier_summaries 仍在）。handlers.py 的完整写入成为唯一 DB 写入点。
+### Fix 2: cc-proxy stream.py null-safety
+- `delta.get("choices", [{}])` → `chunk_data.get("choices") or [{}]` (applies to both stream paths)
+- `delta.get("tool_calls", [])` → `delta.get("tool_calls") or []`
+- `chunk_data.get("usage", {})` → `chunk_data.get("usage") or {}`
+- `delta.get("content", "")` → `delta.get("content") or ""`
+- `delta.get("reasoning_content", "")` → `delta.get("reasoning_content") or ""`
 
-**验证（cc2, 2026-06-25 03:55）**：
-- rebuild hm40006 后触发 2 个真实请求（kimi 200/1.7s + glm5.1 200/28.8s）→ 2 行均正确落库 hm_requests（ts/request_model/status/duration_ms/tier_model 字段完整）。
-- `_build_request_row` 单元验证：完整 metrics dict → 32 列 tuple，NOT NULL 列（request_id/ts/host_machine）全非空。
-- 容器日志零 `[HM-DB] flush failed` / `connect failed`。
-- hm40006 healthy，rr_counter 持久化正常，环形 fallback chain 不变。
+### Verified Working (opc_uname remote)
+- 40000→40005→ms-gateway→MS: streaming ✓
+- 40000→40005→ms-gateway→MS: non-streaming ✓
+- 40001→ms-gateway→MS: streaming ✓
+- ms-gateway direct: streaming ✓, non-streaming ✓
+- ms-gateway /health ✓, /v1/models (73 models) ✓
 
-**遗留（下一轮候选）**：`hm_tier_attempts` 表仍 0 行 — 成功路径 handlers 未填充 `key_cycle_details` 字段，导致 tier attempt 明细不入库。hm_requests 主表已恢复，可观测性核心恢复。
+### Why LiteLLM Was Zero-Value in CC Chain (data-driven)
+- num_retries=0: LiteLLM never retries
+- AllowedFails=0: LiteLLM never marks dep as failed
+- simple-shuffle routing BUT cc-proxy specifies exact model_name (glm5.1v3k5)
+  → LiteLLM has exactly 1 dep per model_name → no routing choice
+- LiteLLM adds ~500ms latency per request (Flask request parsing + OpenAI SDK overhead)
+- LiteLLM image: ~1.5GB, startup ~60s; ms-gateway: ~65.7MB, startup ~2s
 
-**教训**：`_log_metrics` 的 dict schema 必须与 `db._build_request_row` 期望字段对齐，否则一个残缺 dict 毒死整批（batch INSERT 原子性）。双写同事件时两处 schema 必须一致。
-
-### R40: hm-proxy fallback 根因修复 + 日志入 Postgres + 工程化 (2026-06-25)
-
-**根因（远程 opc_uname hermes 卡住）**：远程 hm40006 容器仍跑 R38.9 旧代码（容器 2026-06-24 16:43 创建，从未 rebuild 到 R38.14），`NV_MODEL_TIERS=["deepseek","kimi","glm5.1"]`，glm5.1 在末位(idx=2)。Hermes `default_model=glm5.1_hm_nv` → `start_tier_idx=2` → `NV_MODEL_TIERS[2:]=["glm5.1"]` 只剩 1 个 tier，**无 fallback**。glm5.1 NVCF 2 次 timeout(45s+15s+connect开销=74.2s) → 直接 502 `Tiers tried: [glm5.1_hm_nv: 2×mixed]`，Hermes 持续 502 卡死。本机 6/24 08:06 也出现过同模式(tiers_tried=['glm5.1'], 71.4s)。
-
-**代码修复**：
-- **A1 环形 fallback (upstream.py execute_request)**：`tier_order = NV_MODEL_TIERS[start:] + NV_MODEL_TIERS[:start]`（环形），任何 tier 失败都有 2 个 fallback。根治"末位 tier 无 fallback"设计缺陷，不只是版本同步问题。
-- **A2 budget 漏算 SOCKS5 connect (upstream.py _try_tier_keys)**：预留 `HM_CONNECT_RESERVE_S=5`，connect 后再校验 budget，read_timeout=post_connect_remaining。修复 74.2s vs 60s budget 超限。
-- **A3 cooldown 误分类**：全 key cooldown 时不再 `all([])=True` 误判为 429+empty，新增 `all_cooldown` 字段。
-- **A4 dead code 清理**：`tier_attempts` 过滤简化为单条件 `[a for a in ... if a.get("tier")==tier_model]`。
-- **A5 错误信息增强 (error_mapping.py)**：502/429 错误体加 `tiers_tried_count` + `fallback_actually_attempted` 字段，��分"只跑1 tier"vs"全3 tier真失败"。
-
-**日志入 Postgres（工程化）**：
-- 新增 `gateway/db.py`：psycopg2 异步批量写入（后台 daemon thread，queue.Queue，2s/50条 flush，DB 挂了只写文件不降级主链路）。
-- 新增 `configs/postgres/hermes-logs-schema.sql`：`hermes_logs` 库 + `hm_requests`(每请求一行) + `hm_tier_attempts`(每attempt一行) + 索引 + `v_hm_tier_health_1h`/`v_hm_key_errors_24h` 视图 + `hm_cleanup_old(30)` 清理函数。
-- Dockerfile 加 `psycopg2-binary`；docker-compose hm40006 env 加 `HM_DB_*`；cc_postgres 加 `hermes_logs` 到多库 + 挂载 schema。
-- 新增 `scripts/hm_log_query.sh`（recent-fails/tier-health/key-errors/single-tier-fails/request/count-by-status/tail）+ `scripts/hm_log_cleanup.sh`。
-- `single-tier-fails` 是 R40 根因检测器：专门查"只跑1 tier无fallback"的失败。
-
-**两机链路差异（系统性比对）**：
-| 维度 | 本机 opc_uname (opcsname) | 远程 opc_uname (opc2sname) |
-|------|--------------------------|---------------------------|
-| hm40006 容器版本 | R40 (2026-06-25 02:22 rebuild) | R38.9 旧版 (2026-06-24 16:43, **未 rebuild**) |
-| NV_MODEL_TIERS | [glm5.1, deepseek, kimi] (R38.14+) | [deepseek, kimi, glm5.1] (R38.9 旧序) |
-| glm5.1 请求行为 | 首位，失败→fallback deepseek✅ | 末位，失败→无 fallback→502❌ |
-| Hermes 状态 | 正常 | 卡住(持续 502) |
-| 修复方式 | 已 R40 | 需 git pull + rebuild hm40006 |
-
-**版本同步检查方法**：
-```bash
-docker exec hm40006 grep 'NV_MODEL_TIERS = ' /app/gateway/config.py
-docker inspect hm40006 --format '{{.Created}}'
-# R40+: tier[0]=glm5.1_hm_nv, 容器创建时间应晚于 R40 push 时间
-```
-
-### R38.14: HM tier reorder — glm5.1 primary
-理由：glm5.1 中文原生优势 + Hermes社区集成成熟 + reasoning能力更强更适合agent任务，kimi k2.6智商偏低不能充分利用Hermes能力。
-
-修改：
-- hm-proxy config.py: NV_MODEL_TIERS 从 ["deepseek_hm_nv", "glm5.1_hm_nv", "kimi_hm_nv"] → ["glm5.1_hm_nv", "deepseek_hm_nv", "kimi_hm_nv"]
-- hm-proxy config.py: DEFAULT_NV_MODEL 从 "deepseek_hm_nv" → "glm5.1_hm_nv"
-- Hermes config.yaml: default + default_model 从 deepseek_hm_nv → glm5.1_hm_nv
-- docker-compose.yml: hm40006 注释更新
-- DEPLOY_STATUS.md: R38.14 变更记录
-
-Bug fixes (R38.14):
-1. **Tier budget enforcement bug**: TIER_TIMEOUT_BUDGET_S=60s was only checked BEFORE key attempts, not during.
-   During NVCF overload, each key attempt takes UPSTREAM_TIMEOUT=45s → budget of 60s allowed 2 attempts (~92s total)
-   before breaking, wasting ~32s beyond intended budget.
-   Fix: sock.settimeout = min(UPSTREAM_TIMEOUT, remaining_budget) per-attempt.
-   Also added MIN_ATTEMPT_TIMEOUT=10s threshold: skip attempt if remaining budget < 10s (avoid doomed tiny timeout).
-2. **Misleading HM-TIMEOUT log**: elapsed_ms was computed from t_start (request-level start), not per-attempt start.
-   A 45s per-key timeout appeared as "92080ms" (total time after 2 key attempts).
-   Fix: log both attempt_elapsed_ms (per-key) and total_elapsed_ms separately.
-
-### R38.13: LiteLLM NV HM containers removed
-hm40006 logs confirm NVCF pexec is stable (77 success, 5 transient SSLEOF→retry→success, 0 ABORT, 0 tier fallback needed).
-All 3 models (deepseek 247 reqs, glm5.1 48 reqs, kimi 24 reqs) route via NVCF pexec with no LiteLLM dependency.
-
-**Removed:**
-- 5 containers: nv_hm_41101~41105 (each ~600MB RAM, 1CPU, 0 traffic since R38.12)
-- 5 config files: litellm-nv-hm/config-k1~k5.yaml
-- 5 log dirs: /opt/cc-infra/logs/litellm-nv-hm-k1~k5
-- 2 unused Docker images: litellm/litellm:v1.89.2 (1.7GB), ghcr.io/berriai/litellm:v1.83.14 (2.56GB)
-- 5 service definitions from docker-compose.yml (~170 lines)
-
-**Resource savings:** ~3GB RAM reclaimed + ~4.26GB disk reclaimed + 5 CPU slots freed. 13→10 containers.
-
-### 根因分析 (R38.10)
-integrate.api.nvidia.com/v1 路由 deepseek-ai/deepseek-v4-pro → DEGRADING ai-deepseek-v4-pro NVCF function → 429。
-NVCF pexec endpoint api.nvcf.nvidia.com/v2/nvcf/pexec/functions/{id} 可直接调用 ACTIVE orion-deepseek-v4-pro → 200。
-kimi/glm5.1 的 integrate API 路由到 ACTIVE functions（nvquery-kimi-k2_6, ai-glm5_1/dynamo-glm-5_1），无需 bypass。
-
-### R38.10 修改内容
-1. **hm-proxy config.py**: 新增 NVCF_PEXEC_MODELS（deepseek→orion function ID）+ HM_NV_KEYS/HM_NV_PROXY_URLS
-2. **hm-proxy upstream.py**: NVCF pexec if/else分支 — deepseek用SOCKS5代理直连NVCF；kimi/glm5.1走LiteLLM
-3. **hm-proxy Dockerfile**: 添加 PySocks 安装（ensurepip + pip install）
-4. **docker-compose.yml**: hm40006 新增 HM_NV_KEY1-5 + HM_NV_PROXY_URL1-5 env vars
-5. **Tier order**: deepseek_hm_nv 从 primary → fallback 1（kimi恢复primary），deepseek走NVCF pexec
-
-### 修改内容
-1. **hm40006 upstream.py**: 从 HTTPS CONNECT tunnel 直连 NV → 转发到 LiteLLM 41101-41105
-2. **hm40006 config.py**: 新增 HM_LITELLM_URLS + HM_LITELLM_KEY + litellm_model_name()
-3. **LiteLLM HM 容器**: DATABASE_URL → STORE_MODEL_IN_DB=False（修复 model=None bug）
-4. **LiteLLM HM 容器**: HTTPS_PROXY 从 7880(mixed) → per-key mihomo (7894-7899)
-5. **LiteLLM HM 容器**: 添加 http_proxy/https_proxy（lowercase，最大兼容）
-6. **cc-proxy/codex-proxy**: 移除 _hm suffix + glm5.1_hm mapping（CC/Codex 不用 _hm）
-7. **passthrough-proxy**: 保留 _hm suffix（Hermes fallback via 40003）
-8. **CLAUDE.md**: Hermes 明确标注为外部 app + 40006 路由到 LiteLLM
+### Resource Savings
+- Image size: ~1.5GB → ~65.7MB (~23x reduction)
+- Startup time: ~60s → ~2s (~30x improvement)
+- RAM usage: ~500MB → ~50MB (~10x reduction)
+- CPU: near-zero (pure HTTP passthrough, no Flask/OpenAI SDK overhead)
 
 ## Deploy Method
 ```bash
@@ -174,11 +115,14 @@ kimi/glm5.1 的 integrate API 路由到 ACTIVE functions（nvquery-kimi-k2_6, ai
 bash ~/cc_ps/cc_repair_self/scripts/sync_config.sh
 
 # Step 2: rebuild (code changes must rebuild!)
-cd /opt/cc-infra && docker compose up -d --build --force-recreate auth_to_api_40005 auth_to_api_40002
+cd /opt/cc-infra && docker compose up -d --build --force-recreate ms_uni41001 auth_to_api_40005 auth_to_api_40001 auth_to_api_40000
 
 # Step 3: verify
 curl -sf http://127.0.0.1:40000/health && curl -sf http://127.0.0.1:40005/health
-curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
+curl -sf http://127.0.0.1:41001/health  # ms-gateway
+curl -s -X POST http://127.0.0.1:40005/v1/messages \
+  -H "x-api-key: sk-litellm-local" -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"glm5.1","messages":[{"role":"user","content":"test"}],"max_tokens":50,"stream":true}'
 ```
 
 ## History (condensed)
@@ -199,21 +143,9 @@ curl -sf http://127.0.0.1:40006/health  # hm-proxy (Hermes endpoint)
 - R36.5: MS-first + NV last-resort (NV alternating 纯负优化 → 56% throughput reduction)
 - R37: Hermes专用 NV proxy hm40006 + 5 NV HM LiteLLM (41101-41105, DATABASE_URL bug, not working)
 - R38: Hermes 重新工程化 — hm40006 路由到 LiteLLM 41101-41105 + per-key mihomo + STORE_MODEL_IN_DB=False + 清理 _hm suffix
-- R38.1: 清除冗余 ms_nv_41101-41105 monitoring 容器（5个，功能完全被 HM 容器覆盖），18→13容器
-- R38.2: HM 3-tier fallback — minimax removed, glm5.1_hm(primary)→kimi_hm→deepseek_hm, per-tier persistent RR counter, empty-200 detection, fallback从当前位置继续
-- R38.3: Model suffix _hm→_nv (NV vs MS distinction), Hermes default→glm5.1_nv, deepseek-v4-pro restored (verified via direct/US/SG proxy), sock.settimeout()读超时修复, RR counter migration _hm→_nv keys, backward compat _hm→_nv aliases
-- R38.4: Dual suffix convention: _hm_nv(Hermes+NV) / _hm_ms(Hermes+MS), _nv→_hm_nv in hm-proxy, _hm→_hm_ms in passthrough-proxy, RR counter migration nv_→hm_nv_, opc_uname disk cleanup (80GB Hermes JIT .so cache removed)
-- R38.5: throttle cycling豁免 + cooldown恢复 + K5代理修复 + NV per-key RPM
-- R38.6: 3 CRITICAL fixes — sock.settimeout BEFORE getresponse() (infinite read timeout bug), deepseek removed from HM fallback chain (NV API unreachable, all 30s timeout), tier timeout budget 90s, KEY_COOLDOWN 30→15, MIN_OUTBOUND 3.5→1.5
-- R38.7: deepseek RESTORED as tier 3 (nv_proxy_selector节点重选后3/5端口成功) + TIER_TIMEOUT_BUDGET_S 90→60s + LiteLLM timeout 60→35s (sync with hm-proxy UPSTREAM_TIMEOUT=45s) + nv_proxy_selector cron */15
-- R38.8: hm40006 Connection refused storm fix — depends_on service_healthy + conn-fast-break(2 consecutive errors→skip tier) + startup-retry(wait 5s retry once for transient restarts) + cc-proxy NV conn-fast-break
-- R38.8: mihomo nv-us-provider health-check url changed from gstatic→NV API /v1/models — root cause: gstatic alive nodes may be dead to NV API; NV API health-check detects dead nodes within 180s
-- R38.8: nv_proxy_selector.py rewritten to read mihomo API latency data (no self-testing) — execution <1s (was 30-60s), cron */3 (was */15)
-- R38.8: deepseek-v4-pro RESTORED as cc-proxy(40005) NV tier 3 fallback (tested OK: avg 1-3s, 100% success rate; R38.6 removed was deepseek-v4-flash, different model)
-- R38.9: hm40006 tier order changed — deepseek_hm_nv primary → kimi_hm_nv fallback → glm5.1_hm_nv tier 3 (目的：采集 deepseek 大上下文延迟数据)
-- R38.9: opc2_uname Hermes 完全复制远程部署 — hm40006 R38.9 3-tier + nv_hm_41101-41105 timeout=35s + mihomo nv-us-provider NV API health-check + Hermes v0.17.0 升级 + primary=40006(NV) + fallback=40003(MS)
-- R38.9: opc2_uname Hermes Dashboard WebUI 复刻 — systemd hermes-dashboard.service (0.0.0.0:9119, --insecure) + 全 API 验证通过 + WS JSONRPC session.create ✅ + Tailscale 外部可达
-- R38.10: deepseek NVCF pexec direct path — bypasses DEGRADING integrate API routing → SOCKS5 proxy → api.nvcf.nvidia.com/orion-deepseek-v4-pro (ACTIVE). kimi restored as primary. 9/9 deepseek tests succeed (avg 1.2-2.2s). HTTPS CONNECT tunnel failed (mihomo 400 Bad Request) → SOCKS5 works.
-- R38.11: Tier reorder — deepseek primary (NVCF pexec 100% success, avg 1.8s) → glm5.1 fallback 1 (~20s) → kimi last-resort (~4s). NVCF pexec no longer strips thinking_budget/reasoning_effort (endpoint accepts them, tested 200 OK).
-- R38.12: ALL models NVCF pexec — glm5.1 and kimi also bypass integrate API → direct SOCKS5 → NVCF ACTIVE functions. Per-model strip_params declaration (glm5.1 strips thinking_budget, deepseek/kimi pass all). LiteLLM 41101-41105 removed from active routing. hm40006 no longer depends_on LiteLLM containers. upstream.py from 836→~420 lines (deleted LiteLLM branch).
-- R38.13: LiteLLM NV HM containers (41101-41105) REMOVED — stopped, removed, config files deleted, log dirs cleaned, unused Docker images pruned. 13→10 containers. ~3GB RAM + ~4.26GB disk reclaimed.
+- R38.1-13: 见 CLAUDE.md + 旧 DEPLOY_STATUS
+- R38.14: HM tier reorder glm5.1 primary + budget enforcement per-attempt + misleading timeout log
+- R40: hm-proxy ring fallback + budget fix + DB persistence + error info enhancement
+- R41: hm-proxy DB poison-batch fix (残缺 _log_metrics dict → batch INSERT atomic fail → 整批 50 行丢失)
+- R42: NV-TIER-SKIP fix + deepseek primary reorder
+- R44: LiteLLM→ms-gateway (python:3.11-alpine) + HTTP/1.1 chunked streaming + stream.py null-safety
