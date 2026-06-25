@@ -557,11 +557,12 @@ def _try_nv_last_resort(handler, oai_body, mapped_model, request_id, metrics, t_
                                    f"all_429={tier_all_429} all_transient={tier_all_transient_429} "
                                    f"keys_tried={len(tier_cycle_attempts)}")
 
-        # If tier had non-429 failures (timeout/connection), skip remaining tiers
-        # — those issues are network-level, unlikely to improve with different models
-        if not tier_all_429:
-            _log("NV-TIER-SKIP", f"Tier {tier_idx+1} had non-429 failures → skipping remaining tiers")
-            break
+        # R42: REMOVED NV-TIER-SKIP — timeout is model-specific, not network-level.
+        # Data: deepseek-v4-pro works (22.6s, status=200) even when glm-5.1 times out.
+        # Different models have different inference latency; we MUST try all tiers
+        # to maximize rescue probability when MS all-429 triggers NV last-resort.
+        # Previous logic skipped remaining tiers on non-429 failure (timeout/conn_err),
+        # which was wrong — those failures are model-specific, not proxy/network-specific.
 
     # All tiers failed — return combined failure result
     result.success = False

@@ -240,14 +240,13 @@ services:
       NV_PROXY_URL: http://host.docker.internal:7894
       NV_PROXY_URL_MAP: '{"0":"http://host.docker.internal:7894","1":"http://host.docker.internal:7895","2":"http://host.docker.internal:7896","3":"http://host.docker.internal:7897","4":"http://host.docker.internal:7899"}'
       NV_MAX_CYCLE: "1200000"
-      # R38.6→R38.7: NV 2-tier fallback (glm5.1→kimi). deepseek REMOVED from NV fallback chain.
-      # Data evidence (06-23): deepseek-ai/deepseek-v4-flash 5/5 keys all 30s+ timeout on NV API.
-      # R38.8: deepseek-v4-pro RESTORED as tier 3 (tested OK, avg 1-3s, 100% success rate).
-      # R38.6 removed deepseek-v4-flash (zero success, 30s+ timeout) — different model name!
+      # R42: Tier reorder — deepseek first (verified fast, 1-3s, 100% rate).
+      # Previously glm-5.1 was Tier 1 but frequently timeouts (30s+ on NVCF),
+      # wasting budget before reaching working models. R42 also removed NV-TIER-SKIP
+      # so all tiers are tried regardless of failure type.
       # NV_TIER_TIMEOUT_BUDGET_S: total time budget for all NV tiers (R38.7).
-      # Prevents catastrophic cumulative timeouts: 5 keys × 30s × 3 tiers = 450s → now capped at 90s.
-      # Each tier gets a share of the remaining budget. Budget exhausted → ABORT immediately.
-      NV_FALLBACK_TIERS: '[["z-ai/glm-5.1","glm5.1_nv"],["moonshotai/kimi-k2.6","kimi_nv"],["deepseek-ai/deepseek-v4-pro","deepseek_nv"]]'
+      # R42: With deepseek Tier 1 (1-3s), budget 45s is generous for at least 1-2 tier attempts.
+      NV_FALLBACK_TIERS: '[["deepseek-ai/deepseek-v4-pro","deepseek_nv"],["moonshotai/kimi-k2.6","kimi_nv"],["z-ai/glm-5.1","glm5.1_nv"]]'
       NV_TIER_TIMEOUT_BUDGET_S: "45"  # R41-1: 90→45 — NV last-resort 24h data: 43 triggers, 8 success (18.6%), 37 fail at attempt 4 (~102s). Front keys timeout→NV unavailable, 45s=1key(30s)+1key(15s), saves ~55s/fail.
       LOG_DIR: /app/logs
       LOG_RETENTION_DAYS: "7"

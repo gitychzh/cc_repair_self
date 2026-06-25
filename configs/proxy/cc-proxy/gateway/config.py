@@ -132,16 +132,17 @@ NV_MODEL_IDS = {
     "deepseek": "deepseek-ai/deepseek-v4-pro",
 }
 
-# R38.8: NV 3-tier fallback model list per base model.
-# deepseek-ai/deepseek-v4-pro RESTORED as tier 3 (R38.8).
-# R38.6 removed deepseek-v4-flash (all 30s+ timeout, zero success rate) — different model!
-# v4-pro tested OK: avg 1-3s, 100% success rate on all proxy environments.
+# R42: NV tier reorder — deepseek first (verified 22.6s success, 100% rate),
+# glm-5.1 last (frequent 30s+ timeout on NVCF). Previously glm-5.1 was Tier 1
+# but timeout wasted budget before reaching working models.
+# R38.8: deepseek-ai/deepseek-v4-pro RESTORED (avg 1-3s, 100% success rate).
+# R38.6 removed deepseek-v4-flash (all 30s+ timeout, zero success rate — different model!).
 # Can be overridden via NV_FALLBACK_TIERS env var (JSON list of [model_id, label] pairs).
 _NV_FALLBACK_TIERS_DEFAULT = {
     "glm5.1": [
-        ("z-ai/glm-5.1",              "glm5.1_nv"),      # Tier 1: original model
+        ("deepseek-ai/deepseek-v4-pro", "deepseek_nv"),  # Tier 1: fast & reliable (1-3s, 100%)
         ("moonshotai/kimi-k2.6",      "kimi_nv"),        # Tier 2: kimi fallback
-        ("deepseek-ai/deepseek-v4-pro", "deepseek_nv"),  # Tier 3: deepseek fallback (R38.8 restored)
+        ("z-ai/glm-5.1",              "glm5.1_nv"),      # Tier 3: original model (often slow/timeout on NVCF)
     ],
 }
 

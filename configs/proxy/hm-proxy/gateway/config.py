@@ -79,9 +79,11 @@ for i in range(1, 6):
 if HM_NUM_KEYS < 5:
     print(f"[HM-CONFIG] WARN: only {HM_NUM_KEYS} NV keys configured (expected 5)", file=sys.stderr, flush=True)
 
-# ─── Three-tier fallback model chain (R38.14) ──────────────────────────────
-# R38.14: glm5.1 primary (best agent quality for Hermes) → deepseek fallback → kimi last-resort
-NV_MODEL_TIERS = ["glm5.1_hm_nv", "deepseek_hm_nv", "kimi_hm_nv"]
+# ─── Three-tier fallback model chain (R42: reordered) ──────────────────────────────
+# R42: deepseek primary (verified 22.6s success, 100% rate) → kimi fallback → glm5.1 last-resort
+# R38.14 had glm5.1 primary, but glm-5.1 frequently times out on NVCF (30s+).
+# Moving deepseek first maximizes rescue probability.
+NV_MODEL_TIERS = ["deepseek_hm_nv", "kimi_hm_nv", "glm5.1_hm_nv"]
 
 NV_MODEL_IDS = {
     "glm5.1_hm_nv": "z-ai/glm-5.1",
@@ -89,7 +91,7 @@ NV_MODEL_IDS = {
     "deepseek_hm_nv": "deepseek-ai/deepseek-v4-pro",
 }
 
-DEFAULT_NV_MODEL = "glm5.1_hm_nv"  # R38.14: glm5.1 primary (best agent quality for Hermes)
+DEFAULT_NV_MODEL = "deepseek_hm_nv"  # R42: deepseek primary (fast & reliable)
 
 # ─── Tier timeout budget ──────────────────────────────────────────────────
 TIER_TIMEOUT_BUDGET_S = float(os.environ.get("TIER_TIMEOUT_BUDGET_S", "60"))
