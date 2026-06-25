@@ -102,19 +102,24 @@ services:
       start_period: 30s
     logging: *logging
 
-  # ─── LiteLLM container (70 glm5.1 dep) ───
-  # R36.3: 2GiB memory limit — model cost map ~810MiB at runtime, needs headroom
+  # ─── R44: ms-gateway — lightweight Python gateway replacing LiteLLM ───
+  # Replaces litellm/litellm:v1.87.0 (1.5GB image, 70 dep config.yaml) with
+  # a ~50MB python:3.11-alpine image that directly calls ModelScope API.
+  # Function: receive model_name (e.g. glm5.1v3k5), resolve variant ID + key,
+  # forward to ModelScope via HTTPS. No routing/retries/cooldown — upstream
+  # proxies (cc-proxy etc.) handle all v×k cycling and error management.
+  # LiteLLM config.yaml kept in repo for rollback reference (not mounted).
   ms_uni41001:
-    image: litellm/litellm:v1.87.0
+    build:
+      context: ./proxy/ms-gateway
+      dockerfile: Dockerfile
     container_name: ms_uni41001
     restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 2048
-        hard: 65536
     environment:
-      LITELLM_MASTER_KEY: sk-litellm-local
-      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@cc_postgres:5432/litellm_glm51
+      LISTEN_PORT: "4000"
+      UPSTREAM_TIMEOUT: "300"
+      PROXY_TIMEOUT: "300"
+      GATEWAY_KEY: sk-litellm-local
       MS_BASEURL: https://api-inference.modelscope.cn/v1
       MS_KEY1: ms-bb4e5bee-ca0e-49be-8de3-2347a57752f5
       MS_KEY2: ms-b836c297-9cb3-45f7-86b3-a33e1b76f48f
@@ -123,34 +128,27 @@ services:
       MS_KEY5: ms-69d3fbc6-6938-4fb1-b403-dfa44a05fb0c
       MS_KEY6: ms-e392cb51-9637-4766-80aa-490a6044294c
       MS_KEY7: ms-20761627-ec32-497c-a11a-7ff580617f0b
-      <<: *proxy-env-ms
+      LOG_DIR: /app/logs
       TZ: Asia/Shanghai
-    <<: *resource-1c2g-host
+    <<: *resource-1c1g-host
     volumes:
-      - ./litellm-glm51/config.yaml:/app/config.yaml:ro
+      - ./logs/ms-gateway:/app/logs
       - /etc/localtime:/etc/localtime:ro
-      - ./logs/litellm-glm51:/app/logs
     ports:
       - 41001:4000
     networks:
       - cc-net
-    depends_on:
-      cc_postgres:
-        condition: service_healthy
+    # R44: No depends_on cc_postgres — ms-gateway doesn't use DB.
+    # LiteLLM needed DB for its router state; ms-gateway is pure passthrough.
     healthcheck:
       test:
         - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')" || exit 1
-      interval: 60s
-      timeout: 30s
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health')" || exit 1
+      interval: 30s
+      timeout: 5s
       retries: 3
-      start_period: 120s
+      start_period: 10s
     logging: *logging
-    command:
-      - --config
-      - /app/config.yaml
-      - --port
-      - "4000"
 
   # ─── 40001: FALLBACK CC proxy (pure MS, stable baseline) ───
   auth_to_api_40001:
