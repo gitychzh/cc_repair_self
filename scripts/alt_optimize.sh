@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # alt_optimize.sh — 交替优化守护（R43+ 新框架）
 #
+# ⚠️ DEPRECATED (2026-06-29): 与 hermes cron job "交替优化轮询" (job_id
+# c4d5fc445571, ~/.hermes/cron/jobs.json) 功能重复。hermes cron 调用
+# ~/.hermes/scripts/watch_and_next.sh 判定轮次 + hermes agent 执行优化, 已稳定
+# 运行 297+ 次; 本脚本(系统cron每5分钟唤起 claude -p)长期因第78行 { } 命令组
+# 缺分号致语法EOF从未执行。为消除重复调度+commit/push 冲突, 已注释系统 crontab
+# 中本脚本的行, 改由 hermes cron 单一负责。本文件保留留档(语法已修复, 作应急
+# 回退参考)。恢复方式: crontab -e 取消下行注释。
+#
 # 设计（用户 2026-06-25 重新定义）：
 #   - 身份以 IP 为准: cc1=100.109.153.83, cc2=100.109.57.26
 #   - 两机各跑此脚本（cron 每 5 分钟）
@@ -75,7 +83,7 @@ if [ "$LATEST_AUTHOR" = "$ME" ]; then
 fi
 
 # 最新是对方提交的 → 该我接手。先 pull 对方的工作到本地
-git pull --rebase --autostash >>"$LOG_FILE" 2>&1 || { log "WARN" "git pull failed, continue anyway" }
+git pull --rebase --autostash >>"$LOG_FILE" 2>&1 || { log "WARN" "git pull failed, continue anyway"; }
 
 # --- 确定下一轮版本号 ---
 # 从最新 commit subject 提取 R<number>，+1
